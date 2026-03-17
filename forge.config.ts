@@ -8,10 +8,38 @@ import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-nati
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
+const PACKAGED_INCLUDE_PREFIXES = ['/.vite', '/package.json'];
+const PACKAGED_RUNTIME_MODULES = ['/node_modules/node-pty', '/node_modules/node-addon-api'];
+
+const shouldIgnorePackagedFile = (file: string): boolean => {
+  if (!file) {
+    return false;
+  }
+
+  // Allow Vite output and package manifest.
+  if (PACKAGED_INCLUDE_PREFIXES.some((prefix) => file.startsWith(prefix))) {
+    return false;
+  }
+
+  // Allow parent directory so packager can traverse into selected runtime deps.
+  if (file === '/node_modules') {
+    return false;
+  }
+
+  // Keep package size small by allowing only native runtime modules we require.
+  if (PACKAGED_RUNTIME_MODULES.some((prefix) => file.startsWith(prefix))) {
+    return false;
+  }
+
+  return true;
+};
+
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     icon: 'assets/icons/zero-icon',
+    // Keep Vite's slim package output while including native runtime deps.
+    ignore: shouldIgnorePackagedFile,
   },
   rebuildConfig: {},
   makers: [
