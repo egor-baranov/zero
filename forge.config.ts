@@ -8,26 +8,18 @@ import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-nati
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
-const PACKAGED_INCLUDE_PREFIXES = ['/.vite', '/package.json'];
-const PACKAGED_RUNTIME_MODULES = ['/node_modules/node-pty', '/node_modules/node-addon-api'];
-
 const shouldIgnorePackagedFile = (file: string): boolean => {
   if (!file) {
     return false;
   }
 
-  // Allow Vite output and package manifest.
-  if (PACKAGED_INCLUDE_PREFIXES.some((prefix) => file.startsWith(prefix))) {
-    return false;
-  }
-
-  // Allow parent directory so packager can traverse into selected runtime deps.
-  if (file === '/node_modules') {
-    return false;
-  }
-
-  // Keep package size small by allowing only native runtime modules we require.
-  if (PACKAGED_RUNTIME_MODULES.some((prefix) => file.startsWith(prefix))) {
+  // Include Vite bundles, package metadata, and production dependencies.
+  // ACP adapters (including scoped packages) and native modules must be present at runtime.
+  if (
+    file.startsWith('/.vite') ||
+    file === '/package.json' ||
+    file.startsWith('/node_modules')
+  ) {
     return false;
   }
 
@@ -36,7 +28,10 @@ const shouldIgnorePackagedFile = (file: string): boolean => {
 
 const config: ForgeConfig = {
   packagerConfig: {
-    asar: true,
+    asar: {
+      // Codex ACP shells out to platform binaries; keep them outside app.asar.
+      unpackDir: '**/node_modules/@zed-industries',
+    },
     icon: 'assets/icons/zero-icon',
     // Keep Vite's slim package output while including native runtime deps.
     ignore: shouldIgnorePackagedFile,
@@ -77,7 +72,7 @@ const config: ForgeConfig = {
     // at package time, before code signing the application
     new FusesPlugin({
       version: FuseVersion.V1,
-      [FuseV1Options.RunAsNode]: false,
+      [FuseV1Options.RunAsNode]: true,
       [FuseV1Options.EnableCookieEncryption]: true,
       [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
       [FuseV1Options.EnableNodeCliInspectArguments]: false,

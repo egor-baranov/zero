@@ -2394,13 +2394,24 @@ export class AcpService {
         return launchConfig;
       }
 
+      const bundledCodexBinaryPath = this.resolveBundledCodexBinaryPath();
+      const bundledCodexLaunchConfig: AgentProcessLaunchConfig | null = bundledCodexBinaryPath
+        ? {
+            command: bundledCodexBinaryPath,
+            args: [],
+            cwd,
+            env: process.env,
+          }
+        : null;
+
       const launchConfig = this.withCodexChatGptDefaults(
         this.withAdapterThreadLimits(
-          this.resolveBundledAdapterLaunchConfig({
-            packageName: '@zed-industries/codex-acp',
-            binaryName: 'codex-acp',
-            cwd,
-          }),
+          bundledCodexLaunchConfig ??
+            this.resolveBundledAdapterLaunchConfig({
+              packageName: '@zed-industries/codex-acp',
+              binaryName: 'codex-acp',
+              cwd,
+            }),
         ),
       );
       await this.ensureCodexHomeExists(launchConfig.env);
@@ -2472,7 +2483,10 @@ export class AcpService {
         command: process.execPath,
         args: [bundledScriptPath],
         cwd,
-        env: process.env,
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: '1',
+        },
       };
     }
 
@@ -2482,6 +2496,68 @@ export class AcpService {
       cwd,
       env: process.env,
     };
+  }
+
+  private resolveBundledCodexBinaryPath(): string | null {
+    const packageName = this.resolveCodexPlatformPackageName();
+    if (!packageName) {
+      return null;
+    }
+
+    const binaryName = process.platform === 'win32' ? 'codex-acp.exe' : 'codex-acp';
+    const bundledBinaryPath = this.resolveBundledAdapterScriptPath(packageName, binaryName);
+    if (!bundledBinaryPath) {
+      return null;
+    }
+
+    const unpackedBinaryPath = this.toAsarUnpackedPath(bundledBinaryPath);
+    return (
+      this.resolveCommandAtAbsolutePath(unpackedBinaryPath) ??
+      this.resolveCommandAtAbsolutePath(bundledBinaryPath)
+    );
+  }
+
+  private resolveCodexPlatformPackageName(): string | null {
+    if (process.platform === 'darwin') {
+      if (process.arch === 'arm64') {
+        return '@zed-industries/codex-acp-darwin-arm64';
+      }
+      if (process.arch === 'x64') {
+        return '@zed-industries/codex-acp-darwin-x64';
+      }
+      return null;
+    }
+
+    if (process.platform === 'linux') {
+      if (process.arch === 'arm64') {
+        return '@zed-industries/codex-acp-linux-arm64';
+      }
+      if (process.arch === 'x64') {
+        return '@zed-industries/codex-acp-linux-x64';
+      }
+      return null;
+    }
+
+    if (process.platform === 'win32') {
+      if (process.arch === 'arm64') {
+        return '@zed-industries/codex-acp-win32-arm64';
+      }
+      if (process.arch === 'x64') {
+        return '@zed-industries/codex-acp-win32-x64';
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  private toAsarUnpackedPath(filePath: string): string {
+    const asarSegment = `${path.sep}app.asar${path.sep}`;
+    if (!filePath.includes(asarSegment)) {
+      return filePath;
+    }
+
+    return filePath.replace(asarSegment, `${path.sep}app.asar.unpacked${path.sep}`);
   }
 
   private resolveCommandOnPath(command: string): string | null {
