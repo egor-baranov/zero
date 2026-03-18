@@ -3,7 +3,7 @@
 Zero is a desktop AI coding workspace built with Electron + React + TypeScript.
 It combines chat-first workflows with ACP-based agent orchestration, workspace tools, and a modern desktop shell.
 
-Website: [zeroide.dev](https://zeroide.dev)
+Website: [zeroade.dev](https://zeroade.dev)
 
 ![Zero app screenshot](./docs/landing-screenshot.png)
 
