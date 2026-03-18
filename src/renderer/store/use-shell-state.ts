@@ -39,60 +39,24 @@ const DAY_MS = 24 * HOUR_MS;
 const WEEK_MS = 7 * DAY_MS;
 const MONTH_MS = 30 * DAY_MS;
 
-const now = Date.now();
-
-const SEED_STATE: ShellState = {
-  workspaces: [
-    {
-      id: 'workspace-zero-ade',
-      name: 'zero-ade',
-      path: '/workspace/zero-ade',
-      lastOpenedAt: now,
-    },
-    {
-      id: 'workspace-desktop-lab',
-      name: 'desktop-lab',
-      path: '/workspace/desktop-lab',
-      lastOpenedAt: now - 1000 * 60 * 47,
-    },
-  ],
-  threads: [
-    {
-      id: 'thread-shell-fidelity',
-      workspaceId: 'workspace-zero-ade',
-      title: 'Milestone 1 shell fidelity',
-      titleSource: 'manual',
-      preview: 'Match 1440x900 layout and native chrome',
-      updatedAtMs: now,
-    },
-    {
-      id: 'thread-spacing-pass',
-      workspaceId: 'workspace-zero-ade',
-      title: 'Sidebar spacing pass',
-      titleSource: 'manual',
-      preview: 'Tune list density and card rhythm',
-      updatedAtMs: now - 14 * MINUTE_MS,
-    },
-    {
-      id: 'thread-composer-motion',
-      workspaceId: 'workspace-desktop-lab',
-      title: 'Composer interaction notes',
-      titleSource: 'manual',
-      preview: 'Document hover and focus states',
-      updatedAtMs: now - HOUR_MS,
-    },
-    {
-      id: 'thread-toolbar-actions',
-      workspaceId: 'workspace-desktop-lab',
-      title: 'Toolbar action baseline',
-      titleSource: 'manual',
-      preview: 'Open and commit button parity',
-      updatedAtMs: now - DAY_MS,
-    },
-  ],
-  selectedThreadId: 'thread-shell-fidelity',
-  selectedWorkspaceId: 'workspace-zero-ade',
+const EMPTY_STATE: ShellState = {
+  workspaces: [],
+  threads: [],
+  selectedThreadId: '',
+  selectedWorkspaceId: '',
 };
+
+const LEGACY_DEMO_WORKSPACE_IDS = new Set([
+  'workspace-zero-ade',
+  'workspace-desktop-lab',
+]);
+
+const LEGACY_DEMO_THREAD_IDS = new Set([
+  'thread-shell-fidelity',
+  'thread-spacing-pass',
+  'thread-composer-motion',
+  'thread-toolbar-actions',
+]);
 
 const slugify = (value: string): string =>
   value
@@ -160,22 +124,6 @@ const parseLegacyUpdatedAtMs = (value: unknown): number => {
   return Date.now();
 };
 
-const createDefaultThread = (
-  workspaceId: string,
-  workspaceName: string,
-): ThreadRecord => {
-  const suffix = Date.now().toString(36);
-
-  return {
-    id: `thread-${slugify(workspaceName)}-${suffix}`,
-    workspaceId,
-    title: `${workspaceName} kickoff`,
-    titleSource: 'auto',
-    preview: 'Workspace added and ready for Milestone 2 wiring',
-    updatedAtMs: Date.now(),
-  };
-};
-
 const createNewChatThread = (
   workspaceName: string,
 ): ThreadRecord => {
@@ -232,10 +180,35 @@ const compareThreadsByRecentActivity = (left: ThreadRecord, right: ThreadRecord)
   return left.title.localeCompare(right.title);
 };
 
+const isLegacyDemoState = (state: ShellState): boolean => {
+  if (state.workspaces.length === 0 && state.threads.length === 0) {
+    return false;
+  }
+
+  const workspacesMatch =
+    state.workspaces.length > 0 &&
+    state.workspaces.every((workspace) => LEGACY_DEMO_WORKSPACE_IDS.has(workspace.id));
+  const threadsMatch =
+    state.threads.length > 0 &&
+    state.threads.every(
+      (thread) =>
+        LEGACY_DEMO_THREAD_IDS.has(thread.id) &&
+        LEGACY_DEMO_WORKSPACE_IDS.has(thread.workspaceId),
+    );
+  const selectedWorkspaceMatches =
+    !state.selectedWorkspaceId ||
+    LEGACY_DEMO_WORKSPACE_IDS.has(state.selectedWorkspaceId);
+  const selectedThreadMatches =
+    !state.selectedThreadId ||
+    LEGACY_DEMO_THREAD_IDS.has(state.selectedThreadId);
+
+  return workspacesMatch && threadsMatch && selectedWorkspaceMatches && selectedThreadMatches;
+};
+
 const parsePersistedState = (): ShellState => {
   const raw = window.localStorage.getItem(STORAGE_KEY);
   if (!raw) {
-    return SEED_STATE;
+    return EMPTY_STATE;
   }
 
   try {
@@ -248,7 +221,7 @@ const parsePersistedState = (): ShellState => {
       typeof parsed.selectedThreadId !== 'string' ||
       typeof parsed.selectedWorkspaceId !== 'string'
     ) {
-      return SEED_STATE;
+      return EMPTY_STATE;
     }
 
     const normalizedThreads = (parsed.threads as Array<
@@ -266,14 +239,20 @@ const parsePersistedState = (): ShellState => {
       updatedAtMs: parseLegacyUpdatedAtMs(thread.updatedAtMs ?? thread.updatedAt),
     }));
 
-    return {
+    const nextState: ShellState = {
       workspaces: parsed.workspaces as WorkspaceRecord[],
       threads: normalizedThreads,
       selectedThreadId: parsed.selectedThreadId,
       selectedWorkspaceId: parsed.selectedWorkspaceId,
     };
+
+    if (isLegacyDemoState(nextState)) {
+      return EMPTY_STATE;
+    }
+
+    return nextState;
   } catch {
-    return SEED_STATE;
+    return EMPTY_STATE;
   }
 };
 
@@ -703,12 +682,6 @@ export const useShellState = (): {
       const timestamp = Date.now();
 
       if (existing) {
-        let threads = previous.threads;
-
-        if (!threads.some((thread) => thread.workspaceId === existing.id)) {
-          threads = [...threads, createDefaultThread(existing.id, existing.name)];
-        }
-
         const refreshedWorkspace: WorkspaceRecord = {
           ...existing,
           lastOpenedAt: timestamp,
@@ -719,16 +692,16 @@ export const useShellState = (): {
           ...previous.workspaces.filter((workspace) => workspace.id !== existing.id),
         ]);
 
-        const selectedThread = threads.find(
+        const selectedThread = previous.threads.find(
           (thread) => thread.workspaceId === existing.id,
         );
 
         return {
           ...previous,
           workspaces,
-          threads,
+          threads: previous.threads,
           selectedWorkspaceId: existing.id,
-          selectedThreadId: selectedThread?.id ?? previous.selectedThreadId,
+          selectedThreadId: selectedThread?.id ?? '',
         };
       }
 
@@ -740,13 +713,11 @@ export const useShellState = (): {
         lastOpenedAt: timestamp,
       };
 
-      const starterThread = createDefaultThread(workspaceId, workspaceName);
-
       return {
         workspaces: getMostRecentWorkspaceOrder([workspace, ...previous.workspaces]),
-        threads: [starterThread, ...previous.threads],
+        threads: previous.threads,
         selectedWorkspaceId: workspaceId,
-        selectedThreadId: starterThread.id,
+        selectedThreadId: '',
       };
     });
   }, []);
@@ -774,8 +745,7 @@ export const useShellState = (): {
         threads: state.threads
           .filter((thread) => thread.workspaceId === workspace.id)
           .sort(compareThreadsByRecentActivity),
-      }))
-      .filter((group) => group.threads.length > 0);
+      }));
   }, [state.threads, state.workspaces]);
 
   const recentWorkspaces = React.useMemo(

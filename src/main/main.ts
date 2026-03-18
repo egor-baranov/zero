@@ -40,7 +40,7 @@ const resolveAppIconPath = (): string | null => {
 };
 
 const applyMacAppIcon = (): void => {
-  if (process.platform !== 'darwin' || !app.dock) {
+  if (process.platform !== 'darwin' || !app.dock || app.isPackaged) {
     return;
   }
 

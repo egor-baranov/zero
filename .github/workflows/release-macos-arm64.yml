@@ -32,6 +32,54 @@ jobs:
       - name: Build macOS arm64 package
         run: npm run make:mac:arm64
 
+      - name: Smoke test packaged app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH="$(find out -type d -path '*/Zero-darwin-arm64/Zero.app' | head -n 1)"
+          if [[ -z "${APP_PATH}" ]]; then
+            APP_PATH="$(find out -type d -name 'Zero.app' | head -n 1)"
+          fi
+          if [[ -z "${APP_PATH}" ]]; then
+            echo "Packaged Zero.app not found under out/." >&2
+            exit 1
+          fi
+
+          APP_BIN="${APP_PATH}/Contents/MacOS/Zero"
+          RESOURCES_DIR="${APP_PATH}/Contents/Resources"
+          CODEX_BIN="${RESOURCES_DIR}/app.asar.unpacked/node_modules/@zed-industries/codex-acp-darwin-arm64/bin/codex-acp"
+          CLAUDE_ENTRY="${RESOURCES_DIR}/app.asar.unpacked/node_modules/@zed-industries/claude-agent-acp/dist/index.js"
+          NODE_PTY_BIN="${RESOURCES_DIR}/app.asar.unpacked/node_modules/node-pty/build/Release/pty.node"
+
+          REQUIRED_PATHS=(
+            "${APP_BIN}"
+            "${RESOURCES_DIR}/app.asar"
+            "${CODEX_BIN}"
+            "${CLAUDE_ENTRY}"
+            "${NODE_PTY_BIN}"
+          )
+
+          for required_path in "${REQUIRED_PATHS[@]}"; do
+            if [[ ! -e "${required_path}" ]]; then
+              echo "Missing required runtime file: ${required_path}" >&2
+              exit 1
+            fi
+          done
+
+          if [[ ! -x "${APP_BIN}" ]]; then
+            echo "App binary is not executable: ${APP_BIN}" >&2
+            exit 1
+          fi
+          if [[ ! -x "${CODEX_BIN}" ]]; then
+            echo "Codex ACP binary is not executable: ${CODEX_BIN}" >&2
+            exit 1
+          fi
+
+          "${CODEX_BIN}" --help >/dev/null
+          ELECTRON_RUN_AS_NODE=1 "${APP_BIN}" -e "console.log('smoke-node-ok')" | grep -q "smoke-node-ok"
+          ELECTRON_RUN_AS_NODE=1 "${APP_BIN}" "${CLAUDE_ENTRY}" --help >/dev/null
+
       - name: Prepare release artifacts
         id: prepare
         shell: bash

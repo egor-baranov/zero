@@ -1095,7 +1095,7 @@ export class AcpService {
     },
     cwd: string,
   ): Promise<AgentProcessLaunchConfig> {
-    const launchCwd = config.cwd ?? cwd;
+    const launchCwd = this.resolveLaunchCwd(config.cwd ?? cwd);
     const rawCommand = config.command.trim();
     const trimmedCommand =
       rawCommand.startsWith('~/') || rawCommand.startsWith('~\\')
@@ -2399,7 +2399,7 @@ export class AcpService {
         ? {
             command: bundledCodexBinaryPath,
             args: [],
-            cwd,
+            cwd: this.resolveLaunchCwd(cwd),
             env: process.env,
           }
         : null;
@@ -2442,7 +2442,7 @@ export class AcpService {
     return {
       command: process.execPath,
       args: [agentScriptPath],
-      cwd,
+      cwd: this.resolveLaunchCwd(cwd),
       env: process.env,
     };
   }
@@ -2456,12 +2456,14 @@ export class AcpService {
     binaryName: string;
     cwd: string;
   }): AgentProcessLaunchConfig {
+    const launchCwd = this.resolveLaunchCwd(cwd);
+
     const onPathCommand = this.resolveCommandOnPath(binaryName);
     if (onPathCommand) {
       return {
         command: onPathCommand,
         args: [],
-        cwd,
+        cwd: launchCwd,
         env: process.env,
       };
     }
@@ -2471,7 +2473,7 @@ export class AcpService {
       return {
         command: loginShellCommand,
         args: [],
-        cwd,
+        cwd: launchCwd,
         env: process.env,
       };
     }
@@ -2482,7 +2484,7 @@ export class AcpService {
       return {
         command: process.execPath,
         args: [bundledScriptPath],
-        cwd,
+        cwd: launchCwd,
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: '1',
@@ -2493,9 +2495,31 @@ export class AcpService {
     return {
       command: binaryName,
       args: [],
-      cwd,
+      cwd: launchCwd,
       env: process.env,
     };
+  }
+
+  private resolveLaunchCwd(candidateCwd?: string): string {
+    const isDirectory = (target?: string): target is string => {
+      if (!target || target.trim().length === 0) {
+        return false;
+      }
+
+      try {
+        return statSync(target).isDirectory();
+      } catch {
+        return false;
+      }
+    };
+
+    if (isDirectory(candidateCwd)) {
+      return candidateCwd;
+    }
+
+    const fallbackCandidates = [process.cwd(), this.getSystemHomeDirectory(), os.homedir(), '/'];
+    const fallbackCwd = fallbackCandidates.find((entry) => isDirectory(entry));
+    return fallbackCwd ?? '/';
   }
 
   private resolveBundledCodexBinaryPath(): string | null {

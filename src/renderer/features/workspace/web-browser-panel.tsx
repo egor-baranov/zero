@@ -70,6 +70,7 @@ const WEB_PANEL_WIDTH_KEY = 'zeroade.webpanel.width';
 const WEB_PANEL_WIDTH_DEFAULT = 620;
 const WEB_PANEL_WIDTH_MIN = 440;
 const WEB_PANEL_WIDTH_MAX = 980;
+const GOOGLE_VOLATILE_HOME_QUERY_PARAMS = new Set(['zx', 'no_sw_cr']);
 const createTabId = (): string => `web-tab-${Date.now()}-${Math.random().toString(16).slice(2, 9)}`;
 
 const clampWidth = (value: number): number =>
@@ -126,6 +127,33 @@ const isExternalNavigation = (fromUrl: string, toUrl: string): boolean => {
   }
 };
 
+const isGoogleHomeUrl = (url: URL): boolean => {
+  const hostname = url.hostname.toLowerCase().replace(/^www\./, '');
+  const isGoogleDomain = hostname === 'google.com' || hostname.startsWith('google.');
+  if (!isGoogleDomain) {
+    return false;
+  }
+
+  return url.pathname === '/' || url.pathname === '';
+};
+
+const toStableNavigableUrl = (rawUrl: string): string => {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (!isGoogleHomeUrl(parsed)) {
+      return parsed.href;
+    }
+
+    for (const volatileParam of GOOGLE_VOLATILE_HOME_QUERY_PARAMS) {
+      parsed.searchParams.delete(volatileParam);
+    }
+
+    return parsed.href;
+  } catch {
+    return rawUrl.trim();
+  }
+};
+
 const toNavigableUrl = (rawValue: string): string => {
   const trimmed = rawValue.trim();
   if (!trimmed) {
@@ -133,18 +161,18 @@ const toNavigableUrl = (rawValue: string): string => {
   }
 
   if (/\s/.test(trimmed)) {
-    return searchUrl(trimmed);
+    return toStableNavigableUrl(searchUrl(trimmed));
   }
 
   if (/^https?:\/\//i.test(trimmed)) {
-    return trimmed;
+    return toStableNavigableUrl(trimmed);
   }
 
   if (/^[\w.-]+\.[a-z]{2,}(\/.*)?$/i.test(trimmed)) {
-    return `https://${trimmed}`;
+    return toStableNavigableUrl(`https://${trimmed}`);
   }
 
-  return searchUrl(trimmed);
+  return toStableNavigableUrl(searchUrl(trimmed));
 };
 
 const toSearchInputValue = (url: string): string => {
@@ -172,6 +200,21 @@ const toTabLabel = (url: string): string => {
     return parsed.hostname.replace(/^www\./i, '') || parsed.href;
   } catch {
     return 'New tab';
+  }
+};
+
+const isSameNavigableUrl = (left: string, right: string): boolean => {
+  const normalizedLeft = toStableNavigableUrl(left);
+  const normalizedRight = toStableNavigableUrl(right);
+
+  if (normalizedLeft === normalizedRight) {
+    return true;
+  }
+
+  try {
+    return new URL(normalizedLeft).href === new URL(normalizedRight).href;
+  } catch {
+    return false;
   }
 };
 
@@ -209,6 +252,16 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
     [activeTabId, tabs],
   );
   const currentUrl = activeTab?.url ?? DEFAULT_HOME_URL;
+  const activeTabIdRef = React.useRef(activeTabId);
+  const currentUrlRef = React.useRef(currentUrl);
+
+  React.useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
+
+  React.useEffect(() => {
+    currentUrlRef.current = currentUrl;
+  }, [currentUrl]);
 
   const isAbortedNavigationError = React.useCallback((error: unknown): boolean => {
     if (!error || typeof error !== 'object') {
@@ -236,6 +289,7 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
       label: toTabLabel(nextUrl),
     };
 
+    intendedNavigationUrlRef.current = nextUrl;
     shouldSelectAddressRef.current = false;
     setTabs((previous) => [...previous, nextTab]);
     setActiveTabId(nextTab.id);
@@ -314,19 +368,32 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
       }
 
       try {
-        const nextUrl = view.getURL() as string;
+        const nextUrl = toStableNavigableUrl(view.getURL() as string);
         if (nextUrl) {
           intendedNavigationUrlRef.current = null;
 
-          if (nextUrl === 'about:blank' && currentUrl !== 'about:blank') {
+          if (nextUrl === 'about:blank' && currentUrlRef.current !== 'about:blank') {
             return;
           }
 
-          setTabs((previous) =>
-            previous.map((tab) =>
-              tab.id === activeTabId ? { ...tab, url: nextUrl, label: toTabLabel(nextUrl) } : tab,
-            ),
-          );
+          const nextLabel = toTabLabel(nextUrl);
+          setTabs((previous) => {
+            let changed = false;
+            const nextTabs = previous.map((tab) => {
+              if (tab.id !== activeTabIdRef.current) {
+                return tab;
+              }
+
+              if (tab.url === nextUrl && tab.label === nextLabel) {
+                return tab;
+              }
+
+              changed = true;
+              return { ...tab, url: nextUrl, label: nextLabel };
+            });
+
+            return changed ? nextTabs : previous;
+          });
           setSearchValue(toSearchInputValue(nextUrl));
         }
         setCanGoBack(Boolean(view.canGoBack?.()));
@@ -369,7 +436,7 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
         return;
       }
 
-      if (!isExternalNavigation(currentUrl, targetUrl)) {
+      if (!isExternalNavigation(currentUrlRef.current, targetUrl)) {
         return;
       }
 
@@ -403,7 +470,7 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
       rawView.removeEventListener('new-window', handleNewWindow as EventListener);
       rawView.removeEventListener('will-navigate', handleWillNavigate as EventListener);
     };
-  }, [activeTabId, currentUrl, open, openUrlInNewTab]);
+  }, [openUrlInNewTab]);
 
   React.useEffect(() => {
     if (!open) {
@@ -415,7 +482,26 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
       return;
     }
 
+    const intendedUrl = intendedNavigationUrlRef.current?.trim() ?? '';
+    if (webviewReadyRef.current) {
+      if (!intendedUrl || !isSameNavigableUrl(intendedUrl, currentUrl)) {
+        return;
+      }
+    }
+
     let disposed = false;
+
+    try {
+      const currentViewUrl = toStableNavigableUrl(view.getURL());
+      if (currentViewUrl && isSameNavigableUrl(currentViewUrl, currentUrl)) {
+        intendedNavigationUrlRef.current = null;
+        setIsLoading(false);
+        return;
+      }
+    } catch {
+      // Continue to load the requested URL.
+    }
+
     setIsLoading(true);
     intendedNavigationUrlRef.current = currentUrl;
 
@@ -541,6 +627,7 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
       label: toTabLabel(DEFAULT_HOME_URL),
     };
 
+    intendedNavigationUrlRef.current = nextTab.url;
     shouldSelectAddressRef.current = false;
     setTabs((previous) => [...previous, nextTab]);
     setActiveTabId(nextTab.id);
@@ -556,6 +643,7 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
       return;
     }
 
+    intendedNavigationUrlRef.current = tab.url;
     shouldSelectAddressRef.current = false;
     setActiveTabId(tabId);
     setSearchValue(toSearchInputValue(tab.url));
@@ -584,6 +672,7 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
 
       if (activeTabId === tabId) {
         const fallbackTab = nextTabs[Math.max(0, closeIndex - 1)] ?? nextTabs[0];
+        intendedNavigationUrlRef.current = fallbackTab.url;
         setActiveTabId(fallbackTab.id);
         setSearchValue(toSearchInputValue(fallbackTab.url));
         setIsLoading(true);
@@ -1020,7 +1109,7 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
         <div className="relative min-h-0 flex-1 bg-white">
           <webview
             ref={webviewRef}
-            src={currentUrl}
+            src="about:blank"
             className="block h-full w-full"
             style={{ display: 'inline-flex' }}
           />

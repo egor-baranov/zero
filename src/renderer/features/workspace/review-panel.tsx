@@ -49,29 +49,28 @@ interface MonacoEnvironmentGlobal {
 
 const monacoGlobal = globalThis as typeof globalThis & MonacoEnvironmentGlobal;
 
-if (!monacoGlobal.MonacoEnvironment) {
-  monacoGlobal.MonacoEnvironment = {
-    getWorker: (_moduleId, label) => {
-      if (label === 'json') {
-        return new jsonWorker();
-      }
+monacoGlobal.MonacoEnvironment = {
+  ...(monacoGlobal.MonacoEnvironment ?? {}),
+  getWorker: (_moduleId, label) => {
+    if (label === 'json') {
+      return new jsonWorker();
+    }
 
-      if (label === 'css' || label === 'scss' || label === 'less') {
-        return new cssWorker();
-      }
+    if (label === 'css' || label === 'scss' || label === 'less') {
+      return new cssWorker();
+    }
 
-      if (label === 'html' || label === 'handlebars' || label === 'razor') {
-        return new htmlWorker();
-      }
+    if (label === 'html' || label === 'handlebars' || label === 'razor') {
+      return new htmlWorker();
+    }
 
-      if (label === 'typescript' || label === 'javascript') {
-        return new tsWorker();
-      }
+    if (label === 'typescript' || label === 'javascript') {
+      return new tsWorker();
+    }
 
-      return new editorWorker();
-    },
-  };
-}
+    return new editorWorker();
+  },
+};
 
 const getFileName = (filePath: string | null): string => {
   if (!filePath) {

@@ -29,8 +29,8 @@ const shouldIgnorePackagedFile = (file: string): boolean => {
 const config: ForgeConfig = {
   packagerConfig: {
     asar: {
-      // Codex ACP shells out to platform binaries; keep them outside app.asar.
-      unpackDir: '**/node_modules/@zed-industries',
+      // Keep runtime-executed binaries outside app.asar.
+      unpackDir: '{**/node_modules/@zed-industries,**/node_modules/node-pty}',
     },
     icon: 'assets/icons/zero-icon',
     // Keep Vite's slim package output while including native runtime deps.

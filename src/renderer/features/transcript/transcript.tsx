@@ -1247,7 +1247,9 @@ export const Transcript = ({
   const selectedProjectName =
     projects.find((project) => project.id === selectedProjectId)?.name ?? workspaceName;
 
-  if (isNewThread) {
+  const hasSelectedThread = threadId.trim().length > 0;
+
+  if (isNewThread || !hasSelectedThread) {
     return (
       <NewThreadLanding
         workspaceName={selectedProjectName}
