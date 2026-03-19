@@ -1109,7 +1109,7 @@ export const Shell = (): JSX.Element => {
 
   const updateButtonLabel = React.useMemo(() => {
     if (!updaterState) {
-      return 'Update';
+      return 'Check updates';
     }
 
     if (updaterState.status === 'available') {
@@ -1133,23 +1133,24 @@ export const Shell = (): JSX.Element => {
       return 'Restart to update';
     }
 
-    return 'Update';
+    return 'Check updates';
   }, [updaterState]);
 
-  const shouldShowUpdateButton =
-    updaterState?.status === 'available' ||
-    updaterState?.status === 'downloading' ||
-    updaterState?.status === 'downloaded';
+  const shouldShowUpdateButton = Boolean(
+    updaterState?.isPackaged && updaterState?.isConfigured,
+  );
 
-  const isUpdateButtonDisabled = updaterState?.status !== 'downloaded';
+  const isUpdateButtonDisabled =
+    updaterState?.status === 'checking' ||
+    updaterState?.status === 'available' ||
+    updaterState?.status === 'downloading';
 
   const handleUpdateAction = React.useCallback(async () => {
-    if (updaterState?.status !== 'downloaded') {
-      return;
-    }
-
     try {
-      const result = await window.desktop.updaterInstallDownloadedUpdate();
+      const result =
+        updaterState?.status === 'downloaded'
+          ? await window.desktop.updaterInstallDownloadedUpdate()
+          : await window.desktop.updaterCheckForUpdates();
 
       setStatusText(result.message);
       if (!result.ok) {
