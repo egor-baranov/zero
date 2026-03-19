@@ -1120,11 +1120,19 @@ export const Shell = (): JSX.Element => {
 
   const handleUpdateAction = React.useCallback(async () => {
     setIsUpdateActionPending(true);
+    const isInstallAction = updaterState?.status === 'downloaded';
+    if (!isInstallAction) {
+      setStatusText('Checking for updates…');
+    }
+
     try {
-      const result =
-        updaterState?.status === 'downloaded'
-          ? await window.desktop.updaterInstallDownloadedUpdate()
-          : await window.desktop.updaterCheckForUpdates();
+      const actionPromise = isInstallAction
+        ? window.desktop.updaterInstallDownloadedUpdate()
+        : window.desktop.updaterCheckForUpdates();
+      const minimumSpinnerDelayPromise = new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 450);
+      });
+      const [result] = await Promise.all([actionPromise, minimumSpinnerDelayPromise]);
 
       setStatusText(result.message);
       if (!result.ok) {
@@ -1137,7 +1145,13 @@ export const Shell = (): JSX.Element => {
     } finally {
       setIsUpdateActionPending(false);
     }
-  }, [pushErrorToast, updaterState?.status]);
+  }, [pushErrorToast, setStatusText, updaterState?.status]);
+
+  const isUpdateIconSpinning =
+    isUpdateActionPending ||
+    updaterState?.status === 'checking' ||
+    updaterState?.status === 'available' ||
+    updaterState?.status === 'downloading';
 
   const isUpdateIconSpinning =
     isUpdateActionPending ||
