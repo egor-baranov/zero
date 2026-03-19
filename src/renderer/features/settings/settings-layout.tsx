@@ -4,7 +4,6 @@ import {
   CircleDashed,
   ChevronDown,
   Check,
-  Cog,
   GitBranch,
   Palette,
   Plug,
@@ -48,6 +47,41 @@ interface AccentOption {
   swatch: string;
 }
 
+interface TogglePreferences {
+  preventSleepWhileRunning: boolean;
+  requireMetaEnterForLongPrompts: boolean;
+  useOpaqueWindowBackground: boolean;
+  usePointerCursors: boolean;
+}
+
+const TOGGLE_PREFERENCES_STORAGE_KEY = 'zeroade.settings.toggles.v1';
+
+const DEFAULT_TOGGLE_PREFERENCES: TogglePreferences = {
+  preventSleepWhileRunning: false,
+  requireMetaEnterForLongPrompts: false,
+  useOpaqueWindowBackground: false,
+  usePointerCursors: false,
+};
+
+const readTogglePreferences = (): TogglePreferences => {
+  const raw = window.localStorage.getItem(TOGGLE_PREFERENCES_STORAGE_KEY);
+  if (!raw) {
+    return DEFAULT_TOGGLE_PREFERENCES;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<TogglePreferences>;
+    return {
+      preventSleepWhileRunning: parsed.preventSleepWhileRunning === true,
+      requireMetaEnterForLongPrompts: parsed.requireMetaEnterForLongPrompts === true,
+      useOpaqueWindowBackground: parsed.useOpaqueWindowBackground === true,
+      usePointerCursors: parsed.usePointerCursors === true,
+    };
+  } catch {
+    return DEFAULT_TOGGLE_PREFERENCES;
+  }
+};
+
 const accentOptions: AccentOption[] = [
   { value: 'default', label: 'Default', swatch: '#a8a29e' },
   { value: 'orange', label: 'Orange', swatch: '#f97316' },
@@ -68,6 +102,9 @@ export const SettingsLayout = ({
 }: SettingsLayoutProps): JSX.Element => {
   const [activeSection, setActiveSection] = React.useState(sections[0].id);
   const [uiPreferences, setUiPreferences] = React.useState<UiPreferences>(() => readUiPreferences());
+  const [togglePreferences, setTogglePreferences] = React.useState<TogglePreferences>(() =>
+    readTogglePreferences(),
+  );
 
   React.useEffect(() => {
     writeThemePreference(uiPreferences.theme);
@@ -89,6 +126,13 @@ export const SettingsLayout = ({
     };
   }, [uiPreferences]);
 
+  React.useEffect(() => {
+    window.localStorage.setItem(
+      TOGGLE_PREFERENCES_STORAGE_KEY,
+      JSON.stringify(togglePreferences),
+    );
+  }, [togglePreferences]);
+
   return (
     <section className="flex h-full min-w-0 bg-transparent">
       <aside
@@ -98,7 +142,7 @@ export const SettingsLayout = ({
           !isResizing && 'transition-[width] duration-200 ease-out',
         )}
       >
-        <div className="flex h-full flex-col bg-[#fdfdff]">
+        <div className="flex h-full flex-col bg-[rgba(249,250,252,0.26)] backdrop-blur-[30px] backdrop-saturate-150">
           <div className="px-3 pt-2.5">
             <button
               type="button"
@@ -176,12 +220,32 @@ export const SettingsLayout = ({
             <SettingRow
               title="Prevent sleep while running"
               description="Keep your computer awake while Zero is running a thread."
-              control={<ToggleStub enabled={false} />}
+              control={
+                <ToggleButton
+                  enabled={togglePreferences.preventSleepWhileRunning}
+                  onToggle={() => {
+                    setTogglePreferences((previous) => ({
+                      ...previous,
+                      preventSleepWhileRunning: !previous.preventSleepWhileRunning,
+                    }));
+                  }}
+                />
+              }
             />
             <SettingRow
               title="Require ⌘ + enter to send long prompts"
               description="When enabled, multiline prompts require ⌘ + enter to send."
-              control={<ToggleStub enabled={false} />}
+              control={
+                <ToggleButton
+                  enabled={togglePreferences.requireMetaEnterForLongPrompts}
+                  onToggle={() => {
+                    setTogglePreferences((previous) => ({
+                      ...previous,
+                      requireMetaEnterForLongPrompts: !previous.requireMetaEnterForLongPrompts,
+                    }));
+                  }}
+                />
+              }
             />
           </div>
 
@@ -246,22 +310,33 @@ export const SettingsLayout = ({
             <SettingRow
               title="Use opaque window background"
               description="Make windows use a solid background rather than system translucency."
-              control={<ToggleStub enabled={false} />}
+              control={
+                <ToggleButton
+                  enabled={togglePreferences.useOpaqueWindowBackground}
+                  onToggle={() => {
+                    setTogglePreferences((previous) => ({
+                      ...previous,
+                      useOpaqueWindowBackground: !previous.useOpaqueWindowBackground,
+                    }));
+                  }}
+                />
+              }
             />
             <SettingRow
               title="Use pointer cursors"
               description="Change the cursor to a pointer when hovering over interactive elements."
-              control={<ToggleStub enabled={false} />}
+              control={
+                <ToggleButton
+                  enabled={togglePreferences.usePointerCursors}
+                  onToggle={() => {
+                    setTogglePreferences((previous) => ({
+                      ...previous,
+                      usePointerCursors: !previous.usePointerCursors,
+                    }));
+                  }}
+                />
+              }
             />
-          </div>
-
-          <div className="mt-4 rounded-2xl border border-stone-200/80 bg-white p-3">
-            <div className="flex items-center gap-2 text-[13px] text-stone-600">
-              <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-stone-100 text-stone-500">
-                <Cog className="h-4 w-4" />
-              </span>
-              Theme and accent preferences are saved locally and apply across the app.
-            </div>
           </div>
         </div>
       </div>
@@ -370,8 +445,17 @@ const AccentColorSelect = ({ value, onSelect }: AccentColorSelectProps): JSX.Ele
   );
 };
 
-const ToggleStub = ({ enabled }: { enabled: boolean }): JSX.Element => (
-  <span
+interface ToggleButtonProps {
+  enabled: boolean;
+  onToggle: () => void;
+}
+
+const ToggleButton = ({ enabled, onToggle }: ToggleButtonProps): JSX.Element => (
+  <button
+    type="button"
+    aria-pressed={enabled}
+    aria-label={enabled ? 'Disable setting' : 'Enable setting'}
+    onClick={onToggle}
     className={cn(
       'inline-flex h-6 w-10 items-center rounded-full p-0.5 transition-colors',
       enabled ? 'bg-stone-700' : 'bg-stone-200',
@@ -383,5 +467,5 @@ const ToggleStub = ({ enabled }: { enabled: boolean }): JSX.Element => (
         enabled ? 'translate-x-4' : 'translate-x-0',
       )}
     />
-  </span>
+  </button>
 );
