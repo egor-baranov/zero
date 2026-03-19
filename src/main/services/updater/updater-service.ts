@@ -73,6 +73,15 @@ const toErrorMessage = (error: unknown): string => {
   return String(error);
 };
 
+const isNoUpdatePublishedError = (message: string): boolean => {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('no published versions on github') ||
+    normalized.includes('unable to find latest version on github') ||
+    normalized.includes('ensure a production release exists')
+  );
+};
+
 type UpdaterListener = (event: UpdaterRendererEvent) => void;
 
 export class UpdaterService {
@@ -142,6 +151,9 @@ export class UpdaterService {
     }
 
     this.isConfigured = true;
+    // We publish CI builds from `main` as prereleases (`main-latest`),
+    // so updater checks must include prereleases as candidates.
+    autoUpdater.allowPrerelease = true;
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
     autoUpdater.setFeedURL({
@@ -222,6 +234,21 @@ export class UpdaterService {
       };
     } catch (error) {
       const message = toErrorMessage(error);
+
+      if (isNoUpdatePublishedError(message)) {
+        const notAvailableMessage = 'No new updates are available.';
+        this.updateState({
+          status: 'not-available',
+          message: notAvailableMessage,
+        });
+
+        return {
+          ok: true,
+          message: notAvailableMessage,
+          state: this.state,
+        };
+      }
+
       this.updateState({
         status: 'error',
         message: `Update check failed: ${message}`,
