@@ -1153,12 +1153,6 @@ export const Shell = (): JSX.Element => {
     updaterState?.status === 'available' ||
     updaterState?.status === 'downloading';
 
-  const isUpdateIconSpinning =
-    isUpdateActionPending ||
-    updaterState?.status === 'checking' ||
-    updaterState?.status === 'available' ||
-    updaterState?.status === 'downloading';
-
   const startReviewPanelResizing = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>) => {
       event.preventDefault();
