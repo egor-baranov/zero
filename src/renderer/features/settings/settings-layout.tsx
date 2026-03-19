@@ -98,7 +98,7 @@ export const SettingsLayout = ({
           !isResizing && 'transition-[width] duration-200 ease-out',
         )}
       >
-        <div className="flex h-full flex-col bg-[#fdfdff]">
+        <div className="flex h-full flex-col bg-[rgba(249,250,252,0.26)] backdrop-blur-[30px] backdrop-saturate-150">
           <div className="px-3 pt-2.5">
             <button
               type="button"
