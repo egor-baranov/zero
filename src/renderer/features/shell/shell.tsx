@@ -2499,8 +2499,8 @@ export const Shell = (): JSX.Element => {
                     <button
                       type="button"
                       className={cn(
-                        'no-drag inline-flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-semibold transition-colors',
-                        'bg-blue-500 text-white hover:bg-blue-600',
+                        'no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors',
+                        'hover:bg-stone-200/55 hover:text-stone-700',
                         'disabled:cursor-not-allowed disabled:opacity-65',
                       )}
                       onClick={() => {
