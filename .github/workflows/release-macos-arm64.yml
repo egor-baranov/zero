@@ -142,8 +142,29 @@ jobs:
             DMG_PATH="$(find out/make -type f -path '*/dmg/*.dmg' | head -n 1)"
           fi
           if [[ -z "${DMG_PATH}" ]]; then
-            echo "No macOS arm64 dmg artifact found under out/make." >&2
-            exit 1
+            echo "No macOS arm64 dmg artifact found under out/make; creating fallback DMG from packaged app."
+
+            APP_PATH="$(find out -type d -path '*/Zero-darwin-arm64/Zero.app' | head -n 1)"
+            if [[ -z "${APP_PATH}" ]]; then
+              APP_PATH="$(find out -type d -name 'Zero.app' | head -n 1)"
+            fi
+            if [[ -z "${APP_PATH}" ]]; then
+              echo "Packaged Zero.app not found under out/ for fallback DMG creation." >&2
+              exit 1
+            fi
+
+            FALLBACK_DMG_DIR="out/make/dmg-fallback"
+            FALLBACK_DMG_PATH="${FALLBACK_DMG_DIR}/Zero-darwin-arm64.dmg"
+            mkdir -p "${FALLBACK_DMG_DIR}"
+
+            hdiutil create \
+              -volname "Zero" \
+              -srcfolder "${APP_PATH}" \
+              -ov \
+              -format UDZO \
+              "${FALLBACK_DMG_PATH}"
+
+            DMG_PATH="${FALLBACK_DMG_PATH}"
           fi
 
           RELEASE_DIR="out/release-assets"
