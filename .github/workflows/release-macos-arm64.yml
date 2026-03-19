@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          NEXT_VERSION="$(node -e 'const fs=require("fs"); const pkg=JSON.parse(fs.readFileSync("./package.json","utf8")); const m=String(pkg.version||"").match(/^(\\d+)\\.(\\d+)\\.(\\d+)(?:-.+)?$/); if(!m){throw new Error("Unsupported package.json version: "+pkg.version);} const major=Number(m[1]); const minor=Number(m[2]); const patch=Number(m[3])+1; process.stdout.write(`${major}.${minor}.${patch}-main.${process.env.GITHUB_RUN_NUMBER}`);')"
+          NEXT_VERSION="$(node -e 'const fs=require("fs"); const pkg=JSON.parse(fs.readFileSync("./package.json","utf8")); const m=String(pkg.version||"").match(/^(\d+)\.(\d+)\.(\d+)(?:-.+)?$/); if(!m){throw new Error("Unsupported package.json version: "+pkg.version);} const major=Number(m[1]); const minor=Number(m[2]); const patch=Number(m[3])+1; process.stdout.write(`${major}.${minor}.${patch}-main.${process.env.GITHUB_RUN_NUMBER}`);')"
           npm version "${NEXT_VERSION}" --no-git-tag-version
           echo "Using main prerelease version: ${NEXT_VERSION}"
 
