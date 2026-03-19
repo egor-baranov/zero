@@ -9,6 +9,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  RefreshCw,
 } from 'lucide-react';
 import { Sidebar } from '@renderer/features/sidebar/sidebar';
 import { Composer, type AgentPresetSelection } from '@renderer/features/composer/composer';
@@ -638,6 +639,7 @@ export const Shell = (): JSX.Element => {
   >({});
   const [toasts, setToasts] = React.useState<ShellToast[]>([]);
   const [updaterState, setUpdaterState] = React.useState<UpdaterState | null>(null);
+  const [isUpdateActionPending, setIsUpdateActionPending] = React.useState(false);
   const [isAgentAuthRequired, setIsAgentAuthRequired] = React.useState(false);
   const [isAgentAuthLaunching, setIsAgentAuthLaunching] = React.useState(false);
   const [agentAuthMessage, setAgentAuthMessage] = React.useState<string | null>(null);
@@ -1107,49 +1109,22 @@ export const Shell = (): JSX.Element => {
   }, [connectingStatusMessage, connectionState]);
   const isComposerDisabled = connectionState === 'connecting';
 
-  const updateButtonLabel = React.useMemo(() => {
-    if (!updaterState) {
-      return 'Update';
-    }
+  const shouldShowUpdateButton = Boolean(
+    updaterState?.isPackaged && updaterState?.isConfigured,
+  );
 
-    if (updaterState.status === 'available') {
-      return 'Downloading…';
-    }
-
-    if (updaterState.status === 'checking') {
-      return 'Checking…';
-    }
-
-    if (updaterState.status === 'downloading') {
-      const percent = updaterState.downloadProgressPercent;
-      if (typeof percent === 'number' && Number.isFinite(percent)) {
-        return `Downloading ${Math.round(percent)}%`;
-      }
-
-      return 'Downloading…';
-    }
-
-    if (updaterState.status === 'downloaded') {
-      return 'Restart to update';
-    }
-
-    return 'Update';
-  }, [updaterState]);
-
-  const shouldShowUpdateButton =
+  const isUpdateButtonDisabled =
+    updaterState?.status === 'checking' ||
     updaterState?.status === 'available' ||
-    updaterState?.status === 'downloading' ||
-    updaterState?.status === 'downloaded';
-
-  const isUpdateButtonDisabled = updaterState?.status !== 'downloaded';
+    updaterState?.status === 'downloading';
 
   const handleUpdateAction = React.useCallback(async () => {
-    if (updaterState?.status !== 'downloaded') {
-      return;
-    }
-
+    setIsUpdateActionPending(true);
     try {
-      const result = await window.desktop.updaterInstallDownloadedUpdate();
+      const result =
+        updaterState?.status === 'downloaded'
+          ? await window.desktop.updaterInstallDownloadedUpdate()
+          : await window.desktop.updaterCheckForUpdates();
 
       setStatusText(result.message);
       if (!result.ok) {
@@ -1159,8 +1134,16 @@ export const Shell = (): JSX.Element => {
       const fallbackMessage = 'Update action failed.';
       setStatusText(fallbackMessage);
       pushErrorToast('Update', fallbackMessage);
+    } finally {
+      setIsUpdateActionPending(false);
     }
   }, [pushErrorToast, updaterState?.status]);
+
+  const isUpdateIconSpinning =
+    isUpdateActionPending ||
+    updaterState?.status === 'checking' ||
+    updaterState?.status === 'available' ||
+    updaterState?.status === 'downloading';
 
   const startReviewPanelResizing = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>) => {
@@ -2508,7 +2491,7 @@ export const Shell = (): JSX.Element => {
                     <button
                       type="button"
                       className={cn(
-                        'no-drag inline-flex h-6 items-center rounded-full px-2.5 text-[11px] font-semibold transition-colors',
+                        'no-drag inline-flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-semibold transition-colors',
                         'bg-blue-500 text-white hover:bg-blue-600',
                         'disabled:cursor-not-allowed disabled:opacity-65',
                       )}
@@ -2518,7 +2501,9 @@ export const Shell = (): JSX.Element => {
                       disabled={isUpdateButtonDisabled}
                       title={updaterState?.message || 'Update available'}
                     >
-                      {updateButtonLabel}
+                      <RefreshCw
+                        className={cn('h-3.5 w-3.5', isUpdateIconSpinning && 'animate-spin')}
+                      />
                     </button>
                   ) : null}
                 </div>
