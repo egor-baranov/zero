@@ -207,8 +207,8 @@ jobs:
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.prepare.outputs.version) }}
           name: ${{ startsWith(github.ref, 'refs/tags/v') && format('Release {0}', github.ref_name) || format('Main build v{0}', steps.prepare.outputs.version) }}
-          prerelease: ${{ github.ref == 'refs/heads/main' }}
-          make_latest: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
+          prerelease: false
+          make_latest: true
           generate_release_notes: true
           fail_on_unmatched_files: true
           target_commitish: ${{ github.sha }}
