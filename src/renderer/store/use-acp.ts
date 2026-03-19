@@ -954,8 +954,17 @@ export const useAcp = (): UseAcpResult => {
   const threadSessionMapRef = React.useRef<ThreadSessionMap>(threadSessionMap);
   const threadAttachmentHistoryMapRef =
     React.useRef<ThreadAttachmentHistoryMap>(threadAttachmentHistoryMap);
+  const activeSessionIdRef = React.useRef<string | null>(activeSessionId);
   const attachmentReplayCursorBySessionIdRef =
     React.useRef<Record<string, number>>({});
+
+  const setActiveSessionIdSafely = React.useCallback(
+    (nextSessionId: string | null): void => {
+      activeSessionIdRef.current = nextSessionId;
+      setActiveSessionId(nextSessionId);
+    },
+    [],
+  );
 
   React.useEffect(() => {
     window.localStorage.setItem(
@@ -978,6 +987,10 @@ export const useAcp = (): UseAcpResult => {
   React.useEffect(() => {
     threadAttachmentHistoryMapRef.current = threadAttachmentHistoryMap;
   }, [threadAttachmentHistoryMap]);
+
+  React.useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   React.useEffect(() => {
     window.localStorage.setItem(AGENT_PRESET_KEY, agentPreset);
@@ -1156,13 +1169,13 @@ export const useAcp = (): UseAcpResult => {
     setConnectionMessage(null);
     setLoadSessionSupported(false);
     setAgentName('ACP Agent');
-    setActiveSessionId(null);
+    setActiveSessionIdSafely(null);
     setPendingPermissions([]);
     setSessionTitleBySessionId({});
     setSessionUpdatedAtBySessionId({});
     setSessionControlsBySessionId({});
     hydratedSessionIdsRef.current.clear();
-  }, []);
+  }, [setActiveSessionIdSafely]);
 
   const setAgentPreset = React.useCallback(
     (preset: AcpAgentPreset, options?: { resetThreadId?: string }) => {
@@ -1274,18 +1287,26 @@ export const useAcp = (): UseAcpResult => {
           setLoadSessionSupported(result.loadSessionSupported);
           loadSessionSupportedRef.current = result.loadSessionSupported;
           setConnectionState(result.connected ? 'ready' : 'error');
-          setConnectionMessage(
-            result.connected
-              ? null
-              : 'ACP initialize failed. Check adapter auth/configuration.',
-          );
+          if (result.connected) {
+            setConnectionMessage(null);
+          } else {
+            setConnectionMessage(
+              (previous) =>
+                previous ??
+                'ACP initialize failed. Check adapter auth/configuration.',
+            );
+          }
           isInitializedRef.current = result.connected;
           if (!result.connected) {
             initializePromiseRef.current = null;
           }
         } catch {
           setConnectionState('error');
-          setConnectionMessage('ACP initialize failed. Check adapter auth/configuration.');
+          setConnectionMessage(
+            (previous) =>
+              previous ??
+              'ACP initialize failed. Check adapter auth/configuration.',
+          );
           setLoadSessionSupported(false);
           loadSessionSupportedRef.current = false;
           isInitializedRef.current = false;
@@ -1318,17 +1339,69 @@ export const useAcp = (): UseAcpResult => {
 
   const ensureSessionForThread = React.useCallback(
     async (threadId: string, cwd: string): Promise<void> => {
-      const initialized = await initialize(cwd);
+      const normalizedThreadId = threadId.trim();
+      const normalizedCwd = cwd.trim();
+      const initialized = await initialize(normalizedCwd);
       if (!initialized) {
+        return;
+      }
+      if (!normalizedCwd) {
         return;
       }
       const loadSupported = loadSessionSupportedRef.current;
 
-      const existingSessionId = threadSessionMap[threadId];
+      if (!normalizedThreadId) {
+        if (activeSessionIdRef.current) {
+          ensureTimelineExists(activeSessionIdRef.current);
+          return;
+        }
+
+        let created: AcpSessionNewResult;
+        try {
+          created = await window.desktop.acpSessionNew({ cwd: normalizedCwd });
+        } catch (error) {
+          if (isAuthenticationRequiredError(error)) {
+            throw error instanceof Error ? error : new Error(toErrorMessage(error));
+          }
+          setConnectionState('error');
+          setConnectionMessage('Failed to create ACP session.');
+          throw error instanceof Error ? error : new Error('Failed to create ACP session.');
+        }
+
+        hydratedSessionIdsRef.current.add(created.sessionId);
+        recencyEligibleSessionIdsRef.current.delete(created.sessionId);
+        if (created.controls) {
+          setSessionControlsBySessionId((previous) => ({
+            ...previous,
+            [created.sessionId]: created.controls,
+          }));
+        } else if (loadSupported) {
+          try {
+            const loaded = await window.desktop.acpSessionLoad({
+              sessionId: created.sessionId,
+              cwd: normalizedCwd,
+            });
+
+            if (loaded.loaded && loaded.controls) {
+              setSessionControlsBySessionId((previous) => ({
+                ...previous,
+                [created.sessionId]: loaded.controls,
+              }));
+            }
+          } catch {
+            // Controls can still arrive later via ACP session updates.
+          }
+        }
+        setActiveSessionIdSafely(created.sessionId);
+        ensureTimelineExists(created.sessionId);
+        return;
+      }
+
+      const existingSessionId = threadSessionMap[normalizedThreadId];
       if (existingSessionId) {
         if (loadSupported) {
           if (hydratedSessionIdsRef.current.has(existingSessionId)) {
-            setActiveSessionId(existingSessionId);
+            setActiveSessionIdSafely(existingSessionId);
             ensureTimelineExists(existingSessionId);
             return;
           }
@@ -1341,7 +1414,7 @@ export const useAcp = (): UseAcpResult => {
               Date.now() + SUPPRESS_UPDATED_AT_AFTER_LOAD_MS;
             const result = await window.desktop.acpSessionLoad({
               sessionId: existingSessionId,
-              cwd,
+              cwd: normalizedCwd,
             });
 
             if (result.loaded) {
@@ -1352,7 +1425,7 @@ export const useAcp = (): UseAcpResult => {
                   [existingSessionId]: result.controls,
                 }));
               }
-              setActiveSessionId(existingSessionId);
+              setActiveSessionIdSafely(existingSessionId);
               ensureTimelineExists(existingSessionId);
               return;
             }
@@ -1367,25 +1440,25 @@ export const useAcp = (): UseAcpResult => {
           }
 
           setThreadSessionMap((previous) => {
-            if (previous[threadId] !== existingSessionId) {
+            if (previous[normalizedThreadId] !== existingSessionId) {
               return previous;
             }
 
             const next = { ...previous };
-            delete next[threadId];
+            delete next[normalizedThreadId];
             threadSessionMapRef.current = next;
             return next;
           });
           hydratedSessionIdsRef.current.delete(existingSessionId);
           recencyEligibleSessionIdsRef.current.delete(existingSessionId);
         } else {
-          setActiveSessionId(existingSessionId);
+          setActiveSessionIdSafely(existingSessionId);
           ensureTimelineExists(existingSessionId);
           return;
         }
 
-        if (activeSessionId === existingSessionId) {
-          setActiveSessionId(null);
+        if (activeSessionIdRef.current === existingSessionId) {
+          setActiveSessionIdSafely(null);
         }
 
         setSessionTimelines((previous) => {
@@ -1428,7 +1501,7 @@ export const useAcp = (): UseAcpResult => {
 
       let created: AcpSessionNewResult;
       try {
-        created = await window.desktop.acpSessionNew({ cwd });
+        created = await window.desktop.acpSessionNew({ cwd: normalizedCwd });
       } catch (error) {
         if (isAuthenticationRequiredError(error)) {
           throw error instanceof Error ? error : new Error(toErrorMessage(error));
@@ -1441,7 +1514,7 @@ export const useAcp = (): UseAcpResult => {
       setThreadSessionMap((previous) => {
         const next = {
           ...previous,
-          [threadId]: created.sessionId,
+          [normalizedThreadId]: created.sessionId,
         };
         threadSessionMapRef.current = next;
         return next;
@@ -1458,7 +1531,7 @@ export const useAcp = (): UseAcpResult => {
         try {
           const loaded = await window.desktop.acpSessionLoad({
             sessionId: created.sessionId,
-            cwd,
+            cwd: normalizedCwd,
           });
 
           if (loaded.loaded && loaded.controls) {
@@ -1471,10 +1544,10 @@ export const useAcp = (): UseAcpResult => {
           // Controls can still arrive later via ACP session updates.
         }
       }
-      setActiveSessionId(created.sessionId);
+      setActiveSessionIdSafely(created.sessionId);
       ensureTimelineExists(created.sessionId);
     },
-    [activeSessionId, ensureTimelineExists, initialize, threadSessionMap],
+    [ensureTimelineExists, initialize, setActiveSessionIdSafely, threadSessionMap],
   );
 
   const setSessionPrompting = React.useCallback((sessionId: string, isPrompting: boolean) => {
@@ -1535,7 +1608,7 @@ export const useAcp = (): UseAcpResult => {
 
   const sendPrompt = React.useCallback(
     async (text: string, attachments: AcpPromptAttachment[] = []): Promise<void> => {
-      const sessionId = activeSessionId;
+      const sessionId = activeSessionIdRef.current;
       const trimmed = text.trim();
       const normalizedAttachments = normalizePromptAttachments(attachments);
 
@@ -1594,7 +1667,7 @@ export const useAcp = (): UseAcpResult => {
         throw new Error('ACP prompt failed');
       }
     },
-    [activeSessionId, rememberThreadAttachmentHistory, setSessionPrompting],
+    [rememberThreadAttachmentHistory, setSessionPrompting],
   );
 
   const setSessionMode = React.useCallback(
@@ -1774,8 +1847,8 @@ export const useAcp = (): UseAcpResult => {
       delete suppressUpdatedAtUntilBySessionIdRef.current[sessionId];
       delete attachmentReplayCursorBySessionIdRef.current[sessionId];
 
-      if (activeSessionId === sessionId) {
-        setActiveSessionId(null);
+      if (activeSessionIdRef.current === sessionId) {
+        setActiveSessionIdSafely(null);
       }
 
       setSessionTimelines((previous) => {
@@ -1818,7 +1891,7 @@ export const useAcp = (): UseAcpResult => {
         return next;
       });
     },
-    [activeSessionId],
+    [setActiveSessionIdSafely],
   );
 
   const pendingPermission = pendingPermissions[0] ?? null;

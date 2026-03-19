@@ -109,6 +109,16 @@ const ACP_REGISTRY_URL =
   'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json';
 const ACP_REGISTRY_CACHE_TTL_MS = 5 * 60 * 1000;
 const MAX_REGISTRY_DOWNLOAD_REDIRECTS = 5;
+const COMMON_POSIX_PATH_SEGMENTS = [
+  '/opt/homebrew/bin',
+  '/opt/homebrew/sbin',
+  '/usr/local/bin',
+  '/usr/local/sbin',
+  '/usr/bin',
+  '/bin',
+  '/usr/sbin',
+  '/sbin',
+];
 
 const isResourceNotFoundError = (error: unknown): boolean => {
   const containsEmptySessionFile = (value: string): boolean =>
@@ -294,6 +304,12 @@ const toNormalizedRegistryCommand = (value: string): string =>
 
 const toNormalizedArgs = (args: string[]): string[] =>
   args.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+
+const toPathSegments = (value: string | undefined): string[] =>
+  (value ?? '')
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 
 const isArgsPrefixCompatible = (left: string[], right: string[]): boolean => {
   if (left.length === 0 || right.length === 0) {
@@ -1144,14 +1160,38 @@ export class AcpService {
       resolvedArgs = knownFallback.args;
     }
 
+    const launchEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...(config.env ?? {}),
+    };
+
+    const pathSegments = new Set<string>(toPathSegments(launchEnv.PATH ?? launchEnv.Path));
+    if (process.platform !== 'win32') {
+      for (const segment of COMMON_POSIX_PATH_SEGMENTS) {
+        pathSegments.add(segment);
+      }
+
+      const loginShellPath = this.resolvePathValueOnLoginShell();
+      for (const segment of toPathSegments(loginShellPath ?? undefined)) {
+        pathSegments.add(segment);
+      }
+    }
+
+    if (path.isAbsolute(resolvedCommand)) {
+      pathSegments.add(path.dirname(resolvedCommand));
+    }
+
+    if (pathSegments.size > 0) {
+      const mergedPath = Array.from(pathSegments).join(path.delimiter);
+      launchEnv.PATH = mergedPath;
+      launchEnv.Path = mergedPath;
+    }
+
     return {
       command: resolvedCommand,
       args: resolvedArgs,
       cwd: launchCwd,
-      env: {
-        ...process.env,
-        ...(config.env ?? {}),
-      },
+      env: launchEnv,
     };
   }
 
@@ -1724,7 +1764,10 @@ export class AcpService {
       await fs.mkdir(installDirectory, { recursive: true });
       this.extractArchiveIntoDirectory(archivePath, installDirectory);
 
-      const resolvedInstalledCommand = this.resolveCommandAtAbsolutePath(installedCommandPath);
+      const commandSegments = this.toRegistryRelativeCommandSegments(template.command);
+      const resolvedInstalledCommand =
+        this.resolveCommandAtAbsolutePath(installedCommandPath) ??
+        (await this.findInstalledRegistryCommandBySuffix(installDirectory, commandSegments));
       if (!resolvedInstalledCommand) {
         throw new Error(
           `Installed archive for ${template.agentName} does not contain ${template.command}.`,
@@ -1749,6 +1792,67 @@ export class AcpService {
     }
   }
 
+  private async findInstalledRegistryCommandBySuffix(
+    installDirectory: string,
+    commandSegments: string[],
+  ): Promise<string | null> {
+    if (commandSegments.length === 0) {
+      return null;
+    }
+
+    const normalizedSuffix = commandSegments
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0)
+      .join('/')
+      .toLowerCase();
+    if (!normalizedSuffix) {
+      return null;
+    }
+
+    const pendingDirectories: string[] = [installDirectory];
+    while (pendingDirectories.length > 0) {
+      const directory = pendingDirectories.pop();
+      if (!directory) {
+        continue;
+      }
+
+      let entries: Awaited<ReturnType<typeof fs.readdir>>;
+      try {
+        entries = await fs.readdir(directory, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+
+      for (const entry of entries) {
+        const entryPath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          pendingDirectories.push(entryPath);
+          continue;
+        }
+
+        if (!entry.isFile()) {
+          continue;
+        }
+
+        const relativePath = path
+          .relative(installDirectory, entryPath)
+          .split(path.sep)
+          .join('/')
+          .toLowerCase();
+        if (!relativePath.endsWith(normalizedSuffix)) {
+          continue;
+        }
+
+        const resolved = this.resolveCommandAtAbsolutePath(entryPath);
+        if (resolved) {
+          return resolved;
+        }
+      }
+    }
+
+    return null;
+  }
+
   private resolveKnownCommandFallback(
     command: string,
     args: string[],
@@ -1758,6 +1862,29 @@ export class AcpService {
     }
 
     const commandToken = path.basename(command).replace(/\.exe$/i, '').toLowerCase();
+
+    if (commandToken === 'npx') {
+      const resolvedNpx =
+        this.resolveCommandOnPath('npx') ??
+        this.resolveCommandOnLoginShell('npx');
+      if (resolvedNpx) {
+        return {
+          command: resolvedNpx,
+          args,
+        };
+      }
+
+      const resolvedNpm =
+        this.resolveCommandOnPath('npm') ??
+        this.resolveCommandOnLoginShell('npm');
+      const npmExecArgs = resolvedNpm ? this.toNpmExecArgsFromNpxArgs(args) : null;
+      if (resolvedNpm && npmExecArgs) {
+        return {
+          command: resolvedNpm,
+          args: npmExecArgs,
+        };
+      }
+    }
 
     if (commandToken === 'opencode') {
       const npxCommand =
@@ -1771,6 +1898,33 @@ export class AcpService {
     }
 
     return null;
+  }
+
+  private toNpmExecArgsFromNpxArgs(args: string[]): string[] | null {
+    const remainingArgs = [...args];
+    let includeYes = false;
+
+    while (remainingArgs[0] === '-y' || remainingArgs[0] === '--yes') {
+      includeYes = true;
+      remainingArgs.shift();
+    }
+
+    const packageName = remainingArgs.shift();
+    if (!packageName) {
+      return null;
+    }
+
+    const npmExecArgs = ['exec'];
+    if (includeYes) {
+      npmExecArgs.push('--yes');
+    }
+    npmExecArgs.push(packageName);
+
+    if (remainingArgs.length > 0) {
+      npmExecArgs.push('--', ...remainingArgs);
+    }
+
+    return npmExecArgs;
   }
 
   private resolveCommandInWorkingDirectory(
@@ -2585,12 +2739,16 @@ export class AcpService {
   }
 
   private resolveCommandOnPath(command: string): string | null {
-    const pathValue = process.env.PATH ?? '';
-    if (!pathValue) {
+    const pathSegments = new Set<string>(toPathSegments(process.env.PATH));
+    if (process.platform !== 'win32') {
+      for (const segment of COMMON_POSIX_PATH_SEGMENTS) {
+        pathSegments.add(segment);
+      }
+    }
+    if (pathSegments.size === 0) {
       return null;
     }
 
-    const pathSegments = pathValue.split(path.delimiter).filter(Boolean);
     const extensions =
       process.platform === 'win32'
         ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM')
@@ -2599,7 +2757,7 @@ export class AcpService {
             .filter(Boolean)
         : [''];
 
-    for (const segment of pathSegments) {
+    for (const segment of pathSegments.values()) {
       for (const extension of extensions) {
         const candidate = path.join(segment, `${command}${extension}`);
         try {
@@ -2621,44 +2779,103 @@ export class AcpService {
       return null;
     }
 
-    const shellPath = process.env.SHELL;
-    if (!shellPath) {
+    const shellCandidates = [
+      process.env.SHELL?.trim(),
+      '/bin/zsh',
+      '/bin/bash',
+      '/bin/sh',
+    ]
+      .filter((entry): entry is string => Boolean(entry && entry.length > 0))
+      .map((entry) =>
+        entry.includes(path.sep)
+          ? this.resolveCommandAtAbsolutePath(entry)
+          : this.resolveCommandOnPath(entry),
+      )
+      .filter((entry): entry is string => Boolean(entry && entry.length > 0));
+    const uniqueShellCandidates = Array.from(new Set(shellCandidates));
+
+    for (const shellPath of uniqueShellCandidates) {
+      try {
+        const result = spawnSync(
+          shellPath,
+          ['-lc', `command -v ${quotePosixShellArg(command)}`],
+          {
+            env: process.env,
+            encoding: 'utf8',
+            timeout: 1500,
+            windowsHide: true,
+          },
+        );
+
+        if (result.status !== 0) {
+          continue;
+        }
+
+        const candidate = result.stdout
+          .split('\n')
+          .map((entry) => entry.trim())
+          .find((entry) => entry.length > 0);
+        if (!candidate || !path.isAbsolute(candidate)) {
+          continue;
+        }
+
+        const stats = statSync(candidate);
+        if (!stats.isFile()) {
+          continue;
+        }
+
+        return candidate;
+      } catch {
+        // Keep trying other shell candidates.
+      }
+    }
+
+    return null;
+  }
+
+  private resolvePathValueOnLoginShell(): string | null {
+    if (process.platform === 'win32') {
       return null;
     }
 
-    try {
-      const result = spawnSync(
-        shellPath,
-        ['-lc', `command -v ${quotePosixShellArg(command)}`],
-        {
+    const shellCandidates = [
+      process.env.SHELL?.trim(),
+      '/bin/zsh',
+      '/bin/bash',
+      '/bin/sh',
+    ]
+      .filter((entry): entry is string => Boolean(entry && entry.length > 0))
+      .map((entry) =>
+        entry.includes(path.sep)
+          ? this.resolveCommandAtAbsolutePath(entry)
+          : this.resolveCommandOnPath(entry),
+      )
+      .filter((entry): entry is string => Boolean(entry && entry.length > 0));
+    const uniqueShellCandidates = Array.from(new Set(shellCandidates));
+
+    for (const shellPath of uniqueShellCandidates) {
+      try {
+        const result = spawnSync(shellPath, ['-lc', 'printf %s "$PATH"'], {
           env: process.env,
           encoding: 'utf8',
           timeout: 1500,
           windowsHide: true,
-        },
-      );
+        });
 
-      if (result.status !== 0) {
-        return null;
+        if (result.status !== 0) {
+          continue;
+        }
+
+        const pathValue = result.stdout.trim();
+        if (pathValue.length > 0) {
+          return pathValue;
+        }
+      } catch {
+        // Keep trying other shell candidates.
       }
-
-      const candidate = result.stdout
-        .split('\n')
-        .map((entry) => entry.trim())
-        .find((entry) => entry.length > 0);
-      if (!candidate || !path.isAbsolute(candidate)) {
-        return null;
-      }
-
-      const stats = statSync(candidate);
-      if (!stats.isFile()) {
-        return null;
-      }
-
-      return candidate;
-    } catch {
-      return null;
     }
+
+    return null;
   }
 
   private withLoginShellIfAvailable(

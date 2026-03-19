@@ -58,8 +58,10 @@ This repo includes a GitHub Actions workflow at:
 What it does on tag push (`v*`):
 
 - Builds macOS Apple Silicon (`arm64`) with Electron Forge
-- Generates `latest-mac.yml` + `Zero-darwin-arm64.zip` for `electron-updater`
-- Uploads both files to the GitHub Release
+- Generates:
+  - `Zero-darwin-arm64.dmg` for user installs
+  - `Zero-darwin-arm64.zip` + `latest-mac.yml` for `electron-updater`
+- Uploads all three files to the GitHub Release
 
 Release flow:
 
@@ -70,10 +72,21 @@ git push origin v1.0.1
 
 The release assets from that tag can be linked directly from your website, and the packaged app can auto-update from GitHub Releases.
 
-Website download button targets:
+Canonical stable URLs:
 
-- Latest macOS Apple Silicon zip: `https://github.com/egor-baranov/zero-ade/releases/latest/download/Zero-darwin-arm64.zip`
-- Releases page: `https://github.com/egor-baranov/zero-ade/releases/latest`
+- Latest macOS Apple Silicon installer:
+  `https://github.com/egor-baranov/zero-ade/releases/latest/download/Zero-darwin-arm64.dmg`
+- Latest updater ZIP:
+  `https://github.com/egor-baranov/zero-ade/releases/latest/download/Zero-darwin-arm64.zip`
+- Latest updater metadata:
+  `https://github.com/egor-baranov/zero-ade/releases/latest/download/latest-mac.yml`
+- Latest release page:
+  `https://github.com/egor-baranov/zero-ade/releases/latest`
+
+Website guidance:
+
+- Public website download buttons should point to the `dmg`.
+- The `zip` should stay as the update channel artifact for `electron-updater`.
 
 ## Tech Stack
 

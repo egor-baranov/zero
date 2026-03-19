@@ -3073,7 +3073,7 @@ export const Composer = ({
                 disabled={customCommand.trim().length === 0}
                 onClick={handleSaveAgentConfig}
               >
-                {editingAgentPreset === 'custom' ? 'Save and connect' : 'Save configuration'}
+                {editingAgentPreset === 'custom' ? 'Apply and connect' : 'Apply configuration'}
               </Button>
             </div>
           </div>
@@ -3346,7 +3346,13 @@ const AgentRegistryIcon = ({
 
   return (
     <Avatar className={cn('h-4 w-4 rounded-[6px] bg-stone-100', className)}>
-      {iconUrl ? <AvatarImage src={iconUrl} alt={`${label} icon`} className="h-full w-full object-cover" /> : null}
+      {iconUrl ? (
+        <AvatarImage
+          src={iconUrl}
+          alt={`${label} icon`}
+          className="zeroade-agent-icon-image h-full w-full object-cover"
+        />
+      ) : null}
       <AvatarFallback className="rounded-[6px] bg-stone-200 text-[9px] font-semibold uppercase text-stone-600">
         {fallbackLabel}
       </AvatarFallback>

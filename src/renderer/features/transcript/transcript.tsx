@@ -800,7 +800,13 @@ const AgentChangedNotice = ({
         {parsedAgentLabel ? (
           <span className="inline-flex items-center gap-1.5">
             <Avatar className="h-3.5 w-3.5 rounded-[4px] bg-stone-100">
-              {iconUrl ? <AvatarImage src={iconUrl} alt={`${agentLabel} icon`} /> : null}
+              {iconUrl ? (
+                <AvatarImage
+                  src={iconUrl}
+                  alt={`${agentLabel} icon`}
+                  className="zeroade-agent-icon-image"
+                />
+              ) : null}
               <AvatarFallback className="rounded-[4px] bg-stone-200 text-[8px] font-semibold text-stone-600">
                 {avatarFallback}
               </AvatarFallback>

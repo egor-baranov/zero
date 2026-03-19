@@ -80,6 +80,18 @@
   color: var(--zeroade-text) !important;
 }
 
+:root[data-zeroade-platform='darwin'] html,
+:root[data-zeroade-platform='darwin'] body,
+:root[data-zeroade-platform='darwin'] #root {
+  background: transparent;
+}
+
+:root[data-zeroade-platform='darwin'][data-zeroade-theme='dark'] html,
+:root[data-zeroade-platform='darwin'][data-zeroade-theme='dark'] body,
+:root[data-zeroade-platform='darwin'][data-zeroade-theme='dark'] #root {
+  background: transparent !important;
+}
+
 :root[data-zeroade-theme='dark'] .bg-\[\#fdfdff\],
 :root[data-zeroade-theme='dark'] .bg-\[\#fdfdfff2\],
 :root[data-zeroade-theme='dark'] [class*='bg-[rgba(249,250,252'] {
@@ -219,6 +231,43 @@
   color: var(--zeroade-text-strong) !important;
 }
 
+:root .zeroade-switch-track {
+  border: 1px solid rgba(120, 113, 108, 0.2);
+  background-color: #e7e5e4;
+  transition-property: background-color, border-color;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+
+:root .zeroade-switch-track[data-state='checked'] {
+  border-color: #2563eb;
+  background-color: #2563eb;
+}
+
+:root .zeroade-switch-thumb {
+  background-color: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+:root[data-zeroade-theme='dark'] .zeroade-switch-track {
+  border-color: #2f3548;
+  background-color: #1b2030;
+}
+
+:root[data-zeroade-theme='dark'] .zeroade-switch-track[data-state='checked'] {
+  border-color: #4e8bff;
+  background-color: #4e8bff;
+}
+
+:root[data-zeroade-theme='dark'] .zeroade-switch-thumb {
+  background-color: #eef2ff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+
+:root[data-zeroade-theme='dark'] .zeroade-agent-icon-image {
+  filter: brightness(0) invert(1);
+}
+
 :root[data-zeroade-theme='dark'] .zeroade-tooltip {
   border-color: var(--zeroade-border) !important;
   background-color: #111116 !important;
@@ -266,7 +315,7 @@ body,
 
 body {
   overflow: hidden;
-  background: transparent;
+  background: #fdfdff;
   color: #2f2d2b;
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue',
     sans-serif;

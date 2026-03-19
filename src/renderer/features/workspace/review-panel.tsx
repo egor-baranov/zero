@@ -186,6 +186,7 @@ export const ReviewPanel = ({
   const [dropSide, setDropSide] = React.useState<'left' | 'right' | null>(null);
   const [isSplitView, setIsSplitView] = React.useState(false);
   const [secondaryFilePath, setSecondaryFilePath] = React.useState<string | null>(null);
+  const [rightPanePaths, setRightPanePaths] = React.useState<string[]>([]);
   const [splitRatio, setSplitRatio] = React.useState(SPLIT_RATIO_DEFAULT);
   const [isSplitResizing, setIsSplitResizing] = React.useState(false);
 
@@ -280,21 +281,35 @@ export const ReviewPanel = ({
     [toEditorContent],
   );
 
+  const rightPanePathSet = React.useMemo(() => new Set(rightPanePaths), [rightPanePaths]);
+
+  const leftTabs = React.useMemo(() => {
+    if (!isSplitView) {
+      return tabs;
+    }
+
+    return tabs.filter((path) => !rightPanePathSet.has(path));
+  }, [isSplitView, rightPanePathSet, tabs]);
+
+  const rightTabs = React.useMemo(() => {
+    if (!isSplitView) {
+      return [];
+    }
+
+    return tabs.filter((path) => path !== activeFilePath && rightPanePathSet.has(path));
+  }, [activeFilePath, isSplitView, rightPanePathSet, tabs]);
+
   const effectiveSecondaryPath = React.useMemo(() => {
     if (!isSplitView) {
       return null;
     }
 
-    if (
-      secondaryFilePath &&
-      secondaryFilePath !== activeFilePath &&
-      tabs.includes(secondaryFilePath)
-    ) {
+    if (secondaryFilePath && rightTabs.includes(secondaryFilePath)) {
       return secondaryFilePath;
     }
 
-    return tabs.find((path) => path !== activeFilePath) ?? null;
-  }, [activeFilePath, isSplitView, secondaryFilePath, tabs]);
+    return rightTabs[0] ?? null;
+  }, [isSplitView, rightTabs, secondaryFilePath]);
 
   const stopSplitResizing = React.useCallback(() => {
     if (!splitResizeActiveRef.current) {
@@ -310,6 +325,7 @@ export const ReviewPanel = ({
   const handleUnsplit = React.useCallback(() => {
     setIsSplitView(false);
     setSecondaryFilePath(null);
+    setRightPanePaths([]);
     setDropSide(null);
   }, []);
 
@@ -325,24 +341,43 @@ export const ReviewPanel = ({
   const handleDropInPane = React.useCallback(
     (side: 'left' | 'right', path: string): void => {
       if (side === 'left') {
+        setRightPanePaths((previous) => {
+          const next = previous.filter((candidatePath) => candidatePath !== path);
+          if (next.length === 0) {
+            setIsSplitView(false);
+            setSecondaryFilePath(null);
+            return [];
+          }
+
+          if (secondaryFilePath === path) {
+            setSecondaryFilePath(next[0] ?? null);
+          }
+
+          return next;
+        });
         onSelectTab(path);
-      } else {
-        setIsSplitView(true);
-        if (path === activeFilePath) {
-          setSecondaryFilePath((previous) => {
-            if (previous && previous !== activeFilePath && tabs.includes(previous)) {
-              return previous;
-            }
-
-            return tabs.find((candidatePath) => candidatePath !== activeFilePath) ?? previous;
-          });
-          return;
-        }
-
-        setSecondaryFilePath(path);
+        return;
       }
+
+      const nextRightPaths = Array.from(
+        new Set([...rightPanePaths.filter((candidatePath) => candidatePath !== activeFilePath), path]),
+      );
+
+      if (path === activeFilePath) {
+        const nextPrimaryPath =
+          tabs.find((candidatePath) => candidatePath !== path && !nextRightPaths.includes(candidatePath)) ??
+          tabs.find((candidatePath) => candidatePath !== path);
+
+        if (nextPrimaryPath) {
+          onSelectTab(nextPrimaryPath);
+        }
+      }
+
+      setIsSplitView(nextRightPaths.length > 0);
+      setRightPanePaths(nextRightPaths);
+      setSecondaryFilePath(path);
     },
-    [activeFilePath, onSelectTab, tabs],
+    [activeFilePath, onSelectTab, rightPanePaths, secondaryFilePath, tabs],
   );
 
   const handleSelectSecondaryTab = React.useCallback(
@@ -352,19 +387,9 @@ export const ReviewPanel = ({
         return;
       }
 
-      if (path === activeFilePath) {
-        if (!effectiveSecondaryPath) {
-          return;
-        }
-
-        setSecondaryFilePath(activeFilePath);
-        onSelectTab(effectiveSecondaryPath);
-        return;
-      }
-
       setSecondaryFilePath(path);
     },
-    [activeFilePath, effectiveSecondaryPath, isSplitView, onSelectTab],
+    [isSplitView, onSelectTab],
   );
 
   const getDropSideFromClientX = React.useCallback(
@@ -411,20 +436,44 @@ export const ReviewPanel = ({
 
   React.useEffect(() => {
     if (!isSplitView) {
+      if (rightPanePaths.length > 0) {
+        setRightPanePaths([]);
+      }
       setDropSide(null);
       return;
     }
 
-    if (!effectiveSecondaryPath) {
+    const sanitizedRightPaths = rightPanePaths.filter(
+      (path, index, currentPaths) =>
+        path !== activeFilePath &&
+        tabs.includes(path) &&
+        currentPaths.indexOf(path) === index,
+    );
+
+    if (sanitizedRightPaths.length !== rightPanePaths.length) {
+      setRightPanePaths(sanitizedRightPaths);
+      return;
+    }
+
+    if (!leftTabs.length || !sanitizedRightPaths.length || !effectiveSecondaryPath) {
       setIsSplitView(false);
       setSecondaryFilePath(null);
+      setRightPanePaths([]);
       return;
     }
 
     if (secondaryFilePath !== effectiveSecondaryPath) {
       setSecondaryFilePath(effectiveSecondaryPath);
     }
-  }, [effectiveSecondaryPath, isSplitView, secondaryFilePath]);
+  }, [
+    activeFilePath,
+    effectiveSecondaryPath,
+    isSplitView,
+    leftTabs.length,
+    rightPanePaths,
+    secondaryFilePath,
+    tabs,
+  ]);
 
   React.useEffect(() => {
     const handlePointerMove = (event: PointerEvent): void => {
@@ -573,16 +622,9 @@ export const ReviewPanel = ({
     if (!tabs.length) {
       setIsSplitView(false);
       setSecondaryFilePath(null);
+      setRightPanePaths([]);
       return;
     }
-
-    setSecondaryFilePath((previous) => {
-      if (!previous || tabs.includes(previous)) {
-        return previous;
-      }
-
-      return tabs.find((path) => path !== activeFilePath) ?? null;
-    });
   }, [activeFilePath, tabs]);
 
   if (!open) {
@@ -616,6 +658,7 @@ export const ReviewPanel = ({
   );
 
   const renderTabBar = (
+    paths: string[],
     currentPath: string | null,
     onSelectPath: (path: string) => void,
     showOptions: boolean,
@@ -623,7 +666,7 @@ export const ReviewPanel = ({
     <div className="flex min-h-10 items-center bg-white/90">
       <div className="min-w-0 flex-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <div className="flex w-max min-w-full items-center gap-2 px-2 py-1.5">
-          {tabs.map((path) => {
+          {paths.map((path) => {
             const tabName = getFileName(path);
             const isActive = path === currentPath;
 
@@ -723,7 +766,7 @@ export const ReviewPanel = ({
                 width: isSplitView ? `${splitRatio * 100}%` : '100%',
               }}
             >
-              {renderTabBar(activeFilePath, onSelectTab, !isSplitView)}
+              {renderTabBar(isSplitView ? leftTabs : tabs, activeFilePath, onSelectTab, !isSplitView)}
               <div className="min-h-0 flex-1">
                 <div ref={primaryEditorContainerRef} className="h-full w-full" />
               </div>
@@ -745,7 +788,7 @@ export const ReviewPanel = ({
                   <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-stone-300/80" />
                 </button>
                 <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[#fdfdff]">
-                  {renderTabBar(effectiveSecondaryPath, handleSelectSecondaryTab, true)}
+                  {renderTabBar(rightTabs, effectiveSecondaryPath, handleSelectSecondaryTab, true)}
                   <div className="min-h-0 flex-1">
                     <div ref={secondaryEditorContainerRef} className="h-full w-full" />
                   </div>

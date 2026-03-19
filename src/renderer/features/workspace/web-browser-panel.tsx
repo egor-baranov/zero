@@ -8,6 +8,10 @@ import {
   X,
 } from 'lucide-react';
 import { cn } from '@renderer/lib/cn';
+import {
+  appendStoredNotification,
+  type BrowserPushItem,
+} from '@renderer/store/browser-pushes';
 
 interface WebBrowserPanelProps {
   open: boolean;
@@ -21,6 +25,15 @@ interface BrowserTab {
   id: string;
   url: string;
   label: string;
+}
+
+interface BrowserPushPayload {
+  title?: unknown;
+  body?: unknown;
+  url?: unknown;
+  origin?: unknown;
+  source?: unknown;
+  timestamp?: unknown;
 }
 
 interface ShortcutInput {
@@ -49,8 +62,9 @@ interface BrowserWebviewElement extends HTMLElement {
       | 'did-finish-load'
       | 'did-fail-load'
       | 'did-navigate'
-      | 'did-navigate-in-page',
-    listener: () => void,
+      | 'did-navigate-in-page'
+      | 'console-message',
+    listener: (event: Event) => void,
   ) => void;
   removeEventListener: (
     type:
@@ -60,9 +74,11 @@ interface BrowserWebviewElement extends HTMLElement {
       | 'did-finish-load'
       | 'did-fail-load'
       | 'did-navigate'
-      | 'did-navigate-in-page',
-    listener: () => void,
+      | 'did-navigate-in-page'
+      | 'console-message',
+    listener: (event: Event) => void,
   ) => void;
+  executeJavaScript: (code: string) => Promise<unknown>;
 }
 
 const DEFAULT_HOME_URL = 'https://www.google.com';
@@ -70,8 +86,10 @@ const WEB_PANEL_WIDTH_KEY = 'zeroade.webpanel.width';
 const WEB_PANEL_WIDTH_DEFAULT = 620;
 const WEB_PANEL_WIDTH_MIN = 440;
 const WEB_PANEL_WIDTH_MAX = 980;
+const WEB_PANEL_PUSH_PREFIX = '__zeroade_browser_push__:';
 const GOOGLE_VOLATILE_HOME_QUERY_PARAMS = new Set(['zx', 'no_sw_cr']);
 const createTabId = (): string => `web-tab-${Date.now()}-${Math.random().toString(16).slice(2, 9)}`;
+const createPushId = (): string => `browser-push-${Date.now()}-${Math.random().toString(16).slice(2, 9)}`;
 
 const clampWidth = (value: number): number =>
   Math.min(Math.max(value, WEB_PANEL_WIDTH_MIN), WEB_PANEL_WIDTH_MAX);
@@ -89,6 +107,153 @@ const readStoredWidth = (): number => {
 
   return clampWidth(parsed);
 };
+
+const toPushSource = (value: unknown): BrowserPushItem['source'] => {
+  if (value === 'notification' || value === 'service-worker') {
+    return value;
+  }
+  return 'unknown';
+};
+
+const asText = (value: unknown): string =>
+  typeof value === 'string' ? value.trim() : '';
+
+const toPushTimestamp = (value: unknown): number => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  return Date.now();
+};
+
+const normalizeBrowserPushPayload = (
+  payload: BrowserPushPayload,
+  fallbackUrl: string,
+): BrowserPushItem | null => {
+  const rawTitle = asText(payload.title);
+  const rawBody = asText(payload.body);
+  if (!rawTitle && !rawBody) {
+    return null;
+  }
+
+  const rawUrl = asText(payload.url);
+  const pushUrl = rawUrl ? toStableNavigableUrl(rawUrl) : toStableNavigableUrl(fallbackUrl);
+  const origin = asText(payload.origin) || (() => {
+    try {
+      return new URL(pushUrl).origin;
+    } catch {
+      return 'web';
+    }
+  })();
+
+  return {
+    id: createPushId(),
+    title: rawTitle || origin || 'Website notification',
+    body: rawBody,
+    url: pushUrl,
+    origin,
+    source: toPushSource(payload.source),
+    kind: 'browser',
+    severity: 'info',
+    createdAtMs: toPushTimestamp(payload.timestamp),
+    read: false,
+  };
+};
+
+const WEBVIEW_PUSH_BRIDGE_SCRIPT = `(() => {
+  const PREFIX = ${JSON.stringify(WEB_PANEL_PUSH_PREFIX)};
+  const emit = (payload) => {
+    try {
+      console.info(PREFIX + JSON.stringify(payload));
+    } catch {
+      // no-op
+    }
+  };
+  const toText = (value) => (typeof value === 'string' ? value : '');
+  if ((window).__zeroadePushBridgeInstalled) {
+    return;
+  }
+
+  Object.defineProperty(window, '__zeroadePushBridgeInstalled', {
+    value: true,
+    configurable: true,
+  });
+
+  try {
+    const NativeNotification = window.Notification;
+    if (typeof NativeNotification === 'function' && !(NativeNotification).__zeroadeWrapped) {
+      const WrappedNotification = new Proxy(NativeNotification, {
+        construct(target, args, newTarget) {
+          const title = toText(args[0]);
+          const options = args[1] && typeof args[1] === 'object' ? args[1] : {};
+          emit({
+            title,
+            body: toText(options.body),
+            url: location.href,
+            origin: location.origin,
+            source: 'notification',
+            timestamp: Date.now(),
+          });
+          return Reflect.construct(target, args, newTarget);
+        },
+      });
+
+      try {
+        Object.defineProperty(WrappedNotification, '__zeroadeWrapped', {
+          value: true,
+          configurable: true,
+        });
+      } catch {
+        // no-op
+      }
+
+      try {
+        Object.setPrototypeOf(WrappedNotification, NativeNotification);
+      } catch {
+        // no-op
+      }
+      WrappedNotification.prototype = NativeNotification.prototype;
+
+      Object.defineProperty(window, 'Notification', {
+        configurable: true,
+        writable: true,
+        value: WrappedNotification,
+      });
+    }
+  } catch {
+    // no-op
+  }
+
+  try {
+    const registrationPrototype =
+      window.ServiceWorkerRegistration && window.ServiceWorkerRegistration.prototype;
+    if (
+      registrationPrototype &&
+      typeof registrationPrototype.showNotification === 'function' &&
+      !registrationPrototype.__zeroadeShowNotificationWrapped
+    ) {
+      const originalShowNotification = registrationPrototype.showNotification;
+      registrationPrototype.showNotification = function(title, options) {
+        const normalizedOptions = options && typeof options === 'object' ? options : {};
+        emit({
+          title: toText(title),
+          body: toText(normalizedOptions.body),
+          url: location.href,
+          origin: location.origin,
+          source: 'service-worker',
+          timestamp: Date.now(),
+        });
+        return originalShowNotification.apply(this, arguments);
+      };
+
+      Object.defineProperty(registrationPrototype, '__zeroadeShowNotificationWrapped', {
+        value: true,
+        configurable: true,
+      });
+    }
+  } catch {
+    // no-op
+  }
+})();`;
 
 const searchUrl = (query: string): string =>
   `https://www.google.com/search?q=${encodeURIComponent(query.trim())}`;
@@ -299,6 +464,17 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
     setCanGoForward(false);
   }, []);
 
+  const appendPushItem = React.useCallback(
+    (payload: BrowserPushPayload): void => {
+      const normalized = normalizeBrowserPushPayload(payload, currentUrlRef.current || DEFAULT_HOME_URL);
+      if (!normalized) {
+        return;
+      }
+      appendStoredNotification(normalized);
+    },
+    [],
+  );
+
   React.useEffect(() => {
     setPanelWidth(readStoredWidth());
   }, []);
@@ -339,6 +515,7 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
     lastOpenRequestIdRef.current = openRequest.id;
     openUrlInNewTab(openRequest.url);
   }, [openRequest, openUrlInNewTab]);
+
 
   React.useEffect(() => {
     const view = webviewRef.current;
@@ -405,7 +582,32 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
 
     const handleDomReady = (): void => {
       webviewReadyRef.current = true;
+      void view.executeJavaScript(WEBVIEW_PUSH_BRIDGE_SCRIPT).catch(() => {
+        // Ignore push bridge injection failures on restricted pages.
+      });
       handleNavigate();
+    };
+
+    const handleConsoleMessage = (event: Event): void => {
+      const browserEvent = event as Event & {
+        message?: string;
+      };
+      const message = typeof browserEvent.message === 'string' ? browserEvent.message.trim() : '';
+      if (!message.startsWith(WEB_PANEL_PUSH_PREFIX)) {
+        return;
+      }
+
+      const rawPayload = message.slice(WEB_PANEL_PUSH_PREFIX.length).trim();
+      if (!rawPayload) {
+        return;
+      }
+
+      try {
+        const payload = JSON.parse(rawPayload) as BrowserPushPayload;
+        appendPushItem(payload);
+      } catch {
+        // Ignore malformed payloads.
+      }
     };
 
     const handleNewWindow = (event: Event): void => {
@@ -453,6 +655,7 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
     view.addEventListener('did-fail-load', handleFail);
     view.addEventListener('did-navigate', handleNavigate);
     view.addEventListener('did-navigate-in-page', handleNavigate);
+    view.addEventListener('console-message', handleConsoleMessage);
     rawView.addEventListener('new-window', handleNewWindow as EventListener);
     rawView.addEventListener('will-navigate', handleWillNavigate as EventListener);
 
@@ -467,10 +670,11 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
       view.removeEventListener('did-fail-load', handleFail);
       view.removeEventListener('did-navigate', handleNavigate);
       view.removeEventListener('did-navigate-in-page', handleNavigate);
+      view.removeEventListener('console-message', handleConsoleMessage);
       rawView.removeEventListener('new-window', handleNewWindow as EventListener);
       rawView.removeEventListener('will-navigate', handleWillNavigate as EventListener);
     };
-  }, [openUrlInNewTab]);
+  }, [appendPushItem, openUrlInNewTab]);
 
   React.useEffect(() => {
     if (!open) {

@@ -1,5 +1,6 @@
 import * as React from 'react';
 import {
+  Bell,
   ChevronDown,
   FileText,
   FolderTree,
@@ -30,6 +31,9 @@ interface ToolbarActionsProps {
   isWebBrowserOpen: boolean;
   onToggleTerminal: () => void;
   isTerminalOpen: boolean;
+  unreadPushCount: number;
+  isPushPanelOpen: boolean;
+  onTogglePushPanel: () => void;
 }
 
 export const ToolbarActions = ({
@@ -44,10 +48,13 @@ export const ToolbarActions = ({
   isWebBrowserOpen,
   onToggleTerminal,
   isTerminalOpen,
+  unreadPushCount,
+  isPushPanelOpen,
+  onTogglePushPanel,
 }: ToolbarActionsProps): JSX.Element => {
   return (
     <TooltipProvider delayDuration={220}>
-      <div className="no-drag flex items-center gap-1.5">
+      <div className="flex items-center gap-1.5">
         {openFilesCount > 0 ? (
           <Button
             variant="secondary"
@@ -140,7 +147,28 @@ export const ToolbarActions = ({
           </TooltipTrigger>
           <TooltipContent>Open web browser</TooltipContent>
         </Tooltip>
-
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className={cn(
+                'relative h-7 w-7 rounded-full text-stone-500',
+                isPushPanelOpen && 'bg-stone-200/70 text-stone-700',
+              )}
+              onClick={onTogglePushPanel}
+              aria-label="Notifications"
+            >
+              <Bell className="h-3.5 w-3.5" />
+              {unreadPushCount > 0 ? (
+                <span className="absolute -right-0.5 -top-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-stone-800 px-1 text-[10px] font-medium text-white">
+                  {unreadPushCount > 9 ? '9+' : unreadPushCount}
+                </span>
+              ) : null}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Open notifications</TooltipContent>
+        </Tooltip>
       </div>
     </TooltipProvider>
   );

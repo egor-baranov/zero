@@ -1,5 +1,15 @@
 import * as React from 'react';
-import { Ellipsis, Loader2, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import {
+  ArrowUp,
+  ChevronDown,
+  Ellipsis,
+  ExternalLink,
+  Folder,
+  Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+} from 'lucide-react';
 import { Sidebar } from '@renderer/features/sidebar/sidebar';
 import { Composer, type AgentPresetSelection } from '@renderer/features/composer/composer';
 import { Transcript } from '@renderer/features/transcript/transcript';
@@ -13,9 +23,11 @@ import {
 } from '@renderer/features/command-palette/command-palette';
 import { TerminalPanel } from '@renderer/features/terminal/terminal-panel';
 import { FileTreeDialog } from '@renderer/features/workspace/file-tree-dialog';
+import { BrowserPushPanel } from '@renderer/features/workspace/browser-push-panel';
 import { ReviewPanel } from '@renderer/features/workspace/review-panel';
 import { WebBrowserPanel } from '@renderer/features/workspace/web-browser-panel';
 import { SettingsLayout } from '@renderer/features/settings/settings-layout';
+import { Dialog, DialogContent } from '@renderer/components/ui/dialog';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -30,12 +42,20 @@ import {
 } from '@renderer/components/ui/tooltip';
 import { Button } from '@renderer/components/ui/button';
 import { cn } from '@renderer/lib/cn';
+import {
+  appendStoredNotification,
+  onStoredNotificationsChanged,
+  readStoredNotifications,
+  writeStoredNotifications,
+  type AppNotificationItem,
+} from '@renderer/store/browser-pushes';
 import { useSidebarWidth } from '@renderer/store/use-sidebar-width';
 import { useShellState } from '@renderer/store/use-shell-state';
 import { useAcp, type TimelineItem } from '@renderer/store/use-acp';
 import { useWorkspaceReview } from '@renderer/store/use-workspace-review';
 import type { AcpCustomAgentConfig, AcpPromptAttachment } from '@shared/types/acp';
 import type { UpdaterState } from '@shared/types/updater';
+import zeroLogo from '@renderer/assets/zero-logo.png';
 
 const getFolderName = (folderPath: string): string =>
   folderPath.split(/[\\/]/).filter(Boolean).pop() ?? folderPath;
@@ -178,7 +198,42 @@ interface ShellToast {
   message: string;
 }
 
+interface RegistryLauncherDistribution {
+  package: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+interface RegistryBinaryDistributionTarget {
+  cmd?: string;
+  args?: string[];
+}
+
+interface RegistryAgentCatalogEntry {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+  version?: string;
+  description?: string;
+  repository?: string;
+  distribution?: {
+    npx?: RegistryLauncherDistribution;
+    uvx?: RegistryLauncherDistribution;
+    binary?: Record<string, RegistryBinaryDistributionTarget>;
+  };
+}
+
+interface RegistryLaunchTemplate {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  autoConfigurable: boolean;
+}
+
 const TOAST_LIFETIME_MS = 7_000;
+const ACP_REGISTRY_URL =
+  'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json';
+const WELCOME_CUSTOM_AGENT_ID = '__custom__';
 const REVIEW_PANEL_WIDTH_KEY = 'zeroade.review-panel.width.v1';
 const REVIEW_PANEL_WIDTH_DEFAULT = 560;
 const REVIEW_PANEL_WIDTH_MIN = 320;
@@ -186,6 +241,221 @@ const REVIEW_PANEL_WIDTH_MAX = 980;
 const REVIEW_PANEL_CHAT_MIN_WIDTH = 420;
 const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'gi');
 const LOOSE_ANSI_PATTERN = /\[(?:\d{1,3}(?:;\d{1,3})*)m/gi;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+const toStringRecord = (value: unknown): Record<string, string> | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] => typeof entry[1] === 'string',
+  );
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
+};
+
+const parseRegistryAgents = (payload: unknown): RegistryAgentCatalogEntry[] => {
+  if (
+    !isRecord(payload) ||
+    !Array.isArray((payload as { agents?: unknown[] }).agents)
+  ) {
+    return [];
+  }
+
+  const entries: RegistryAgentCatalogEntry[] = [];
+  for (const item of (payload as { agents: unknown[] }).agents) {
+    if (!isRecord(item)) {
+      continue;
+    }
+
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    const name = typeof item.name === 'string' ? item.name.trim() : '';
+    if (!id || !name) {
+      continue;
+    }
+
+    const distribution = isRecord(item.distribution) ? item.distribution : undefined;
+    const rawNpx = distribution && isRecord(distribution.npx) ? distribution.npx : undefined;
+    const rawUvx = distribution && isRecord(distribution.uvx) ? distribution.uvx : undefined;
+    const rawBinary =
+      distribution && isRecord(distribution.binary) ? distribution.binary : undefined;
+
+    const npxPackage = rawNpx && typeof rawNpx.package === 'string'
+      ? rawNpx.package.trim()
+      : '';
+    const uvxPackage = rawUvx && typeof rawUvx.package === 'string'
+      ? rawUvx.package.trim()
+      : '';
+
+    entries.push({
+      id,
+      name,
+      iconUrl:
+        typeof item.icon === 'string' && item.icon.trim().length > 0 ? item.icon.trim() : null,
+      version: typeof item.version === 'string' ? item.version.trim() : undefined,
+      description: typeof item.description === 'string' ? item.description.trim() : undefined,
+      repository: typeof item.repository === 'string' ? item.repository.trim() : undefined,
+      distribution: {
+        npx: npxPackage
+          ? {
+              package: npxPackage,
+              args: Array.isArray(rawNpx?.args)
+                ? rawNpx.args.filter(
+                    (arg): arg is string => typeof arg === 'string' && arg.trim().length > 0,
+                  )
+                : [],
+              env: toStringRecord(rawNpx?.env),
+            }
+          : undefined,
+        uvx: uvxPackage
+          ? {
+              package: uvxPackage,
+              args: Array.isArray(rawUvx?.args)
+                ? rawUvx.args.filter(
+                    (arg): arg is string => typeof arg === 'string' && arg.trim().length > 0,
+                  )
+                : [],
+              env: toStringRecord(rawUvx?.env),
+            }
+          : undefined,
+        binary: rawBinary as Record<string, RegistryBinaryDistributionTarget> | undefined,
+      },
+    });
+  }
+
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+
+  return entries;
+};
+
+const toBinaryKeyCandidates = (platform: NodeJS.Platform): string[] => {
+  if (platform === 'darwin') {
+    return ['darwin-aarch64', 'darwin-x86_64', 'darwin'];
+  }
+
+  if (platform === 'win32') {
+    return ['windows-x86_64', 'windows-aarch64', 'windows'];
+  }
+
+  if (platform === 'linux') {
+    return ['linux-x86_64', 'linux-aarch64', 'linux'];
+  }
+
+  return [];
+};
+
+const toExecutableCommand = (value: string): string =>
+  value.trim().split(/[\\/]/).filter(Boolean).at(-1)?.replace(/\.exe$/i, '').toLowerCase() ?? '';
+
+const toNormalizedArgsList = (args: string[]): string[] =>
+  args.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+
+const isArgsPrefixCompatible = (left: string[], right: string[]): boolean => {
+  if (left.length === 0 || right.length === 0) {
+    return true;
+  }
+
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length <= right.length ? right : left;
+  return shorter.every((entry, index) => longer[index] === entry);
+};
+
+const toRegistryLaunchTemplate = (
+  agent: RegistryAgentCatalogEntry,
+  platform: NodeJS.Platform,
+): RegistryLaunchTemplate => {
+  const npxDistribution = agent.distribution?.npx;
+  if (npxDistribution?.package) {
+    return {
+      command: 'npx',
+      args: ['-y', npxDistribution.package, ...(npxDistribution.args ?? [])],
+      env: npxDistribution.env,
+      autoConfigurable: true,
+    };
+  }
+
+  const uvxDistribution = agent.distribution?.uvx;
+  if (uvxDistribution?.package) {
+    return {
+      command: 'uvx',
+      args: [uvxDistribution.package, ...(uvxDistribution.args ?? [])],
+      env: uvxDistribution.env,
+      autoConfigurable: true,
+    };
+  }
+
+  const binaryDistribution = agent.distribution?.binary ?? {};
+  const binaryCandidates = toBinaryKeyCandidates(platform)
+    .map((key) => binaryDistribution[key])
+    .filter((target): target is RegistryBinaryDistributionTarget => Boolean(target));
+  const binaryFallback = Object.values(binaryDistribution).filter(
+    (target): target is RegistryBinaryDistributionTarget =>
+      typeof target?.cmd === 'string' && target.cmd.trim().length > 0,
+  );
+  const binaryTarget = [...binaryCandidates, ...binaryFallback].find(
+    (target) => typeof target.cmd === 'string' && target.cmd.trim().length > 0,
+  );
+
+  const binaryCommand =
+    binaryTarget && typeof binaryTarget.cmd === 'string'
+      ? binaryTarget.cmd.trim()
+      : '';
+  const binaryArgs = Array.isArray(binaryTarget?.args)
+    ? binaryTarget.args.filter(
+        (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
+      )
+    : [];
+
+  if (binaryCommand) {
+    return {
+      command: binaryCommand,
+      args: binaryArgs,
+      autoConfigurable: true,
+    };
+  }
+
+  return {
+    command: '',
+    args: [],
+    autoConfigurable: false,
+  };
+};
+
+const matchesRegistryTemplate = (
+  agent: RegistryAgentCatalogEntry,
+  config: AcpCustomAgentConfig | null,
+  platform: NodeJS.Platform,
+): boolean => {
+  if (!config) {
+    return false;
+  }
+
+  const template = toRegistryLaunchTemplate(agent, platform);
+  if (!template.autoConfigurable || !template.command) {
+    return false;
+  }
+
+  const configCommand = config.command?.trim() ?? '';
+  if (!configCommand) {
+    return false;
+  }
+
+  const commandMatches =
+    toExecutableCommand(template.command) === toExecutableCommand(configCommand);
+  if (!commandMatches) {
+    return false;
+  }
+
+  const templateArgs = toNormalizedArgsList(template.args);
+  const configArgs = toNormalizedArgsList(config.args ?? []);
+  return isArgsPrefixCompatible(templateArgs, configArgs);
+};
 
 const clampReviewPanelWidth = (value: number, availableWidth: number): number => {
   const dynamicMax = Math.max(
@@ -216,6 +486,50 @@ const toCleanErrorText = (value: string): string =>
     .replace(LOOSE_ANSI_PATTERN, '')
     .replace(/\s+/g, ' ')
     .trim();
+
+const parseArgs = (value: string): string[] => {
+  const matches = value.trim().match(/(?:[^\s"]+|"[^"]*")+/g);
+  if (!matches) {
+    return [];
+  }
+
+  return matches
+    .map((token) => token.replace(/^"(.*)"$/, '$1').trim())
+    .filter((token) => token.length > 0);
+};
+
+const parseEnv = (value: string): Record<string, string> | undefined => {
+  const lines = value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return undefined;
+  }
+
+  const entries: Array<[string, string]> = [];
+  for (const line of lines) {
+    const separatorIndex = line.indexOf('=');
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = line.slice(0, separatorIndex).trim();
+    const envValue = line.slice(separatorIndex + 1);
+    if (!key) {
+      continue;
+    }
+
+    entries.push([key, envValue]);
+  }
+
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
+};
 
 const toErrorMessage = (error: unknown): string => {
   if (error instanceof Error) {
@@ -301,6 +615,10 @@ export const Shell = (): JSX.Element => {
   const [isCommitDialogOpen, setIsCommitDialogOpen] = React.useState(false);
   const [isWebBrowserOpen, setIsWebBrowserOpen] = React.useState(false);
   const [browserOpenRequest, setBrowserOpenRequest] = React.useState<BrowserOpenRequest | null>(null);
+  const [browserPushItems, setBrowserPushItems] = React.useState<AppNotificationItem[]>(() =>
+    readStoredNotifications(),
+  );
+  const [isBrowserPushPanelOpen, setIsBrowserPushPanelOpen] = React.useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
   const [runConfigurationCommand, setRunConfigurationCommand] = React.useState('');
   const [threadRenameTarget, setThreadRenameTarget] =
@@ -323,6 +641,7 @@ export const Shell = (): JSX.Element => {
   const [isAgentAuthRequired, setIsAgentAuthRequired] = React.useState(false);
   const [isAgentAuthLaunching, setIsAgentAuthLaunching] = React.useState(false);
   const [agentAuthMessage, setAgentAuthMessage] = React.useState<string | null>(null);
+  const [agentSelectionEpoch, setAgentSelectionEpoch] = React.useState(0);
   const [composerPrefillRequest, setComposerPrefillRequest] = React.useState<{
     id: number;
     text: string;
@@ -331,17 +650,47 @@ export const Shell = (): JSX.Element => {
     readStoredReviewPanelWidth(),
   );
   const [isReviewPanelResizing, setIsReviewPanelResizing] = React.useState(false);
+  const [welcomeProjectPath, setWelcomeProjectPath] = React.useState('');
+  const [welcomeSelectedAgentId, setWelcomeSelectedAgentId] = React.useState<string | null>(null);
+  const [isWelcomeStarting, setIsWelcomeStarting] = React.useState(false);
+  const [isWelcomeAgentMenuExpanded, setIsWelcomeAgentMenuExpanded] = React.useState(false);
+  const [isWelcomeCustomAgentDialogOpen, setIsWelcomeCustomAgentDialogOpen] =
+    React.useState(false);
+  const [welcomeCustomCommand, setWelcomeCustomCommand] = React.useState(
+    customAgentConfig?.command ?? '',
+  );
+  const [welcomeCustomArgs, setWelcomeCustomArgs] = React.useState(
+    customAgentConfig?.args.join(' ') ?? '',
+  );
+  const [welcomeCustomCwd, setWelcomeCustomCwd] = React.useState(
+    customAgentConfig?.cwd ?? '',
+  );
+  const [welcomeCustomEnv, setWelcomeCustomEnv] = React.useState(
+    customAgentConfig?.env
+      ? Object.entries(customAgentConfig.env)
+          .map(([key, value]) => `${key}=${value}`)
+          .join('\n')
+      : '',
+  );
+  const [welcomeRegistryAgents, setWelcomeRegistryAgents] = React.useState<
+    RegistryAgentCatalogEntry[]
+  >([]);
   const lastShiftTapAtRef = React.useRef(0);
   const dispatchingQueuedPromptRef = React.useRef(false);
   const blockedQueuedPromptIdRef = React.useRef<string | null>(null);
   const previousThreadPromptingByIdRef = React.useRef<Record<string, boolean>>({});
   const appliedSessionTitleByThreadRef = React.useRef<Record<string, string>>({});
   const syncedPreviewByThreadRef = React.useRef<Record<string, string>>({});
+  const pendingComposerSubmitRef = React.useRef<{
+    text: string;
+    attachments: AcpPromptAttachment[];
+  } | null>(null);
   const connectionErrorToastRef = React.useRef('');
   const toastTimeoutByIdRef = React.useRef<Record<number, number>>({});
   const composerPrefillIdRef = React.useRef(0);
   const reviewPanelResizeActiveRef = React.useRef(false);
   const reviewPanelContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const pendingWelcomeStartPathRef = React.useRef<string | null>(null);
 
   const platform = window.desktop?.platform ?? 'darwin';
   const navigationZoneClass =
@@ -358,7 +707,8 @@ export const Shell = (): JSX.Element => {
     );
   }, [selectedThread, selectedWorkspace, workspaces]);
 
-  const workspacePath = selectedThreadWorkspace?.path ?? '/';
+  const sessionWorkspacePath = selectedThreadWorkspace?.path ?? workspaces[0]?.path ?? '';
+  const workspacePath = sessionWorkspacePath || '/';
 
   const {
     isFileTreeOpen,
@@ -387,10 +737,105 @@ export const Shell = (): JSX.Element => {
   }, [ensureSessionForThread]);
 
   React.useEffect(() => {
-    void ensureSessionForThreadRef.current(selectedThreadId, workspacePath).catch(() => {
+    if (!sessionWorkspacePath) {
+      return;
+    }
+
+    void ensureSessionForThreadRef.current(selectedThreadId, sessionWorkspacePath).catch(() => {
       // Keep the shell interactive even if ACP startup fails.
     });
-  }, [agentPreset, selectedThreadId, workspacePath]);
+  }, [agentPreset, agentSelectionEpoch, selectedThreadId, sessionWorkspacePath]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    const loadRegistryIcons = async (): Promise<void> => {
+      try {
+        const response = await fetch(ACP_REGISTRY_URL, {
+          method: 'GET',
+          cache: 'no-store',
+        });
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as unknown;
+        const entries = parseRegistryAgents(payload);
+        if (cancelled || entries.length === 0) {
+          return;
+        }
+
+        setWelcomeRegistryAgents(entries);
+      } catch {
+        // Welcome agent cards keep fallback labels when registry icons fail.
+      }
+    };
+
+    void loadRegistryIcons();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    return onStoredNotificationsChanged(() => {
+      setBrowserPushItems(readStoredNotifications());
+    });
+  }, []);
+
+  React.useEffect(() => {
+    if (!isBrowserPushPanelOpen) {
+      return;
+    }
+
+    const nextItems = browserPushItems.map((item) =>
+      item.read ? item : { ...item, read: true },
+    );
+    const hasChanges = nextItems.some((item, index) => item !== browserPushItems[index]);
+    if (!hasChanges) {
+      return;
+    }
+
+    writeStoredNotifications(nextItems);
+    setBrowserPushItems(nextItems);
+  }, [browserPushItems, isBrowserPushPanelOpen]);
+
+  React.useEffect(() => {
+    if (!isSettingsOpen) {
+      return;
+    }
+
+    setIsBrowserPushPanelOpen(false);
+  }, [isSettingsOpen]);
+
+  React.useEffect(() => {
+    if (isWelcomeCustomAgentDialogOpen) {
+      return;
+    }
+
+    setWelcomeCustomCommand(customAgentConfig?.command ?? '');
+    setWelcomeCustomArgs(customAgentConfig?.args.join(' ') ?? '');
+    setWelcomeCustomCwd(customAgentConfig?.cwd ?? '');
+    setWelcomeCustomEnv(
+      customAgentConfig?.env
+        ? Object.entries(customAgentConfig.env)
+            .map(([key, value]) => `${key}=${value}`)
+            .join('\n')
+      : '',
+    );
+  }, [customAgentConfig, isWelcomeCustomAgentDialogOpen]);
+
+  React.useEffect(() => {
+    if (welcomeProjectPath.trim().length === 0) {
+      setIsWelcomeAgentMenuExpanded(false);
+      return;
+    }
+
+    if (!welcomeSelectedAgentId) {
+      setIsWelcomeAgentMenuExpanded(true);
+    }
+  }, [welcomeProjectPath, welcomeSelectedAgentId]);
 
   React.useEffect(() => {
     if (connectionState === 'ready') {
@@ -429,30 +874,43 @@ export const Shell = (): JSX.Element => {
         return;
       }
 
-      const toastId = Date.now() + Math.floor(Math.random() * 1000);
-      setToasts((previous) => {
-        const duplicate = previous.some(
-          (toast) => toast.title === title && toast.message === cleanedMessage,
-        );
-        if (duplicate) {
-          return previous;
-        }
+      const hasDuplicateToast = toasts.some(
+        (toast) => toast.title === title && toast.message === cleanedMessage,
+      );
+      if (hasDuplicateToast) {
+        return;
+      }
 
-        return [
+      const toastId = Date.now() + Math.floor(Math.random() * 1000);
+      setToasts((previous) =>
+        [
           ...previous,
           {
             id: toastId,
             title,
             message: cleanedMessage,
           },
-        ].slice(-4);
+        ].slice(-4),
+      );
+
+      appendStoredNotification({
+        id: `app-notification-${toastId}`,
+        title,
+        body: cleanedMessage,
+        url: null,
+        origin: 'Zero',
+        source: 'app',
+        kind: 'app',
+        severity: 'error',
+        createdAtMs: Date.now(),
+        read: false,
       });
 
       toastTimeoutByIdRef.current[toastId] = window.setTimeout(() => {
         removeToast(toastId);
       }, TOAST_LIFETIME_MS);
     },
-    [removeToast],
+    [removeToast, toasts],
   );
 
   const handleSelectLandingSuggestion = React.useCallback((value: string) => {
@@ -1030,6 +1488,11 @@ export const Shell = (): JSX.Element => {
     void openFileTree();
   }, [closeFileTree, isFileTreeOpen, openFileTree]);
 
+  const unreadBrowserPushCount = React.useMemo(
+    () => browserPushItems.reduce((count, item) => (item.read ? count : count + 1), 0),
+    [browserPushItems],
+  );
+
   const handleOpenWebLink = React.useCallback((url: string) => {
     setIsSettingsOpen(false);
     setIsWebBrowserOpen(true);
@@ -1038,6 +1501,14 @@ export const Shell = (): JSX.Element => {
       url,
     });
   }, []);
+
+  const handleOpenBrowserPushUrl = React.useCallback(
+    (url: string) => {
+      setIsBrowserPushPanelOpen(false);
+      handleOpenWebLink(url);
+    },
+    [handleOpenWebLink],
+  );
 
   const sendPromptToThread = React.useCallback(
     async (
@@ -1150,9 +1621,12 @@ export const Shell = (): JSX.Element => {
     () => Object.prototype.hasOwnProperty.call(threadPromptingById, selectedThreadId),
     [selectedThreadId, threadPromptingById],
   );
-  const effectiveSessionControls = hasSessionForSelectedThread
-    ? activeSessionControls
-    : null;
+  const effectiveSessionControls =
+    selectedThreadId.trim().length === 0
+      ? activeSessionControls
+      : hasSessionForSelectedThread
+        ? activeSessionControls
+        : null;
   const queuedPrompts = React.useMemo(
     () => queuedPromptsByThread[selectedThreadId] ?? [],
     [queuedPromptsByThread, selectedThreadId],
@@ -1172,6 +1646,11 @@ export const Shell = (): JSX.Element => {
         selection.preset === agentPreset &&
         (selection.preset !== 'custom' || currentCustomSignature === incomingCustomSignature);
       if (isSameSelection) {
+        setStatusText(`Connecting ${selection.label}`);
+        setIsAgentAuthRequired(false);
+        setIsAgentAuthLaunching(false);
+        setAgentAuthMessage(null);
+        setAgentSelectionEpoch((previous) => previous + 1);
         return;
       }
 
@@ -1206,6 +1685,7 @@ export const Shell = (): JSX.Element => {
       setIsAgentAuthRequired(false);
       setIsAgentAuthLaunching(false);
       setAgentAuthMessage(null);
+      setAgentSelectionEpoch((previous) => previous + 1);
       if (selection.preset === 'custom' && selection.customConfig) {
         saveAgentConfig('custom', selection.customConfig, {
           resetThreadId: selectedThreadId || undefined,
@@ -1307,7 +1787,19 @@ export const Shell = (): JSX.Element => {
       }
 
       if (!selectedThreadId) {
-        setStatusText('Open or create a thread first');
+        const workspaceId =
+          selectedWorkspaceId || selectedWorkspace?.id || threadGroups[0]?.workspaceId || workspaces[0]?.id;
+        if (!workspaceId) {
+          setStatusText('Open a project first');
+          return;
+        }
+
+        pendingComposerSubmitRef.current = {
+          text: trimmedText,
+          attachments,
+        };
+        createThreadInWorkspace(workspaceId);
+        setStatusText('Creating a new chat');
         return;
       }
 
@@ -1333,11 +1825,38 @@ export const Shell = (): JSX.Element => {
       await sendPromptToThread(selectedThreadId, trimmedText, attachments);
     },
     [
+      createThreadInWorkspace,
       effectiveIsPrompting,
+      selectedWorkspace,
+      selectedWorkspaceId,
       selectedThreadId,
       sendPromptToThread,
+      threadGroups,
+      workspaces,
     ],
   );
+
+  React.useEffect(() => {
+    if (!selectedThreadId) {
+      return;
+    }
+
+    const pendingSubmit = pendingComposerSubmitRef.current;
+    if (!pendingSubmit) {
+      return;
+    }
+
+    if (!threadById.has(selectedThreadId)) {
+      return;
+    }
+
+    pendingComposerSubmitRef.current = null;
+    void sendPromptToThread(
+      selectedThreadId,
+      pendingSubmit.text,
+      pendingSubmit.attachments,
+    );
+  }, [selectedThreadId, sendPromptToThread, threadById]);
 
   React.useEffect(() => {
     if (!isSettingsOpen) {
@@ -1741,389 +2260,808 @@ export const Shell = (): JSX.Element => {
     }
   }, [selectedThreadWorkspace]);
 
+  const hasWorkspaces = workspaces.length > 0;
+  const hasWelcomeProjectSelection = welcomeProjectPath.trim().length > 0;
+  const hasWelcomeAgentSelection = welcomeSelectedAgentId !== null;
+  const canStartWelcome = hasWelcomeAgentSelection && hasWelcomeProjectSelection;
+  const welcomeProjectLabel = welcomeProjectPath ? welcomeProjectPath : 'Select a project';
+  const codexRegistryAgent = React.useMemo(
+    () => welcomeRegistryAgents.find((agent) => agent.id === 'codex-acp') ?? null,
+    [welcomeRegistryAgents],
+  );
+  const claudeRegistryAgent = React.useMemo(
+    () => welcomeRegistryAgents.find((agent) => agent.id === 'claude-acp') ?? null,
+    [welcomeRegistryAgents],
+  );
+  const welcomeAgentCards = React.useMemo<
+    Array<{
+      id: string;
+      registryAgentId: string;
+      preset: 'codex' | 'claude' | 'custom';
+      label: string;
+      iconUrl: string | null;
+      version?: string;
+      description?: string;
+      repository?: string;
+      launchPreview: string;
+      disabled: boolean;
+      isSelected: boolean;
+    }>
+  >(
+    () =>
+      welcomeRegistryAgents.map((agent) => {
+        const launchTemplate = toRegistryLaunchTemplate(agent, platform as NodeJS.Platform);
+        const isBuiltInCodex = agent.id === 'codex-acp';
+        const isBuiltInClaude = agent.id === 'claude-acp';
+        const preset = isBuiltInCodex ? 'codex' : isBuiltInClaude ? 'claude' : 'custom';
+        const launchPreview = launchTemplate.command
+          ? `${launchTemplate.command}${
+              launchTemplate.args.length > 0 ? ` ${launchTemplate.args.join(' ')}` : ''
+            }`
+          : 'Manual setup required';
+
+        return {
+          id: `welcome-registry-${agent.id}`,
+          registryAgentId: agent.id,
+          preset,
+          label: agent.name,
+          iconUrl: agent.iconUrl,
+          version: agent.version,
+          description: agent.description,
+          repository: agent.repository,
+          launchPreview,
+          disabled: !launchTemplate.autoConfigurable || !launchTemplate.command,
+          isSelected: welcomeSelectedAgentId === agent.id,
+        };
+      }),
+    [platform, welcomeRegistryAgents, welcomeSelectedAgentId],
+  );
+  const selectedWelcomeAgentCard = React.useMemo(
+    () =>
+      welcomeSelectedAgentId && welcomeSelectedAgentId !== WELCOME_CUSTOM_AGENT_ID
+        ? welcomeAgentCards.find((card) => card.registryAgentId === welcomeSelectedAgentId) ?? null
+        : null,
+    [welcomeAgentCards, welcomeSelectedAgentId],
+  );
+  const welcomeAgentLabel = selectedWelcomeAgentCard
+    ? selectedWelcomeAgentCard.label
+    : welcomeSelectedAgentId === WELCOME_CUSTOM_AGENT_ID
+      ? 'Custom ACP'
+      : 'Select an agent';
+
+  const handleWelcomePickProject = React.useCallback(async () => {
+    const result = await window.desktop.openFolder();
+
+    if (result.canceled) {
+      return;
+    }
+
+    if (!result.path) {
+      return;
+    }
+
+    setWelcomeProjectPath(result.path);
+    setStatusText(`Selected ${getFolderName(result.path)}`);
+  }, []);
+
+  const handleWelcomeSelectAgent = React.useCallback(
+    (preset: 'codex' | 'claude') => {
+      if (preset === 'codex') {
+        handleSelectAgentPreset({
+          preset: 'codex',
+          label: 'Codex',
+          iconUrl: codexRegistryAgent?.iconUrl ?? null,
+        });
+        setWelcomeSelectedAgentId('codex-acp');
+        setIsWelcomeAgentMenuExpanded(false);
+        return;
+      }
+
+      handleSelectAgentPreset({
+        preset: 'claude',
+        label: 'Claude Code',
+        iconUrl: claudeRegistryAgent?.iconUrl ?? null,
+      });
+      setWelcomeSelectedAgentId('claude-acp');
+      setIsWelcomeAgentMenuExpanded(false);
+    },
+    [claudeRegistryAgent?.iconUrl, codexRegistryAgent?.iconUrl, handleSelectAgentPreset],
+  );
+
+  const handleWelcomeSelectRegistryAgent = React.useCallback(
+    (registryAgentId: string) => {
+      const registryAgent = welcomeRegistryAgents.find((agent) => agent.id === registryAgentId);
+      if (!registryAgent) {
+        return;
+      }
+
+      const launchTemplate = toRegistryLaunchTemplate(
+        registryAgent,
+        platform as NodeJS.Platform,
+      );
+      if (!launchTemplate.autoConfigurable || !launchTemplate.command) {
+        setStatusText(`${registryAgent.name} needs manual configuration`);
+        return;
+      }
+
+      handleSelectAgentPreset({
+        preset: 'custom',
+        label: registryAgent.name,
+        iconUrl: registryAgent.iconUrl,
+        customConfig: {
+          command: launchTemplate.command,
+          args: launchTemplate.args,
+          env: launchTemplate.env,
+        },
+      });
+      setWelcomeSelectedAgentId(registryAgent.id);
+      setIsWelcomeAgentMenuExpanded(false);
+    },
+    [handleSelectAgentPreset, platform, welcomeRegistryAgents],
+  );
+
+  const handleWelcomeAddCustomAgent = React.useCallback(() => {
+    setWelcomeCustomCommand(customAgentConfig?.command ?? '');
+    setWelcomeCustomArgs(customAgentConfig?.args.join(' ') ?? '');
+    setWelcomeCustomCwd(customAgentConfig?.cwd ?? '');
+    setWelcomeCustomEnv(
+      customAgentConfig?.env
+        ? Object.entries(customAgentConfig.env)
+            .map(([key, value]) => `${key}=${value}`)
+            .join('\n')
+        : '',
+    );
+    setIsWelcomeCustomAgentDialogOpen(true);
+  }, [customAgentConfig]);
+
+  const handleWelcomeSaveCustomAgent = React.useCallback(() => {
+    const command = welcomeCustomCommand.trim();
+    if (!command) {
+      return;
+    }
+
+    const nextCustomConfig: AcpCustomAgentConfig = {
+      command,
+      args: parseArgs(welcomeCustomArgs),
+      cwd: welcomeCustomCwd.trim() || undefined,
+      env: parseEnv(welcomeCustomEnv),
+    };
+
+    handleSelectAgentPreset({
+      preset: 'custom',
+      label: 'Custom ACP',
+      iconUrl: null,
+      customConfig: nextCustomConfig,
+    });
+    const matchingRegistryAgent =
+      welcomeRegistryAgents.find((agent) =>
+        matchesRegistryTemplate(agent, nextCustomConfig, platform as NodeJS.Platform),
+      ) ?? null;
+    setWelcomeSelectedAgentId(matchingRegistryAgent?.id ?? WELCOME_CUSTOM_AGENT_ID);
+    setIsWelcomeCustomAgentDialogOpen(false);
+    setIsWelcomeAgentMenuExpanded(false);
+  }, [
+    handleSelectAgentPreset,
+    platform,
+    welcomeRegistryAgents,
+    welcomeCustomArgs,
+    welcomeCustomCommand,
+    welcomeCustomCwd,
+    welcomeCustomEnv,
+  ]);
+
+  const handleWelcomeStart = React.useCallback(() => {
+    if (!canStartWelcome) {
+      return;
+    }
+
+    pendingWelcomeStartPathRef.current = welcomeProjectPath;
+    setIsWelcomeStarting(true);
+    openWorkspaceFromPath(welcomeProjectPath);
+    setStatusText(`Opening ${getFolderName(welcomeProjectPath)}`);
+  }, [canStartWelcome, openWorkspaceFromPath, welcomeProjectPath]);
+
+  React.useEffect(() => {
+    const pendingPath = pendingWelcomeStartPathRef.current;
+    if (!pendingPath) {
+      return;
+    }
+
+    const workspace = workspaces.find((item) => item.path === pendingPath);
+    if (!workspace) {
+      return;
+    }
+
+    createThreadInWorkspace(workspace.id);
+    pendingWelcomeStartPathRef.current = null;
+    setIsWelcomeStarting(false);
+    setWelcomeProjectPath('');
+    setStatusText(`New chat in ${workspace.name}`);
+  }, [createThreadInWorkspace, workspaces]);
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-transparent text-stone-700 antialiased">
-      <header className="z-30 h-12 shrink-0">
-        <div className="drag-region flex h-full min-w-0">
-          <div
-            className={cn(
-              'shrink-0 overflow-hidden bg-[rgba(249,250,252,0.26)] backdrop-blur-[30px] backdrop-saturate-150',
-              !isResizing && 'transition-[width] duration-200 ease-out',
-            )}
-            style={{ width: activeSidebarWidth }}
-          >
-            <div className="no-drag flex h-full items-center justify-between px-2">
-              <div className={cn('flex items-center', navigationZoneClass)}>
-                <button
-                  type="button"
-                  aria-label="Collapse sidebar"
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-200/55 hover:text-stone-700"
-                  onClick={toggleCollapsed}
-                >
-                  <PanelLeftClose className="h-4 w-4" />
-                </button>
-              </div>
-
-              {shouldShowUpdateButton ? (
-                <button
-                  type="button"
-                  className={cn(
-                    'inline-flex h-6 items-center rounded-full px-2.5 text-[11px] font-semibold transition-colors',
-                    'bg-blue-500 text-white hover:bg-blue-600',
-                    'disabled:cursor-not-allowed disabled:opacity-65',
-                  )}
-                  onClick={() => {
-                    void handleUpdateAction();
-                  }}
-                  disabled={isUpdateButtonDisabled}
-                  title={updaterState?.message || 'Update available'}
-                >
-                  {updateButtonLabel}
-                </button>
-              ) : null}
-            </div>
-          </div>
-
-          <div
-            className={cn(
-              'flex min-w-0 flex-1 items-center gap-2 bg-[#fdfdff] pr-3',
-              !isCollapsed && 'pl-3',
-            )}
-          >
-            {isCollapsed && (
-              <div className={cn('no-drag flex h-full items-center', navigationZoneClass)}>
-                <button
-                  type="button"
-                  aria-label="Expand sidebar"
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-200/55 hover:text-stone-700"
-                  onClick={toggleCollapsed}
-                >
-                  <PanelLeftOpen className="h-4 w-4" />
-                </button>
-              </div>
-            )}
-
-            {!isSettingsOpen ? (
-              <div className="min-w-0 flex flex-1 items-center gap-2">
-                <p className="truncate text-[13px] font-semibold text-stone-900">{headerTitle}</p>
-                {selectedThreadWorkspace?.path ? (
-                  <TooltipProvider delayDuration={180}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className={cn(
-                            'no-drag truncate text-[13px] text-stone-600 max-[860px]:hidden',
-                            'transition-colors hover:text-stone-800',
-                          )}
-                          onClick={() => {
-                            void handleOpenWorkspaceInFinder();
-                          }}
-                        >
-                          {headerSubtitle}
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent>{selectedThreadWorkspace.path}</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                ) : (
-                  <p
-                    className="truncate text-[13px] text-stone-600 max-[860px]:hidden"
-                    title={`${headerSubtitle} · ${statusText}`}
-                  >
-                    {headerSubtitle}
-                  </p>
+      {hasWorkspaces ? (
+        <>
+          <header className="z-30 h-11 shrink-0">
+            <div className="drag-region flex h-full min-w-0">
+              <div
+                className={cn(
+                  'shrink-0 overflow-hidden bg-[rgba(249,250,252,0.26)] backdrop-blur-[30px] backdrop-saturate-150',
+                  !isResizing && 'transition-[width] duration-200 ease-out',
                 )}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
+                style={{ width: activeSidebarWidth }}
+              >
+                <div className="flex h-full items-center justify-between px-2">
+                  <div className={cn('flex items-center', navigationZoneClass)}>
                     <button
                       type="button"
-                      aria-label="Thread options"
-                      className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-xl text-stone-500 transition-colors hover:bg-stone-200/65 hover:text-stone-700 max-[980px]:hidden"
+                      aria-label="Collapse sidebar"
+                      className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-200/55 hover:text-stone-700"
+                      onClick={toggleCollapsed}
                     >
-                      <Ellipsis className="h-3.5 w-3.5" />
+                      <PanelLeftClose className="h-4 w-4" />
                     </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start" className="w-56">
-                    <DropdownMenuItem onSelect={handleRenameThreadFromMenu}>
-                      Rename thread
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            ) : (
-              <div className="min-w-0 flex-1" />
-            )}
-
-            {!isSettingsOpen ? (
-              <ToolbarActions
-                onOpenFileTree={handleToggleFileTree}
-                isFileTreeOpen={isFileTreeOpen}
-                onToggleFilesView={toggleReviewPanelVisibility}
-                isFilesViewOpen={isReviewPanelVisible}
-                openFilesCount={reviewFiles.length}
-                onOpenCommitDialog={() => {
-                  setIsCommitDialogOpen(true);
-                }}
-                onOpenRunConfiguration={() => {
-                  setIsRunConfigurationOpen(true);
-                }}
-                onOpenWebBrowser={() => {
-                  setIsWebBrowserOpen((previous) => !previous);
-                }}
-                isWebBrowserOpen={isWebBrowserOpen}
-                onToggleTerminal={() => setIsTerminalOpen((previous) => !previous)}
-                isTerminalOpen={isTerminalOpen}
-              />
-            ) : null}
-          </div>
-        </div>
-      </header>
-
-      {isSettingsOpen ? (
-        <main className="min-h-0 flex-1 overflow-hidden bg-transparent">
-          <SettingsLayout
-            onBack={() => {
-              setIsSettingsOpen(false);
-            }}
-            sidebarWidth={activeSidebarWidth}
-            isResizing={isResizing}
-            showResizeHandle={!isCollapsed}
-            onStartResizing={startResizing}
-          />
-        </main>
-      ) : (
-        <div className="flex min-h-0 flex-1">
-          <div
-            className={cn(
-              'relative shrink-0 overflow-hidden',
-              !isResizing && 'transition-[width] duration-200 ease-out',
-            )}
-            style={{ width: activeSidebarWidth }}
-          >
-            <Sidebar
-              width={sidebarWidth}
-              isResizing={isResizing}
-              selectedThreadId={selectedThreadId}
-              isSettingsOpen={isSettingsOpen}
-              groups={threadGroups}
-              threadIndicatorById={threadIndicatorById}
-              onSelectThread={(threadId) => {
-                setIsSettingsOpen(false);
-                setCompletedThreadIds((previous) => {
-                  if (!previous.has(threadId)) {
-                    return previous;
-                  }
-
-                  const next = new Set(previous);
-                  next.delete(threadId);
-                  return next;
-                });
-                selectThread(threadId);
-              }}
-              onCreateThread={handleCreateThread}
-              onOpenFolder={() => {
-                void handleOpenFolder();
-              }}
-              onOpenCommandPalette={handleOpenCommandPalette}
-              onCreateThreadInGroup={handleCreateThreadInGroup}
-              onRenameGroup={handleRenameGroup}
-              onRemoveGroup={handleRemoveGroup}
-              onRenameThread={(threadId) => {
-                openRenameThreadDialog(threadId);
-              }}
-              onRemoveThread={(threadId, currentTitle) => {
-                handleRemoveThread(threadId, currentTitle);
-              }}
-              onOpenSettings={() => {
-                setIsSettingsOpen(true);
-              }}
-            />
-          </div>
-
-          {!isCollapsed && (
-            <button
-              type="button"
-              aria-label="Resize sidebar"
-              className="no-drag relative w-0 cursor-col-resize"
-              onPointerDown={() => startResizing()}
-            >
-              <span className="absolute inset-y-0 -left-3 w-6" />
-            </button>
-          )}
-
-          <main className="relative flex-1 overflow-hidden bg-[#fdfdff]">
-            <div className="flex h-full min-w-0">
-              <FileTreeDialog
-                open={isFileTreeOpen}
-                side="left"
-                files={files}
-                loading={isLoadingTree}
-                workspaceName={workspaceName}
-                activeFilePath={activeReviewFilePath}
-                onOpenFile={(path) => {
-                  void openFile(path);
-                }}
-              />
-
-              <div className="flex min-w-0 flex-1 flex-col">
-                <div ref={reviewPanelContainerRef} className="min-h-0 flex flex-1">
-                  {isReviewPanelOpen ? (
-                    <div
-                      className={cn(
-                        'relative min-w-0 shrink-0 border-r border-stone-200/80 bg-[#fdfdff]',
-                        'transition-[width] duration-150 ease-out',
-                        isReviewPanelResizing && 'transition-none',
-                      )}
-                      style={{ width: reviewPanelWidth }}
-                    >
-                      <button
-                        type="button"
-                        aria-label="Resize file view"
-                        className="no-drag group absolute inset-y-0 right-0 z-10 w-2 translate-x-1 cursor-col-resize"
-                        onPointerDown={startReviewPanelResizing}
-                      >
-                        <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-stone-300/80" />
-                      </button>
-                      <ReviewPanel
-                        open={isReviewPanelOpen}
-                        loading={isLoadingFile}
-                        tabs={reviewFiles.map((file) => file.relativePath)}
-                        activeFilePath={activeReviewFilePath}
-                        content={activeReviewFile?.content ?? ''}
-                        fileContentByPath={Object.fromEntries(
-                          reviewFiles.map((file) => [file.relativePath, file.content]),
-                        )}
-                        onSelectTab={setActiveReviewFile}
-                        onCloseTab={closeReviewFile}
-                        onReorderTabs={reorderReviewFiles}
-                      />
-                    </div>
-                  ) : null}
-
-                  <div className="min-w-0 flex flex-1 flex-col">
-                    <div className="mx-auto flex h-full w-full max-w-[830px] flex-col px-6 pb-3 pt-2">
-                      <Transcript
-                        threadId={selectedThreadId}
-                        workspaceName={workspaceName}
-                        projects={workspaces.map((workspace) => ({
-                          id: workspace.id,
-                          name: workspace.name,
-                          path: workspace.path,
-                        }))}
-                        selectedProjectId={landingSelectedProjectId}
-                        timeline={effectiveTimeline}
-                        isNewThread={isNewThread}
-                        isThinking={effectiveIsPrompting}
-                        pendingPermission={effectivePendingPermission}
-                        onSelectProject={(workspaceId) => {
-                          selectWorkspace(workspaceId);
-                        }}
-                        onAddProject={() => {
-                          void handleOpenFolder();
-                        }}
-                        onResolvePermission={(requestId, optionId) => {
-                          void resolvePermission(requestId, {
-                            outcome: 'selected',
-                            optionId,
-                          });
-                        }}
-                        onCancelPermission={(requestId) => {
-                          void resolvePermission(requestId, {
-                            outcome: 'cancelled',
-                          });
-                          void cancelPrompt();
-                        }}
-                        onOpenFile={(path) => {
-                          void openFile(path);
-                        }}
-                        onOpenLink={handleOpenWebLink}
-                        onSelectSuggestion={handleSelectLandingSuggestion}
-                      />
-                      {connectingStatusMessage ? (
-                        <div className="mb-3 no-drag flex items-center gap-2 rounded-xl border border-sky-300/80 bg-sky-50/80 px-3 py-2 text-sky-900">
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          <p className="text-[12px]">{connectingStatusMessage}</p>
-                        </div>
-                      ) : null}
-                      {isAgentAuthRequired || isAgentAuthLaunching ? (
-                        <div className="mb-3 no-drag rounded-xl border border-amber-300/70 bg-amber-50/80 px-3 py-2">
-                          <p className="text-[12px] text-amber-900">
-                            {agentAuthMessage ??
-                              'Authentication is required before sending prompts.'}
-                          </p>
-                          <div className="mt-2 flex items-center gap-2">
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              className="h-7 border-amber-400/80 bg-amber-100/70 px-2.5 text-[11px] text-amber-900 hover:bg-amber-100"
-                              onClick={() => {
-                                void startAgentAuthentication();
-                              }}
-                              disabled={isAgentAuthLaunching}
-                            >
-                              {isAgentAuthLaunching
-                                ? 'Opening login…'
-                                : 'Authenticate agent'}
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 px-2 text-[11px] text-amber-900 hover:bg-amber-100/70"
-                              onClick={() => {
-                                setIsAgentAuthRequired(false);
-                                setAgentAuthMessage(null);
-                              }}
-                              disabled={isAgentAuthLaunching}
-                            >
-                              Dismiss
-                            </Button>
-                          </div>
-                        </div>
-                      ) : null}
-                      <Composer
-                        workspacePath={workspacePath}
-                        disabled={isComposerDisabled}
-                        disabledMessage={composerDisabledMessage}
-                        isPrompting={effectiveIsPrompting}
-                        queuedPrompts={queuedPrompts.map((item) => ({
-                          id: item.id,
-                          text: item.text,
-                        }))}
-                        onSteerQueuedPrompt={steerQueuedPrompt}
-                        onRemoveQueuedPrompt={removeQueuedPrompt}
-                        onReorderQueuedPrompt={reorderQueuedPrompt}
-                        agentPreset={agentPreset}
-                        codexAgentConfig={codexAgentConfig}
-                        claudeAgentConfig={claudeAgentConfig}
-                        customAgentConfig={customAgentConfig}
-                        onSelectAgentPreset={handleSelectAgentPreset}
-                        onSaveAgentConfig={saveAgentConfig}
-                        onSubmit={handleComposerSubmit}
-                        sessionControls={effectiveSessionControls}
-                        onSetSessionMode={setSessionMode}
-                        onSetSessionModel={setSessionModel}
-                        onSetSessionConfigOption={setSessionConfigOption}
-                        onCancel={cancelPrompt}
-                        prefillRequest={composerPrefillRequest}
-                      />
-                    </div>
                   </div>
+
+                  {shouldShowUpdateButton ? (
+                    <button
+                      type="button"
+                      className={cn(
+                        'no-drag inline-flex h-6 items-center rounded-full px-2.5 text-[11px] font-semibold transition-colors',
+                        'bg-blue-500 text-white hover:bg-blue-600',
+                        'disabled:cursor-not-allowed disabled:opacity-65',
+                      )}
+                      onClick={() => {
+                        void handleUpdateAction();
+                      }}
+                      disabled={isUpdateButtonDisabled}
+                      title={updaterState?.message || 'Update available'}
+                    >
+                      {updateButtonLabel}
+                    </button>
+                  ) : null}
                 </div>
-                <TerminalPanel
-                  open={isTerminalOpen}
-                  cwd={workspacePath}
-                  runRequest={runRequest}
-                  onRequestClose={() => setIsTerminalOpen(false)}
+              </div>
+
+              <div
+                className={cn(
+                  'flex min-w-0 flex-1 items-center gap-2 bg-[#fdfdff] pr-3',
+                  !isCollapsed && 'pl-3',
+                )}
+              >
+                {isCollapsed && (
+                  <div className={cn('flex h-full items-center', navigationZoneClass)}>
+                    <button
+                      type="button"
+                      aria-label="Expand sidebar"
+                      className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-200/55 hover:text-stone-700"
+                      onClick={toggleCollapsed}
+                    >
+                      <PanelLeftOpen className="h-4 w-4" />
+                    </button>
+                  </div>
+                )}
+
+                {!isSettingsOpen ? (
+                  <div className="min-w-0 flex flex-1 items-center gap-2">
+                    <p className="truncate text-[13px] font-semibold text-stone-900">{headerTitle}</p>
+                    {selectedThreadWorkspace?.path ? (
+                      <TooltipProvider delayDuration={180}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className={cn(
+                                'no-drag truncate text-[13px] text-stone-600 max-[860px]:hidden',
+                                'transition-colors hover:text-stone-800',
+                              )}
+                              onClick={() => {
+                                void handleOpenWorkspaceInFinder();
+                              }}
+                            >
+                              {headerSubtitle}
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>{selectedThreadWorkspace.path}</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    ) : (
+                      <p
+                        className="truncate text-[13px] text-stone-600 max-[860px]:hidden"
+                        title={`${headerSubtitle} · ${statusText}`}
+                      >
+                        {headerSubtitle}
+                      </p>
+                    )}
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="Thread options"
+                          className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-xl text-stone-500 transition-colors hover:bg-stone-200/65 hover:text-stone-700 max-[980px]:hidden"
+                        >
+                          <Ellipsis className="h-3.5 w-3.5" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-56">
+                        <DropdownMenuItem onSelect={handleRenameThreadFromMenu}>
+                          Rename thread
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                ) : (
+                  <div className="min-w-0 flex-1" />
+                )}
+
+                {!isSettingsOpen ? (
+                  <ToolbarActions
+                    onOpenFileTree={handleToggleFileTree}
+                    isFileTreeOpen={isFileTreeOpen}
+                    onToggleFilesView={toggleReviewPanelVisibility}
+                    isFilesViewOpen={isReviewPanelVisible}
+                    openFilesCount={reviewFiles.length}
+                    onOpenCommitDialog={() => {
+                      setIsCommitDialogOpen(true);
+                    }}
+                    onOpenRunConfiguration={() => {
+                      setIsRunConfigurationOpen(true);
+                    }}
+                    onOpenWebBrowser={() => {
+                      setIsWebBrowserOpen((previous) => !previous);
+                    }}
+                    isWebBrowserOpen={isWebBrowserOpen}
+                    onToggleTerminal={() => setIsTerminalOpen((previous) => !previous)}
+                    isTerminalOpen={isTerminalOpen}
+                    unreadPushCount={unreadBrowserPushCount}
+                    isPushPanelOpen={isBrowserPushPanelOpen}
+                    onTogglePushPanel={() => {
+                      setIsBrowserPushPanelOpen((previous) => !previous);
+                    }}
+                  />
+                ) : null}
+              </div>
+            </div>
+          </header>
+
+          {isSettingsOpen ? (
+            <main className="min-h-0 flex-1 overflow-hidden bg-transparent">
+              <SettingsLayout
+                onBack={() => {
+                  setIsSettingsOpen(false);
+                }}
+                sidebarWidth={activeSidebarWidth}
+                isResizing={isResizing}
+                showResizeHandle={!isCollapsed}
+                onStartResizing={startResizing}
+              />
+            </main>
+          ) : (
+            <div className="flex min-h-0 flex-1">
+              <div
+                className={cn(
+                  'relative shrink-0 overflow-hidden',
+                  !isResizing && 'transition-[width] duration-200 ease-out',
+                )}
+                style={{ width: activeSidebarWidth }}
+              >
+                <Sidebar
+                  width={sidebarWidth}
+                  isResizing={isResizing}
+                  selectedThreadId={selectedThreadId}
+                  isSettingsOpen={isSettingsOpen}
+                  groups={threadGroups}
+                  threadIndicatorById={threadIndicatorById}
+                  onSelectThread={(threadId) => {
+                    setIsSettingsOpen(false);
+                    setCompletedThreadIds((previous) => {
+                      if (!previous.has(threadId)) {
+                        return previous;
+                      }
+
+                      const next = new Set(previous);
+                      next.delete(threadId);
+                      return next;
+                    });
+                    selectThread(threadId);
+                  }}
+                  onCreateThread={handleCreateThread}
+                  onOpenFolder={() => {
+                    void handleOpenFolder();
+                  }}
+                  onOpenCommandPalette={handleOpenCommandPalette}
+                  onCreateThreadInGroup={handleCreateThreadInGroup}
+                  onRenameGroup={handleRenameGroup}
+                  onRemoveGroup={handleRemoveGroup}
+                  onRenameThread={(threadId) => {
+                    openRenameThreadDialog(threadId);
+                  }}
+                  onRemoveThread={(threadId, currentTitle) => {
+                    handleRemoveThread(threadId, currentTitle);
+                  }}
+                  onOpenSettings={() => {
+                    setIsSettingsOpen(true);
+                  }}
                 />
               </div>
 
-              <WebBrowserPanel open={isWebBrowserOpen} openRequest={browserOpenRequest} />
+              {!isCollapsed && (
+                <button
+                  type="button"
+                  aria-label="Resize sidebar"
+                  className="no-drag relative w-0 cursor-col-resize"
+                  onPointerDown={() => startResizing()}
+                >
+                  <span className="absolute inset-y-0 -left-3 w-6" />
+                </button>
+              )}
+
+              <main className="relative flex-1 overflow-hidden bg-[#fdfdff]">
+                <div className="flex h-full min-w-0">
+                  <FileTreeDialog
+                    open={isFileTreeOpen}
+                    side="left"
+                    files={files}
+                    loading={isLoadingTree}
+                    workspaceName={workspaceName}
+                    activeFilePath={activeReviewFilePath}
+                    onOpenFile={(path) => {
+                      void openFile(path);
+                    }}
+                  />
+
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <div ref={reviewPanelContainerRef} className="min-h-0 flex flex-1">
+                      {isReviewPanelOpen ? (
+                        <div
+                          className={cn(
+                            'relative min-w-0 shrink-0 border-r border-stone-200/80 bg-[#fdfdff]',
+                            'transition-[width] duration-150 ease-out',
+                            isReviewPanelResizing && 'transition-none',
+                          )}
+                          style={{ width: reviewPanelWidth }}
+                        >
+                          <button
+                            type="button"
+                            aria-label="Resize file view"
+                            className="no-drag group absolute inset-y-0 right-0 z-10 w-2 translate-x-1 cursor-col-resize"
+                            onPointerDown={startReviewPanelResizing}
+                          >
+                            <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-stone-300/80" />
+                          </button>
+                          <ReviewPanel
+                            open={isReviewPanelOpen}
+                            loading={isLoadingFile}
+                            tabs={reviewFiles.map((file) => file.relativePath)}
+                            activeFilePath={activeReviewFilePath}
+                            content={activeReviewFile?.content ?? ''}
+                            fileContentByPath={Object.fromEntries(
+                              reviewFiles.map((file) => [file.relativePath, file.content]),
+                            )}
+                            onSelectTab={setActiveReviewFile}
+                            onCloseTab={closeReviewFile}
+                            onReorderTabs={reorderReviewFiles}
+                          />
+                        </div>
+                      ) : null}
+
+                      <div className="min-w-0 flex flex-1 flex-col">
+                        <div className="mx-auto flex h-full w-full max-w-[830px] flex-col px-6 pb-3 pt-2">
+                          <Transcript
+                            threadId={selectedThreadId}
+                            workspaceName={workspaceName}
+                            projects={workspaces.map((workspace) => ({
+                              id: workspace.id,
+                              name: workspace.name,
+                              path: workspace.path,
+                            }))}
+                            selectedProjectId={landingSelectedProjectId}
+                            timeline={effectiveTimeline}
+                            isNewThread={isNewThread}
+                            isThinking={effectiveIsPrompting}
+                            pendingPermission={effectivePendingPermission}
+                            onSelectProject={(workspaceId) => {
+                              selectWorkspace(workspaceId);
+                            }}
+                            onAddProject={() => {
+                              void handleOpenFolder();
+                            }}
+                            onResolvePermission={(requestId, optionId) => {
+                              void resolvePermission(requestId, {
+                                outcome: 'selected',
+                                optionId,
+                              });
+                            }}
+                            onCancelPermission={(requestId) => {
+                              void resolvePermission(requestId, {
+                                outcome: 'cancelled',
+                              });
+                              void cancelPrompt();
+                            }}
+                            onOpenFile={(path) => {
+                              void openFile(path);
+                            }}
+                            onOpenLink={handleOpenWebLink}
+                            onSelectSuggestion={handleSelectLandingSuggestion}
+                          />
+                          {connectingStatusMessage ? (
+                            <div className="mb-3 no-drag flex items-center gap-2 rounded-xl border border-sky-300/80 bg-sky-50/80 px-3 py-2 text-sky-900">
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              <p className="text-[12px]">{connectingStatusMessage}</p>
+                            </div>
+                          ) : null}
+                          {isAgentAuthRequired || isAgentAuthLaunching ? (
+                            <div className="mb-3 no-drag rounded-xl border border-amber-300/70 bg-amber-50/80 px-3 py-2">
+                              <p className="text-[12px] text-amber-900">
+                                {agentAuthMessage ??
+                                  'Authentication is required before sending prompts.'}
+                              </p>
+                              <div className="mt-2 flex items-center gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 border-amber-400/80 bg-amber-100/70 px-2.5 text-[11px] text-amber-900 hover:bg-amber-100"
+                                  onClick={() => {
+                                    void startAgentAuthentication();
+                                  }}
+                                  disabled={isAgentAuthLaunching}
+                                >
+                                  {isAgentAuthLaunching
+                                    ? 'Opening login…'
+                                    : 'Authenticate agent'}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 px-2 text-[11px] text-amber-900 hover:bg-amber-100/70"
+                                  onClick={() => {
+                                    setIsAgentAuthRequired(false);
+                                    setAgentAuthMessage(null);
+                                  }}
+                                  disabled={isAgentAuthLaunching}
+                                >
+                                  Dismiss
+                                </Button>
+                              </div>
+                            </div>
+                          ) : null}
+                          <Composer
+                            workspacePath={workspacePath}
+                            disabled={isComposerDisabled}
+                            disabledMessage={composerDisabledMessage}
+                            isPrompting={effectiveIsPrompting}
+                            queuedPrompts={queuedPrompts.map((item) => ({
+                              id: item.id,
+                              text: item.text,
+                            }))}
+                            onSteerQueuedPrompt={steerQueuedPrompt}
+                            onRemoveQueuedPrompt={removeQueuedPrompt}
+                            onReorderQueuedPrompt={reorderQueuedPrompt}
+                            agentPreset={agentPreset}
+                            codexAgentConfig={codexAgentConfig}
+                            claudeAgentConfig={claudeAgentConfig}
+                            customAgentConfig={customAgentConfig}
+                            onSelectAgentPreset={handleSelectAgentPreset}
+                            onSaveAgentConfig={saveAgentConfig}
+                            onSubmit={handleComposerSubmit}
+                            sessionControls={effectiveSessionControls}
+                            onSetSessionMode={setSessionMode}
+                            onSetSessionModel={setSessionModel}
+                            onSetSessionConfigOption={setSessionConfigOption}
+                            onCancel={cancelPrompt}
+                            prefillRequest={composerPrefillRequest}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    <TerminalPanel
+                      open={isTerminalOpen}
+                      cwd={workspacePath}
+                      runRequest={runRequest}
+                      onRequestClose={() => setIsTerminalOpen(false)}
+                    />
+                  </div>
+
+                  <WebBrowserPanel open={isWebBrowserOpen} openRequest={browserOpenRequest} />
+                  <BrowserPushPanel
+                    open={isBrowserPushPanelOpen}
+                    items={browserPushItems}
+                    onOpenUrl={handleOpenBrowserPushUrl}
+                  />
+                </div>
+              </main>
             </div>
-          </main>
-        </div>
+          )}
+        </>
+      ) : (
+        <main className="relative flex min-h-0 flex-1 bg-[#fdfdff]">
+          <div className="drag-region absolute inset-x-0 top-0 h-11" />
+          <div className="no-drag mx-auto flex h-full w-full max-w-[830px] flex-col items-center justify-center px-6 pb-8 pt-4">
+            <div className="mt-5 flex flex-col items-center gap-0">
+              <h1 className="text-[34px] font-semibold tracking-[-0.02em] text-stone-900">Set up</h1>
+              <img src={zeroLogo} alt="Zero logo" className="h-24 w-auto object-contain" />
+            </div>
+
+            <div className="mt-7 w-full max-w-[760px]">
+              <div
+                className={cn(
+                  'grid grid-cols-1 gap-2',
+                  hasWelcomeProjectSelection
+                    ? hasWelcomeAgentSelection
+                      ? 'sm:grid-cols-[minmax(0,2.5fr)_minmax(0,1fr)_auto]'
+                      : 'sm:grid-cols-[minmax(0,2.5fr)_minmax(0,1fr)]'
+                    : 'sm:grid-cols-1',
+                )}
+              >
+                <button
+                  type="button"
+                  className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-2xl bg-stone-100 px-3 text-[14px] font-medium text-stone-700 transition-colors hover:bg-stone-200"
+                  onClick={() => {
+                    void handleWelcomePickProject();
+                  }}
+                >
+                  <Folder className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0 truncate">{welcomeProjectLabel}</span>
+                </button>
+
+                {hasWelcomeProjectSelection ? (
+                  <button
+                    type="button"
+                    className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-2xl bg-stone-100 px-3 text-[14px] font-medium text-stone-700 transition-colors hover:bg-stone-200"
+                    onClick={() => {
+                      setIsWelcomeAgentMenuExpanded((previous) => !previous);
+                    }}
+                  >
+                    {selectedWelcomeAgentCard?.iconUrl ? (
+                      <img
+                        src={selectedWelcomeAgentCard.iconUrl}
+                        alt={`${welcomeAgentLabel} logo`}
+                        className="zeroade-agent-icon-image h-4 w-4 shrink-0 object-contain"
+                      />
+                    ) : (
+                      <Plus className="h-4 w-4 shrink-0" />
+                    )}
+                    <span className="min-w-0 truncate">{welcomeAgentLabel}</span>
+                    <ChevronDown
+                      className={cn(
+                        'h-4 w-4 shrink-0 transition-transform duration-200',
+                        isWelcomeAgentMenuExpanded && 'rotate-180',
+                      )}
+                    />
+                  </button>
+                ) : null}
+
+                {hasWelcomeProjectSelection && hasWelcomeAgentSelection ? (
+                  <Button
+                    type="button"
+                    size="md"
+                    variant="primary"
+                    className="h-11 w-11 rounded-full p-0"
+                    disabled={!canStartWelcome || isWelcomeStarting}
+                    onClick={handleWelcomeStart}
+                    aria-label={isWelcomeStarting ? 'Applying setup' : 'Apply setup'}
+                  >
+                    {isWelcomeStarting ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <ArrowUp className="h-4 w-4" />
+                    )}
+                  </Button>
+                ) : null}
+              </div>
+
+              <div
+                className={cn(
+                  'overflow-hidden transition-[max-height,opacity,transform,margin] duration-300 ease-out',
+                  hasWelcomeProjectSelection && isWelcomeAgentMenuExpanded
+                    ? 'mt-3 max-h-[760px] translate-y-0 opacity-100'
+                    : 'mt-0 max-h-0 -translate-y-1 opacity-0 pointer-events-none',
+                )}
+              >
+                <div className="h-[44vh] min-h-[220px] max-h-[520px] overflow-y-auto pr-1">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {welcomeAgentCards.map((card) => {
+                      const selectCard = (): void => {
+                        if (card.disabled) {
+                          return;
+                        }
+
+                        if (card.preset === 'codex' || card.preset === 'claude') {
+                          handleWelcomeSelectAgent(card.preset);
+                          return;
+                        }
+
+                        handleWelcomeSelectRegistryAgent(card.registryAgentId);
+                      };
+
+                      return (
+                        <div
+                          key={card.id}
+                          role={card.disabled ? undefined : 'button'}
+                          tabIndex={card.disabled ? -1 : 0}
+                          className={cn(
+                            'w-full rounded-2xl bg-stone-100 px-3 py-2 text-left transition-colors',
+                            'text-stone-700 hover:bg-stone-200',
+                            card.isSelected && 'bg-stone-300 text-stone-900',
+                            card.disabled && 'cursor-not-allowed opacity-55 hover:bg-stone-100',
+                          )}
+                          onClick={selectCard}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              selectCard();
+                            }
+                          }}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex min-w-0 items-center gap-1.5">
+                                {card.iconUrl ? (
+                                  <img
+                                    src={card.iconUrl}
+                                    alt={`${card.label} logo`}
+                                    className="zeroade-agent-icon-image h-4 w-4 shrink-0 object-contain"
+                                  />
+                                ) : null}
+                                <p className="truncate text-[14px] font-semibold leading-tight text-current">
+                                  {card.label}
+                                </p>
+                              </div>
+                              <p className="mt-0.5 truncate text-[11px] text-stone-500">
+                                {card.registryAgentId}
+                                {card.version ? ` · v${card.version}` : ''}
+                              </p>
+                              {card.description ? (
+                                <p className="mt-0.5 truncate text-[11px] leading-tight text-stone-600">
+                                  {card.description}
+                                </p>
+                              ) : null}
+                            </div>
+                            {card.repository ? (
+                              <TooltipProvider delayDuration={120}>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      aria-label={`Open repository ${card.repository}`}
+                                      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-200/70 hover:text-stone-800"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        handleOpenWebLink(card.repository ?? '');
+                                      }}
+                                    >
+                                      <ExternalLink className="h-3.5 w-3.5" />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent className="max-w-[280px] break-all text-[11px]">
+                                    {card.repository}
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="mt-3 h-11 w-full justify-center rounded-2xl bg-stone-100 text-[14px] font-medium text-stone-700 hover:bg-stone-200"
+                  onClick={handleWelcomeAddCustomAgent}
+                >
+                  <Plus className="mr-1.5 h-4 w-4" />
+                  Add a Custom Agent...
+                </Button>
+              </div>
+            </div>
+          </div>
+        </main>
       )}
 
       <CommandPalette
@@ -2158,6 +3096,84 @@ export const Shell = (): JSX.Element => {
           );
         }}
       />
+
+      <Dialog
+        open={isWelcomeCustomAgentDialogOpen}
+        onOpenChange={setIsWelcomeCustomAgentDialogOpen}
+      >
+        <DialogContent className="no-drag max-w-[520px] rounded-[20px] p-0">
+          <div className="px-4 pb-4 pt-4">
+            <h2 className="text-[24px] font-normal leading-none tracking-[-0.015em] text-stone-900">
+              Custom ACP Agent
+            </h2>
+            <p className="mt-2 text-[13px] leading-[1.35] text-stone-500">
+              Configure launch settings for a custom ACP agent.
+            </p>
+
+            <div className="mt-4 space-y-3">
+              <label className="block text-[11px] font-normal uppercase tracking-[0.08em] text-stone-500">
+                Command
+                <input
+                  value={welcomeCustomCommand}
+                  onChange={(event) => setWelcomeCustomCommand(event.target.value)}
+                  placeholder="npx"
+                  className="no-drag mt-1.5 h-9 w-full rounded-[10px] border-0 bg-stone-100 px-3 text-[13px] font-normal text-stone-800 placeholder:text-stone-400 focus:outline-none"
+                />
+              </label>
+
+              <label className="block text-[11px] font-normal uppercase tracking-[0.08em] text-stone-500">
+                Arguments
+                <input
+                  value={welcomeCustomArgs}
+                  onChange={(event) => setWelcomeCustomArgs(event.target.value)}
+                  placeholder="-y your-agent --transport stdio"
+                  className="no-drag mt-1.5 h-9 w-full rounded-[10px] border-0 bg-stone-100 px-3 text-[13px] font-normal text-stone-800 placeholder:text-stone-400 focus:outline-none"
+                />
+              </label>
+
+              <label className="block text-[11px] font-normal uppercase tracking-[0.08em] text-stone-500">
+                Working directory (optional)
+                <input
+                  value={welcomeCustomCwd}
+                  onChange={(event) => setWelcomeCustomCwd(event.target.value)}
+                  placeholder={welcomeProjectPath || '/path/to/workspace'}
+                  className="no-drag mt-1.5 h-9 w-full rounded-[10px] border-0 bg-stone-100 px-3 text-[13px] font-normal text-stone-800 placeholder:text-stone-400 focus:outline-none"
+                />
+              </label>
+
+              <label className="block text-[11px] font-normal uppercase tracking-[0.08em] text-stone-500">
+                Environment (optional)
+                <textarea
+                  value={welcomeCustomEnv}
+                  onChange={(event) => setWelcomeCustomEnv(event.target.value)}
+                  placeholder={'API_KEY=...\nDEBUG=1'}
+                  spellCheck={false}
+                  className="no-drag mt-1.5 h-[86px] w-full resize-none rounded-[10px] border-0 bg-stone-100 px-3 py-2 font-mono text-[12px] font-normal leading-[1.45] text-stone-800 placeholder:text-stone-400 focus:outline-none"
+                />
+              </label>
+            </div>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button
+                variant="ghost"
+                className="h-9 rounded-[11px] px-3 text-[13px]"
+                onClick={() => {
+                  setIsWelcomeCustomAgentDialogOpen(false);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                className="h-9 rounded-[11px] bg-stone-700 px-4 text-[13px] font-semibold text-white hover:bg-stone-800 disabled:bg-stone-300"
+                disabled={welcomeCustomCommand.trim().length === 0}
+                onClick={handleWelcomeSaveCustomAgent}
+              >
+                Apply and connect
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <RenameThreadDialog
         open={Boolean(threadRenameTarget)}

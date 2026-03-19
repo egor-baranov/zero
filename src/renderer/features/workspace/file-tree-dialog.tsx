@@ -134,19 +134,6 @@ const buildFileTree = (filePaths: string[]): TreeNode[] => {
   return finalize(root);
 };
 
-const collectDirectoryPaths = (nodes: TreeNode[]): string[] => {
-  const paths: string[] = [];
-
-  for (const node of nodes) {
-    if (node.type === 'dir') {
-      paths.push(node.path);
-      paths.push(...collectDirectoryPaths(node.children));
-    }
-  }
-
-  return paths;
-};
-
 export const FileTreeDialog = ({
   open,
   files,
@@ -299,18 +286,13 @@ export const FileTreeDialog = ({
     [rootName, tree],
   );
 
-  const directoryPaths = React.useMemo(
-    () => collectDirectoryPaths([fullRootNode]),
-    [fullRootNode],
-  );
-
   React.useEffect(() => {
     if (!open) {
       return;
     }
 
-    setExpandedDirs(new Set(directoryPaths));
-  }, [directoryPaths, open]);
+    setExpandedDirs(new Set([ROOT_NODE_PATH]));
+  }, [fullRootNode.path, open]);
 
   const toggleDirectory = React.useCallback((path: string) => {
     setExpandedDirs((previous) => {

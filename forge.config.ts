@@ -1,12 +1,18 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
 import { MakerZIP } from '@electron-forge/maker-zip';
+import { MakerDMG } from '@electron-forge/maker-dmg';
 import { MakerDeb } from '@electron-forge/maker-deb';
 import { MakerRpm } from '@electron-forge/maker-rpm';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
+
+const appleSigningIdentity = process.env.APPLE_SIGNING_IDENTITY?.trim();
+const appleId = process.env.APPLE_ID?.trim();
+const appleAppSpecificPassword = process.env.APPLE_APP_SPECIFIC_PASSWORD?.trim();
+const appleTeamId = process.env.APPLE_TEAM_ID?.trim();
 
 const shouldIgnorePackagedFile = (file: string): boolean => {
   if (!file) {
@@ -32,6 +38,23 @@ const config: ForgeConfig = {
       // Keep runtime-executed binaries outside app.asar.
       unpackDir: '{**/node_modules/@zed-industries,**/node_modules/node-pty}',
     },
+    osxSign: appleSigningIdentity
+      ? {
+          identity: appleSigningIdentity,
+          hardenedRuntime: true,
+          entitlements: 'assets/entitlements.mac.plist',
+          'entitlements-inherit': 'assets/entitlements.mac.inherit.plist',
+          'signature-flags': 'library',
+        }
+      : undefined,
+    osxNotarize:
+      appleId && appleAppSpecificPassword && appleTeamId
+        ? {
+            appleId,
+            appleIdPassword: appleAppSpecificPassword,
+            teamId: appleTeamId,
+          }
+        : undefined,
     icon: 'assets/icons/zero-icon',
     // Keep Vite's slim package output while including native runtime deps.
     ignore: shouldIgnorePackagedFile,
@@ -39,6 +62,8 @@ const config: ForgeConfig = {
   rebuildConfig: {},
   makers: [
     new MakerSquirrel({}),
+    // Keep ZIP for electron-updater metadata and add DMG for user-facing installer UX.
+    new MakerDMG({}, ['darwin']),
     new MakerZIP({}, ['darwin']),
     new MakerRpm({}),
     new MakerDeb({}),
