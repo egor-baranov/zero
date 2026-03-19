@@ -151,9 +151,9 @@ export class UpdaterService {
     }
 
     this.isConfigured = true;
-    // We publish CI builds from `main` as prereleases (`main-latest`),
-    // so updater checks must include prereleases as candidates.
-    autoUpdater.allowPrerelease = true;
+    // Release artifacts are published as regular GitHub releases,
+    // so updater can follow the latest release channel directly.
+    autoUpdater.allowPrerelease = false;
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
     autoUpdater.setFeedURL({
@@ -361,6 +361,15 @@ export class UpdaterService {
   };
 
   private readonly handleError = (error: Error): void => {
+    if (isNoUpdatePublishedError(error.message)) {
+      this.updateState({
+        status: 'not-available',
+        message: 'No new updates are available.',
+        downloadProgressPercent: null,
+      });
+      return;
+    }
+
     this.updateState({
       status: 'error',
       message: `Updater error: ${error.message}`,
