@@ -10,7 +10,30 @@ interface BrowserPushPanelProps {
   onOpenUrl: (url: string) => void;
 }
 
-const BROWSER_PUSH_PANEL_WIDTH = 336;
+const BROWSER_PUSH_PANEL_WIDTH_KEY = 'zeroade.notifications-panel.width.v1';
+const BROWSER_PUSH_PANEL_WIDTH_DEFAULT = 336;
+const BROWSER_PUSH_PANEL_WIDTH_MIN = 260;
+const BROWSER_PUSH_PANEL_WIDTH_MAX = 560;
+
+const clampWidth = (width: number, viewportWidth: number): number => {
+  const maxFromViewport = Math.max(BROWSER_PUSH_PANEL_WIDTH_MIN, Math.floor(viewportWidth * 0.6));
+  return Math.min(BROWSER_PUSH_PANEL_WIDTH_MAX, Math.max(BROWSER_PUSH_PANEL_WIDTH_MIN, Math.min(width, maxFromViewport)));
+};
+
+const readStoredPanelWidth = (): number => {
+  if (typeof window === 'undefined') {
+    return BROWSER_PUSH_PANEL_WIDTH_DEFAULT;
+  }
+
+  const raw = window.localStorage.getItem(BROWSER_PUSH_PANEL_WIDTH_KEY);
+  const parsed = Number(raw);
+
+  if (!Number.isFinite(parsed)) {
+    return clampWidth(BROWSER_PUSH_PANEL_WIDTH_DEFAULT, window.innerWidth);
+  }
+
+  return clampWidth(parsed, window.innerWidth);
+};
 
 const formatPushTimestamp = (createdAtMs: number): string => {
   try {
@@ -30,14 +53,102 @@ export const BrowserPushPanel = ({
   items,
   onOpenUrl,
 }: BrowserPushPanelProps): JSX.Element => {
+  const [panelWidth, setPanelWidth] = React.useState<number>(() => readStoredPanelWidth());
+  const resizePointerIdRef = React.useRef<number | null>(null);
+  const resizeHandleRef = React.useRef<HTMLButtonElement | null>(null);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(BROWSER_PUSH_PANEL_WIDTH_KEY, String(panelWidth));
+  }, [panelWidth]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const clampToViewport = (): void => {
+      setPanelWidth((previous) => clampWidth(previous, window.innerWidth));
+    };
+
+    window.addEventListener('resize', clampToViewport);
+    return () => {
+      window.removeEventListener('resize', clampToViewport);
+    };
+  }, []);
+
+  const stopResizing = React.useCallback((): void => {
+    const pointerId = resizePointerIdRef.current;
+    resizePointerIdRef.current = null;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+
+    if (pointerId !== null && resizeHandleRef.current?.hasPointerCapture(pointerId)) {
+      resizeHandleRef.current.releasePointerCapture(pointerId);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    const handlePointerMove = (event: PointerEvent): void => {
+      if (resizePointerIdRef.current === null) {
+        return;
+      }
+
+      const next = clampWidth(window.innerWidth - event.clientX, window.innerWidth);
+      setPanelWidth(next);
+    };
+
+    const handlePointerUp = (): void => {
+      if (resizePointerIdRef.current === null) {
+        return;
+      }
+
+      stopResizing();
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('blur', stopResizing);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('blur', stopResizing);
+    };
+  }, [stopResizing]);
+
+  const startResizing = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    resizePointerIdRef.current = event.pointerId;
+    resizeHandleRef.current?.setPointerCapture(event.pointerId);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    event.preventDefault();
+  };
+
   return (
     <aside
-      style={{ width: open ? BROWSER_PUSH_PANEL_WIDTH : 0 }}
+      style={{ width: open ? panelWidth : 0 }}
       className={cn(
         'relative h-full shrink-0 overflow-hidden border-l border-stone-200 bg-[#fdfdfff2] backdrop-blur-xl transition-[width] duration-200 ease-out',
         !open && 'border-l-transparent',
       )}
     >
+      <button
+        ref={resizeHandleRef}
+        type="button"
+        aria-label="Resize notifications panel"
+        className={cn(
+          'no-drag group absolute inset-y-0 left-0 z-10 w-2 -translate-x-1 cursor-col-resize',
+          !open && 'pointer-events-none opacity-0',
+        )}
+        onPointerDown={startResizing}
+      >
+        <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-stone-300/80" />
+      </button>
+
       <div
         className={cn(
           'flex h-full w-full min-w-0 flex-col transition-opacity duration-150',
@@ -59,7 +170,7 @@ export const BrowserPushPanel = ({
             <div className="space-y-2 px-3 py-3">
               {items.map((item) => {
                 const cardClass = cn(
-                  'w-full rounded-2xl border px-3 py-3 text-left transition-colors',
+                  'w-full min-w-0 rounded-2xl border px-3 py-3 text-left transition-colors',
                   item.url
                     ? 'no-drag hover:border-stone-300 hover:bg-white'
                     : 'cursor-default',
@@ -73,9 +184,9 @@ export const BrowserPushPanel = ({
                 );
 
                 const content = (
-                  <div className="flex items-start gap-3">
+                  <div className="flex min-w-0 items-start gap-3">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
                         <p className="truncate text-[12px] font-medium text-stone-800">
                           {item.title}
                         </p>
@@ -91,7 +202,7 @@ export const BrowserPushPanel = ({
                         </span>
                       </div>
                       {item.body ? (
-                        <p className="mt-1 line-clamp-3 text-[11px] leading-5 text-stone-500">
+                        <p className="mt-1 line-clamp-3 break-words text-[11px] leading-5 text-stone-500">
                           {item.body}
                         </p>
                       ) : null}

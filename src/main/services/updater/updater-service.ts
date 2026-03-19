@@ -151,7 +151,7 @@ export class UpdaterService {
     }
 
     this.isConfigured = true;
-    // We publish CI builds from `main` as prereleases (`main-latest`),
+    // We publish CI builds from `main` as prereleases,
     // so updater checks must include prereleases as candidates.
     autoUpdater.allowPrerelease = true;
     autoUpdater.autoDownload = true;
@@ -361,6 +361,15 @@ export class UpdaterService {
   };
 
   private readonly handleError = (error: Error): void => {
+    if (isNoUpdatePublishedError(error.message)) {
+      this.updateState({
+        status: 'not-available',
+        message: 'No new updates are available.',
+        downloadProgressPercent: null,
+      });
+      return;
+    }
+
     this.updateState({
       status: 'error',
       message: `Updater error: ${error.message}`,
