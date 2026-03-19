@@ -142,6 +142,9 @@ export class UpdaterService {
     }
 
     this.isConfigured = true;
+    // We publish CI builds from `main` as prereleases (`main-latest`),
+    // so updater checks must include prereleases as candidates.
+    autoUpdater.allowPrerelease = true;
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
     autoUpdater.setFeedURL({
