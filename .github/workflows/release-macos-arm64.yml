@@ -2,6 +2,8 @@ name: Release macOS Apple Silicon
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -185,17 +187,20 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zero-macos-arm64
-          path: |
-            ${{ steps.prepare.outputs.dmg_file }}
-            ${{ steps.prepare.outputs.update_file }}
+          path: out/release-assets
           if-no-files-found: error
 
       - name: Publish GitHub release assets
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'main-latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && format('Release {0}', github.ref_name) || 'Main latest build' }}
+          prerelease: ${{ github.ref == 'refs/heads/main' }}
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          target_commitish: ${{ github.sha }}
           files: |
             ${{ steps.prepare.outputs.dmg_file }}
             ${{ steps.prepare.outputs.zip_file }}
