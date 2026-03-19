@@ -197,6 +197,7 @@ interface ShellToast {
   id: number;
   title: string;
   message: string;
+  tone: 'error' | 'info';
 }
 
 interface RegistryLauncherDistribution {
@@ -869,15 +870,16 @@ export const Shell = (): JSX.Element => {
     setToasts((previous) => previous.filter((toast) => toast.id !== toastId));
   }, []);
 
-  const pushErrorToast = React.useCallback(
-    (title: string, message: string) => {
+  const pushToast = React.useCallback(
+    (title: string, message: string, tone: 'error' | 'info') => {
       const cleanedMessage = toCleanErrorText(message);
       if (!cleanedMessage) {
         return;
       }
 
       const hasDuplicateToast = toasts.some(
-        (toast) => toast.title === title && toast.message === cleanedMessage,
+        (toast) =>
+          toast.title === title && toast.message === cleanedMessage && toast.tone === tone,
       );
       if (hasDuplicateToast) {
         return;
@@ -891,6 +893,7 @@ export const Shell = (): JSX.Element => {
             id: toastId,
             title,
             message: cleanedMessage,
+            tone,
           },
         ].slice(-4),
       );
@@ -903,7 +906,7 @@ export const Shell = (): JSX.Element => {
         origin: 'Zero',
         source: 'app',
         kind: 'app',
-        severity: 'error',
+        severity: tone === 'error' ? 'error' : 'info',
         createdAtMs: Date.now(),
         read: false,
       });
@@ -913,6 +916,20 @@ export const Shell = (): JSX.Element => {
       }, TOAST_LIFETIME_MS);
     },
     [removeToast, toasts],
+  );
+
+  const pushErrorToast = React.useCallback(
+    (title: string, message: string) => {
+      pushToast(title, message, 'error');
+    },
+    [pushToast],
+  );
+
+  const pushInfoToast = React.useCallback(
+    (title: string, message: string) => {
+      pushToast(title, message, 'info');
+    },
+    [pushToast],
   );
 
   const handleSelectLandingSuggestion = React.useCallback((value: string) => {
@@ -1137,6 +1154,8 @@ export const Shell = (): JSX.Element => {
       setStatusText(result.message);
       if (!result.ok) {
         pushErrorToast('Update', result.message);
+      } else if (!isInstallAction) {
+        pushInfoToast('Update', result.message);
       }
     } catch {
       const fallbackMessage = 'Update action failed.';
@@ -1145,7 +1164,7 @@ export const Shell = (): JSX.Element => {
     } finally {
       setIsUpdateActionPending(false);
     }
-  }, [pushErrorToast, setStatusText, updaterState?.status]);
+  }, [pushErrorToast, pushInfoToast, setStatusText, updaterState?.status]);
 
   const isUpdateIconSpinning =
     isUpdateActionPending ||
@@ -3183,11 +3202,21 @@ export const Shell = (): JSX.Element => {
         {toasts.map((toast) => (
           <div
             key={toast.id}
-            className="pointer-events-auto rounded-xl border border-rose-200 bg-white/95 px-3 py-2 shadow-lg backdrop-blur"
+            className={cn(
+              'pointer-events-auto rounded-xl border bg-white/95 px-3 py-2 shadow-lg backdrop-blur',
+              toast.tone === 'error' ? 'border-rose-200' : 'border-stone-200',
+            )}
           >
             <div className="flex items-start gap-2">
               <div className="min-w-0 flex-1">
-                <p className="text-[12px] font-semibold text-rose-700">{toast.title}</p>
+                <p
+                  className={cn(
+                    'text-[12px] font-semibold',
+                    toast.tone === 'error' ? 'text-rose-700' : 'text-stone-800',
+                  )}
+                >
+                  {toast.title}
+                </p>
                 <p className="mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-stone-700">
                   {toast.message}
                 </p>
