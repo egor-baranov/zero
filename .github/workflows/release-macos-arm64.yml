@@ -189,6 +189,7 @@ jobs:
           VERSION="$(node -p "require('./package.json').version")"
           node scripts/generate-latest-mac-yml.mjs "${STABLE_ZIP}" "${VERSION}"
 
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "zip_file=${STABLE_ZIP}" >> "${GITHUB_OUTPUT}"
           echo "dmg_file=${STABLE_DMG}" >> "${GITHUB_OUTPUT}"
           echo "update_file=${RELEASE_DIR}/latest-mac.yml" >> "${GITHUB_OUTPUT}"
@@ -204,8 +205,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'main-latest' }}
-          name: ${{ startsWith(github.ref, 'refs/tags/v') && format('Release {0}', github.ref_name) || 'Main latest build' }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.prepare.outputs.version) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && format('Release {0}', github.ref_name) || format('Main build v{0}', steps.prepare.outputs.version) }}
           prerelease: ${{ github.ref == 'refs/heads/main' }}
           make_latest: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
           generate_release_notes: true
