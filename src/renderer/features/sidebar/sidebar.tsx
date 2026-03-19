@@ -181,7 +181,7 @@ export const Sidebar = ({
     <aside
       style={{ width }}
       className={cn(
-        'relative flex h-full flex-col bg-[rgba(249,250,252,0.26)] backdrop-blur-[30px] backdrop-saturate-150',
+        'relative flex h-full flex-col bg-[rgba(249,250,252,0.16)] backdrop-blur-[12px] backdrop-saturate-140',
         !isResizing && 'transition-[width,opacity] duration-200',
       )}
     >

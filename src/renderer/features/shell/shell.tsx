@@ -2478,7 +2478,7 @@ export const Shell = (): JSX.Element => {
             <div className="drag-region flex h-full min-w-0">
               <div
                 className={cn(
-                  'shrink-0 overflow-hidden bg-[rgba(249,250,252,0.26)] backdrop-blur-[30px] backdrop-saturate-150',
+                  'shrink-0 overflow-hidden bg-[rgba(249,250,252,0.16)] backdrop-blur-[12px] backdrop-saturate-140',
                   !isResizing && 'transition-[width] duration-200 ease-out',
                 )}
                 style={{ width: activeSidebarWidth }}
