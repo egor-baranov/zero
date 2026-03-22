@@ -21,11 +21,13 @@ import type {
   AcpSessionNewResult,
 } from './acp';
 import type {
+  WorkspaceGitCommitRequest,
   WorkspaceDiffFileRequest,
   WorkspaceDiffFileResult,
   WorkspaceGitCheckoutBranchRequest,
   WorkspaceGitCreateBranchRequest,
   WorkspaceGitMutationResult,
+  WorkspaceGitPushRequest,
   WorkspaceGitStatusRequest,
   WorkspaceGitStatusResult,
   WorkspaceListFilesRequest,
@@ -100,6 +102,12 @@ export interface DesktopApi {
   ) => Promise<WorkspaceGitMutationResult>;
   workspaceGitCreateBranch: (
     request: WorkspaceGitCreateBranchRequest,
+  ) => Promise<WorkspaceGitMutationResult>;
+  workspaceGitCommit: (
+    request: WorkspaceGitCommitRequest,
+  ) => Promise<WorkspaceGitMutationResult>;
+  workspaceGitPush: (
+    request: WorkspaceGitPushRequest,
   ) => Promise<WorkspaceGitMutationResult>;
   workspaceRevealFile: (
     request: WorkspaceRevealFileRequest,

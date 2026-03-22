@@ -1,9 +1,14 @@
 import * as React from 'react';
 
-interface ReviewFileState {
+export interface ReviewFileState {
+  id: string;
+  kind: 'file' | 'diff';
   absolutePath: string;
   relativePath: string;
   content: string;
+  originalContent: string | null;
+  modifiedContent: string | null;
+  patch: string | null;
 }
 
 interface UseWorkspaceReviewResult {
@@ -21,6 +26,7 @@ interface UseWorkspaceReviewResult {
   closeReviewPanel: () => void;
   toggleReviewPanelVisibility: () => void;
   openFile: (path: string) => Promise<void>;
+  openDiff: (path: string) => Promise<void>;
   setActiveReviewFile: (path: string) => void;
   closeReviewFile: (path: string) => void;
   reorderReviewFiles: (sourcePath: string, targetPath: string) => void;
@@ -36,11 +42,14 @@ const mapPathToWorkspace = (workspacePath: string, filePath: string): string => 
   return filePath;
 };
 
+const getReviewTabId = (kind: ReviewFileState['kind'], relativePath: string): string =>
+  `${kind}:${relativePath}`;
+
 const upsertReviewFile = (
   previous: ReviewFileState[],
   next: ReviewFileState,
 ): ReviewFileState[] => {
-  const index = previous.findIndex((file) => file.relativePath === next.relativePath);
+  const index = previous.findIndex((file) => file.id === next.id);
 
   if (index < 0) {
     return [...previous, next];
@@ -68,7 +77,7 @@ export const useWorkspaceReview = (
     }
 
     return (
-      reviewFiles.find((file) => file.relativePath === activeReviewFilePath) ??
+      reviewFiles.find((file) => file.id === activeReviewFilePath) ??
       reviewFiles.at(-1) ??
       null
     );
@@ -133,6 +142,10 @@ export const useWorkspaceReview = (
     }
   }, [files.length, loadFileTree]);
 
+  const closeFileTree = React.useCallback(() => {
+    setIsFileTreeOpen(false);
+  }, []);
+
   const resolveReviewData = React.useCallback(
     async (filePath: string): Promise<ReviewFileState | null> => {
       if (!workspacePath || workspacePath === '/') {
@@ -147,9 +160,40 @@ export const useWorkspaceReview = (
       });
 
       return {
+        id: getReviewTabId('file', readResult.relativePath),
+        kind: 'file',
         absolutePath: readResult.absolutePath,
         relativePath: readResult.relativePath,
         content: readResult.content,
+        originalContent: null,
+        modifiedContent: null,
+        patch: null,
+      };
+    },
+    [workspacePath],
+  );
+
+  const resolveDiffReviewData = React.useCallback(
+    async (filePath: string): Promise<ReviewFileState | null> => {
+      if (!workspacePath || workspacePath === '/') {
+        return null;
+      }
+
+      const resolvedPath = mapPathToWorkspace(workspacePath, filePath);
+      const diffResult = await window.desktop.workspaceDiffFile({
+        workspacePath,
+        filePath: resolvedPath,
+      });
+
+      return {
+        id: getReviewTabId('diff', diffResult.relativePath),
+        kind: 'diff',
+        absolutePath: diffResult.absolutePath,
+        relativePath: diffResult.relativePath,
+        content: diffResult.modifiedContent,
+        originalContent: diffResult.originalContent,
+        modifiedContent: diffResult.modifiedContent,
+        patch: diffResult.patch,
       };
     },
     [workspacePath],
@@ -165,7 +209,7 @@ export const useWorkspaceReview = (
         if (next) {
           setIsReviewPanelVisible(true);
           setReviewFiles((previous) => upsertReviewFile(previous, next));
-          setActiveReviewFilePath(next.relativePath);
+          setActiveReviewFilePath(next.id);
         }
       } finally {
         setIsLoadingFile(false);
@@ -174,14 +218,33 @@ export const useWorkspaceReview = (
     [resolveReviewData],
   );
 
+  const openDiff = React.useCallback(
+    async (filePath: string): Promise<void> => {
+      setIsLoadingFile(true);
+
+      try {
+        const next = await resolveDiffReviewData(filePath);
+
+        if (next) {
+          setIsReviewPanelVisible(true);
+          setReviewFiles((previous) => upsertReviewFile(previous, next));
+          setActiveReviewFilePath(next.id);
+        }
+      } finally {
+        setIsLoadingFile(false);
+      }
+    },
+    [resolveDiffReviewData],
+  );
+
   const closeReviewFile = React.useCallback((path: string) => {
     setReviewFiles((previous) => {
-      const closingIndex = previous.findIndex((file) => file.relativePath === path);
+      const closingIndex = previous.findIndex((file) => file.id === path);
       if (closingIndex < 0) {
         return previous;
       }
 
-      const next = previous.filter((file) => file.relativePath !== path);
+      const next = previous.filter((file) => file.id !== path);
 
       setActiveReviewFilePath((current) => {
         if (current !== path) {
@@ -189,7 +252,7 @@ export const useWorkspaceReview = (
         }
 
         const fallback = next[closingIndex] ?? next[closingIndex - 1] ?? null;
-        return fallback?.relativePath ?? null;
+        return fallback?.id ?? null;
       });
 
       return next;
@@ -212,8 +275,8 @@ export const useWorkspaceReview = (
     }
 
     setReviewFiles((previous) => {
-      const sourceIndex = previous.findIndex((file) => file.relativePath === sourcePath);
-      const targetIndex = previous.findIndex((file) => file.relativePath === targetPath);
+      const sourceIndex = previous.findIndex((file) => file.id === sourcePath);
+      const targetIndex = previous.findIndex((file) => file.id === targetPath);
 
       if (sourceIndex < 0 || targetIndex < 0) {
         return previous;
@@ -248,15 +311,18 @@ export const useWorkspaceReview = (
     setIsLoadingFile(true);
 
     try {
-      const next = await resolveReviewData(activeReviewFile.relativePath);
+      const next =
+        activeReviewFile.kind === 'diff'
+          ? await resolveDiffReviewData(activeReviewFile.relativePath)
+          : await resolveReviewData(activeReviewFile.relativePath);
       if (next) {
         setReviewFiles((previous) => upsertReviewFile(previous, next));
-        setActiveReviewFilePath(next.relativePath);
+        setActiveReviewFilePath(next.id);
       }
     } finally {
       setIsLoadingFile(false);
     }
-  }, [activeReviewFile, resolveReviewData]);
+  }, [activeReviewFile, resolveDiffReviewData, resolveReviewData]);
 
   return {
     isFileTreeOpen,
@@ -269,10 +335,11 @@ export const useWorkspaceReview = (
     activeReviewFile,
     activeReviewFilePath,
     openFileTree,
-    closeFileTree: () => setIsFileTreeOpen(false),
+    closeFileTree,
     closeReviewPanel,
     toggleReviewPanelVisibility,
     openFile,
+    openDiff,
     setActiveReviewFile,
     closeReviewFile,
     reorderReviewFiles,

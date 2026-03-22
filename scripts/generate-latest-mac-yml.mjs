@@ -5,10 +5,12 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-const [zipArg, versionArg] = process.argv.slice(2);
+const [zipArg, versionArg, outputArg] = process.argv.slice(2);
 
 if (!zipArg) {
-  console.error('Usage: node scripts/generate-latest-mac-yml.mjs <zipPath> [version]');
+  console.error(
+    'Usage: node scripts/generate-latest-mac-yml.mjs <zipPath> [version] [outputFileName]',
+  );
   process.exit(1);
 }
 
@@ -36,6 +38,11 @@ const main = async () => {
     throw new Error('Missing application version.');
   }
 
+  const outputFileName = outputArg?.trim() || 'latest-mac.yml';
+  if (!outputFileName) {
+    throw new Error('Missing update metadata file name.');
+  }
+
   const zipBuffer = await fs.readFile(zipPath);
   const sha512 = createHash('sha512').update(zipBuffer).digest('base64');
   const { size } = await fs.stat(zipPath);
@@ -54,7 +61,9 @@ const main = async () => {
     '',
   ].join('\n');
 
-  const outputPath = path.join(path.dirname(zipPath), 'latest-mac.yml');
+  const outputPath = path.isAbsolute(outputFileName)
+    ? outputFileName
+    : path.join(path.dirname(zipPath), outputFileName);
   await fs.writeFile(outputPath, ymlContent, 'utf8');
   console.log(`Generated ${outputPath}`);
 };

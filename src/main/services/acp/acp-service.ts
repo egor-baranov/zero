@@ -264,8 +264,13 @@ const toPosixShellCommand = (command: string, args: string[]): string =>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
-const isTerminalAuthMethod = (method: AuthMethod): method is AuthMethod & { type: 'terminal' } =>
-  'type' in method && method.type === 'terminal';
+const toTerminalAuthMeta = (method: AuthMethod): Record<string, unknown> | null => {
+  const rawMeta = isRecord(method._meta) ? method._meta['terminal-auth'] : undefined;
+  return isRecord(rawMeta) ? rawMeta : null;
+};
+
+const isTerminalAuthMethod = (method: AuthMethod): boolean =>
+  ('type' in method && method.type === 'terminal') || toTerminalAuthMeta(method) !== null;
 
 const toPosixShellCommandWithEnv = (
   command: string,
@@ -552,7 +557,7 @@ export class AcpService {
   ): Promise<AcpSessionNewResult> {
     const initialized = await this.initialize({
       cwd: request.cwd,
-      agent: this.preferredAgent,
+      agent: request.agent ?? this.preferredAgent,
     });
     if (!initialized.connected) {
       throw new Error('ACP connection is not available');
@@ -566,7 +571,7 @@ export class AcpService {
     try {
       result = await this.connection.newSession({
         cwd: request.cwd,
-        mcpServers: [],
+        mcpServers: request.mcpServers ?? [],
       });
     } catch (error) {
       if (isAuthenticationRequiredError(error)) {
@@ -591,7 +596,7 @@ export class AcpService {
   ): Promise<AcpSessionLoadResult> {
     const initialized = await this.initialize({
       cwd: request.cwd,
-      agent: this.preferredAgent,
+      agent: request.agent ?? this.preferredAgent,
     });
     if (!initialized.connected) {
       return { loaded: false };
@@ -609,7 +614,7 @@ export class AcpService {
       const result = await this.connection.loadSession({
         sessionId: request.sessionId,
         cwd: request.cwd,
-        mcpServers: [],
+        mcpServers: request.mcpServers ?? [],
       });
 
       return {
@@ -636,7 +641,7 @@ export class AcpService {
   ): Promise<AcpAuthenticateResult> {
     const initialized = await this.initialize({
       cwd: request.cwd,
-      agent: this.preferredAgent,
+      agent: request.agent ?? this.preferredAgent,
     });
     if (!initialized.connected || !this.connection || !this.initializeResponse) {
       return {
@@ -645,6 +650,7 @@ export class AcpService {
         methodId: null,
         methodName: null,
         message: 'ACP connection is not available.',
+        terminalLaunchSpec: null,
       };
     }
 
@@ -656,6 +662,7 @@ export class AcpService {
         methodId: null,
         methodName: null,
         message: 'No authentication methods were advertised by the ACP adapter.',
+        terminalLaunchSpec: null,
       };
     }
 
@@ -669,6 +676,7 @@ export class AcpService {
         methodId: null,
         methodName: null,
         message: 'No compatible ACP authentication method was found.',
+        terminalLaunchSpec: null,
       };
     }
 
@@ -680,6 +688,7 @@ export class AcpService {
         methodId: null,
         methodName: null,
         message: 'Selected ACP authentication method is no longer available.',
+        terminalLaunchSpec: null,
       };
     }
 
@@ -692,19 +701,7 @@ export class AcpService {
           methodId: method.id,
           methodName: method.name ?? null,
           message: 'ACP terminal authentication metadata is missing required command details.',
-        };
-      }
-
-      try {
-        this.openTerminalForAuth(launchSpec);
-      } catch (error) {
-        const details = toErrorMessage(error);
-        return {
-          started: false,
-          requiresUserAction: false,
-          methodId: method.id,
-          methodName: method.name ?? null,
-          message: `Failed to open terminal for authentication: ${details}`,
+          terminalLaunchSpec: null,
         };
       }
 
@@ -713,7 +710,8 @@ export class AcpService {
         requiresUserAction: true,
         methodId: method.id,
         methodName: method.name ?? null,
-        message: 'Complete authentication in the opened terminal, then resend your message.',
+        message: 'Complete authentication in the built-in terminal, then resend your message.',
+        terminalLaunchSpec: launchSpec,
       };
     }
 
@@ -728,6 +726,7 @@ export class AcpService {
         methodId: method.id,
         methodName: method.name ?? null,
         message: `${method.name} authentication completed.`,
+        terminalLaunchSpec: null,
       };
     } catch (error) {
       return {
@@ -736,6 +735,7 @@ export class AcpService {
         methodId: method.id,
         methodName: method.name ?? null,
         message: `ACP authentication failed: ${toErrorMessage(error)}`,
+        terminalLaunchSpec: null,
       };
     }
   }
@@ -938,19 +938,52 @@ export class AcpService {
   }
 
   private toTerminalAuthLaunchSpec(
-    method: AuthMethod & { type: 'terminal' },
+    method: AuthMethod,
     cwd: string,
   ): TerminalAuthLaunchSpec | null {
+    const stripAcpTransportArgs = (rawArgs: string[]): string[] => {
+      const sanitized: string[] = [];
+      for (let index = 0; index < rawArgs.length; index += 1) {
+        const token = rawArgs[index];
+        const lowerToken = token.trim().toLowerCase();
+        if (lowerToken === '-y' || lowerToken === '--yes') {
+          continue;
+        }
+
+        if (lowerToken === '--acp') {
+          continue;
+        }
+
+        if (lowerToken === '--transport' && rawArgs[index + 1]?.trim().toLowerCase() === 'stdio') {
+          index += 1;
+          continue;
+        }
+
+        if (lowerToken === '--transport=stdio') {
+          continue;
+        }
+
+        sanitized.push(token);
+      }
+
+      return sanitized;
+    };
+
     const fallbackCommand = this.activeLaunchConfig?.command ?? '';
     const fallbackArgs = this.activeLaunchConfig?.args ?? [];
 
     let command = fallbackCommand;
-    let args = [...fallbackArgs, ...(method.args ?? [])];
+    const methodArgs =
+      'args' in method && Array.isArray(method.args)
+        ? method.args.filter((entry): entry is string => typeof entry === 'string')
+        : [];
+    let args =
+      methodArgs.length > 0
+        ? [...stripAcpTransportArgs(fallbackArgs), ...methodArgs]
+        : [...fallbackArgs];
 
-    const terminalAuthMeta = isRecord(method._meta)
-      ? method._meta['terminal-auth']
-      : undefined;
-    if (isRecord(terminalAuthMeta)) {
+    const terminalAuthMeta = toTerminalAuthMeta(method);
+    if (terminalAuthMeta) {
       const metaCommand =
         typeof terminalAuthMeta.command === 'string'
           ? terminalAuthMeta.command.trim()
@@ -971,16 +1004,30 @@ export class AcpService {
     }
 
     const env: Record<string, string> = {};
-    const claudeEnvNames = ['HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_EXECUTABLE', 'PATH'];
-    for (const name of claudeEnvNames) {
-      const value = this.launchEnv?.[name];
-      if (typeof value === 'string' && value.trim().length > 0) {
-        env[name] = value;
+    if (this.preferredAgent.kind === 'claude') {
+      const claudeEnvNames = ['HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_EXECUTABLE'];
+      for (const name of claudeEnvNames) {
+        const value = this.launchEnv?.[name];
+        if (typeof value === 'string' && value.trim().length > 0) {
+          env[name] = value;
+        }
       }
     }
 
-    if (method.env) {
-      for (const [key, value] of Object.entries(method.env)) {
+    const methodEnv =
+      'env' in method && isRecord(method.env)
+        ? method.env
+        : undefined;
+    if (methodEnv) {
+      for (const [key, value] of Object.entries(methodEnv)) {
+        if (typeof value === 'string') {
+          env[key] = value;
+        }
+      }
+    }
+
+    if (terminalAuthMeta && isRecord(terminalAuthMeta.env)) {
+      for (const [key, value] of Object.entries(terminalAuthMeta.env)) {
         if (typeof value === 'string') {
           env[key] = value;
         }

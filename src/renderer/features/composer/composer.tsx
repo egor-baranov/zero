@@ -81,6 +81,7 @@ interface ComposerProps {
     request: Omit<AcpSetSessionConfigOptionRequest, 'sessionId'>,
   ) => Promise<void>;
   onCancel: () => Promise<void>;
+  onOpenCommitDialog: () => void;
 }
 
 interface ComposerAttachment {
@@ -842,6 +843,7 @@ export const Composer = ({
   onSetSessionModel,
   onSetSessionConfigOption,
   onCancel,
+  onOpenCommitDialog,
 }: ComposerProps): JSX.Element => {
   const currentPlatform = window.desktop?.platform ?? 'darwin';
   const [message, setMessage] = React.useState('');
@@ -2925,6 +2927,21 @@ export const Composer = ({
 
               <button
                 type="button"
+                className={cn(
+                  'no-drag flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors',
+                  'text-stone-700 hover:bg-stone-100',
+                )}
+                onClick={() => {
+                  setIsBranchMenuOpen(false);
+                  onOpenCommitDialog();
+                }}
+              >
+                <GitBranch className="h-4 w-4" />
+                Commit changes...
+              </button>
+
+              <button
+                type="button"
                 disabled={!branchSummary.available || isBranchUpdating}
                 className={cn(
                   'no-drag flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors',
@@ -3081,8 +3098,8 @@ export const Composer = ({
       </Dialog>
 
       <Dialog open={isRegistryDialogOpen} onOpenChange={setIsRegistryDialogOpen}>
-        <DialogContent className="max-w-[760px] rounded-[20px] p-0">
-          <div className="px-4 pb-4 pt-4">
+        <DialogContent className="max-w-[980px] rounded-[28px] p-0">
+          <div className="px-5 pb-5 pt-5">
             <h2 className="text-[24px] font-semibold leading-none tracking-[-0.015em] text-stone-900">
               Add from registry
             </h2>
@@ -3108,65 +3125,77 @@ export const Composer = ({
                 </Button>
               </div>
             ) : (
-              <div className="mt-4 grid max-h-[420px] grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+              <div className="mt-5 grid max-h-[500px] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
                 {registryAgents.map((agent) => {
                   const launchTemplate = toRegistryLaunchTemplate(agent, currentPlatform);
+                  const canAutoConfigure = launchTemplate.autoConfigurable;
+                  const addAgent = (): void => {
+                    if (!canAutoConfigure) {
+                      return;
+                    }
+
+                    handleUseRegistryAgentTemplate(agent);
+                  };
 
                   return (
                     <div
                       key={agent.id}
-                      className="flex h-full flex-col rounded-xl border border-stone-200/80 bg-stone-50/70 p-3"
+                      role={canAutoConfigure ? 'button' : undefined}
+                      tabIndex={canAutoConfigure ? 0 : -1}
+                      className={cn(
+                        'group relative flex min-h-[132px] h-full flex-col rounded-[28px] bg-stone-100/95 px-5 py-4 text-left',
+                        'text-stone-700 transition-[background-color,transform] duration-150',
+                        canAutoConfigure && 'cursor-pointer hover:bg-stone-200/90',
+                        !canAutoConfigure && 'cursor-not-allowed opacity-60',
+                      )}
+                      onClick={addAgent}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          addAgent();
+                        }
+                      }}
                     >
-                      <div className="flex items-start gap-2">
+                      <div className="flex items-start gap-3 pr-10">
                         <AgentRegistryIcon
                           iconUrl={agent.icon ?? null}
                           label={agent.name}
-                          className="h-8 w-8 rounded-[8px]"
+                          className="h-10 w-10 rounded-2xl"
                         />
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-[13px] font-semibold text-stone-800">
+                          <p className="truncate text-[17px] font-semibold leading-tight tracking-[-0.015em] text-current">
                             {agent.name}
                           </p>
-                          <p className="mt-0.5 text-[11px] text-stone-500">
+                          <p className="mt-1 truncate text-[12px] text-stone-500">
                             {agent.id}
                             {agent.version ? ` · v${agent.version}` : ''}
                           </p>
                         </div>
                       </div>
 
-                      <p className="mt-2 line-clamp-2 text-[12px] leading-[1.45] text-stone-600">
+                      {agent.repository ? (
+                        <button
+                          type="button"
+                          aria-label={`Open repository ${agent.repository}`}
+                          className="absolute right-4 top-4 inline-flex h-8 w-8 items-center justify-center rounded-xl text-stone-500 transition-colors hover:bg-white/70 hover:text-stone-800"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleOpenWebLink(agent.repository ?? '');
+                          }}
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                        </button>
+                      ) : null}
+
+                      <p className="mt-3 line-clamp-2 text-[14px] leading-[1.45] text-stone-600">
                         {agent.description ?? 'No description provided.'}
                       </p>
 
-                      <div className="mt-2 rounded-md bg-white/80 px-2 py-1.5 font-mono text-[11px] leading-[1.35] text-stone-500">
-                        {launchTemplate.preview}
-                      </div>
-
-                      <div className="mt-auto flex items-center justify-between gap-2 pt-3">
-                        {agent.repository ? (
-                          <a
-                            href={agent.repository}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 text-[11px] text-stone-500 underline-offset-2 hover:text-stone-700 hover:underline"
-                          >
-                            Repository
-                            <ExternalLink className="h-3.5 w-3.5" />
-                          </a>
-                        ) : (
-                          <span className="text-[11px] text-stone-400">No repository link</span>
-                        )}
-
-                        <Button
-                          className="h-8 rounded-[10px] px-3 text-[12px] font-medium"
-                          disabled={!launchTemplate.autoConfigurable}
-                          onClick={() => {
-                            handleUseRegistryAgentTemplate(agent);
-                          }}
-                        >
-                          Add
-                        </Button>
-                      </div>
+                      {!canAutoConfigure ? (
+                        <p className="mt-auto pt-3 text-[11px] font-medium text-amber-700">
+                          {launchTemplate.preview}
+                        </p>
+                      ) : null}
                     </div>
                   );
                 })}

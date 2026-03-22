@@ -9,6 +9,7 @@ import {
 import { ScrollArea } from '@renderer/components/ui/scroll-area';
 import { toFileIconComponent } from '@renderer/lib/code-language-icons';
 import { cn } from '@renderer/lib/cn';
+import { buildFileTree, type TreeNode } from '@renderer/features/workspace/file-tree-utils';
 
 interface FileTreeDialogProps {
   open: boolean;
@@ -17,44 +18,42 @@ interface FileTreeDialogProps {
   workspaceName: string;
   activeFilePath: string | null;
   onOpenFile: (path: string) => void;
+  onCollapse: () => void;
   side?: 'left' | 'right';
-}
-
-interface TreeNode {
-  type: 'file' | 'dir';
-  name: string;
-  path: string;
-  children: TreeNode[];
-}
-
-interface MutableTreeNode {
-  type: 'file' | 'dir';
-  name: string;
-  path: string;
-  children: Map<string, MutableTreeNode>;
 }
 
 const FILE_TREE_WIDTH_KEY = 'zeroade.filetree.width';
 const FILE_TREE_WIDTH_DEFAULT = 360;
-const FILE_TREE_WIDTH_MIN = 300;
-const FILE_TREE_WIDTH_MAX = 620;
+const FILE_TREE_WIDTH_OPEN = 250;
+const FILE_TREE_WIDTH_MIN = 0;
+const FILE_TREE_WIDTH_MAX = 760;
+const FILE_TREE_COLLAPSE_THRESHOLD = 48;
 const ROOT_NODE_PATH = '__workspace_root__';
 
-const clampWidth = (value: number): number =>
-  Math.min(Math.max(value, FILE_TREE_WIDTH_MIN), FILE_TREE_WIDTH_MAX);
+const clampWidth = (value: number, viewportWidth: number): number => {
+  const maxFromViewport = Math.max(FILE_TREE_WIDTH_DEFAULT, Math.floor(viewportWidth * 0.7));
+  return Math.min(
+    FILE_TREE_WIDTH_MAX,
+    Math.max(FILE_TREE_WIDTH_MIN, Math.min(value, maxFromViewport)),
+  );
+};
 
 const readStoredWidth = (): number => {
+  if (typeof window === 'undefined') {
+    return FILE_TREE_WIDTH_DEFAULT;
+  }
+
   const raw = window.localStorage.getItem(FILE_TREE_WIDTH_KEY);
   if (!raw) {
-    return FILE_TREE_WIDTH_DEFAULT;
+    return clampWidth(FILE_TREE_WIDTH_DEFAULT, window.innerWidth);
   }
 
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed)) {
-    return FILE_TREE_WIDTH_DEFAULT;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return clampWidth(FILE_TREE_WIDTH_DEFAULT, window.innerWidth);
   }
 
-  return clampWidth(parsed);
+  return clampWidth(parsed, window.innerWidth);
 };
 
 const sortByName = (left: string, right: string): number =>
@@ -63,75 +62,35 @@ const sortByName = (left: string, right: string): number =>
     numeric: true,
   });
 
-const buildFileTree = (filePaths: string[]): TreeNode[] => {
-  const root = new Map<string, MutableTreeNode>();
+const collectAncestorDirectoryPaths = (
+  nodes: TreeNode[],
+  targetPath: string,
+): Set<string> => {
+  const matchingPaths = new Set<string>();
 
-  for (const rawPath of filePaths) {
-    const normalizedPath = rawPath
-      .split('/')
-      .map((segment) => segment.trim())
-      .filter(Boolean)
-      .join('/');
-
-    if (!normalizedPath) {
-      continue;
-    }
-
-    const segments = normalizedPath.split('/');
-    let currentLevel = root;
-    let parentPath = '';
-
-    for (let index = 0; index < segments.length; index += 1) {
-      const segment = segments[index];
-      const segmentPath = parentPath ? `${parentPath}/${segment}` : segment;
-      const isLeaf = index === segments.length - 1;
-
-      const existing = currentLevel.get(segment);
-      if (existing) {
-        if (!isLeaf) {
-          existing.type = 'dir';
-          currentLevel = existing.children;
-          parentPath = segmentPath;
+  const visit = (entries: TreeNode[]): boolean => {
+    for (const entry of entries) {
+      if (entry.type === 'file') {
+        if (entry.path === targetPath) {
+          return true;
         }
 
         continue;
       }
 
-      const nextNode: MutableTreeNode = {
-        type: isLeaf ? 'file' : 'dir',
-        name: segment,
-        path: segmentPath,
-        children: new Map<string, MutableTreeNode>(),
-      };
-
-      currentLevel.set(segment, nextNode);
-
-      if (!isLeaf) {
-        currentLevel = nextNode.children;
-        parentPath = segmentPath;
+      const isDirectAncestor = targetPath.startsWith(`${entry.path}/`);
+      const containsTarget = isDirectAncestor || visit(entry.children);
+      if (containsTarget) {
+        matchingPaths.add(entry.path);
+        return true;
       }
     }
-  }
 
-  const finalize = (level: Map<string, MutableTreeNode>): TreeNode[] => {
-    const values = Array.from(level.values());
-    values.sort((left, right) => {
-      if (left.type === right.type) {
-        return sortByName(left.name, right.name);
-      }
-
-      return left.type === 'dir' ? -1 : 1;
-    });
-
-    return values.map((node) => ({
-      type: node.type,
-      name: node.name,
-      path: node.path,
-      children: finalize(node.children),
-    }));
+    return false;
   };
 
-  return finalize(root);
+  visit(nodes);
+  return matchingPaths;
 };
 
 export const FileTreeDialog = ({
@@ -141,6 +100,7 @@ export const FileTreeDialog = ({
   workspaceName,
   activeFilePath,
   onOpenFile,
+  onCollapse,
   side = 'right',
 }: FileTreeDialogProps): JSX.Element => {
   const [query, setQuery] = React.useState('');
@@ -157,10 +117,26 @@ export const FileTreeDialog = ({
   }, []);
 
   React.useEffect(() => {
+    const clampToViewport = (): void => {
+      setPanelWidth((previous) => clampWidth(previous, window.innerWidth));
+    };
+
+    window.addEventListener('resize', clampToViewport);
+    return () => {
+      window.removeEventListener('resize', clampToViewport);
+    };
+  }, []);
+
+  React.useEffect(() => {
     if (!open) {
       setQuery('');
       setIsSearchVisible(false);
+      return;
     }
+
+    const nextWidth = clampWidth(FILE_TREE_WIDTH_OPEN, window.innerWidth);
+    setPanelWidth(nextWidth);
+    window.localStorage.setItem(FILE_TREE_WIDTH_KEY, String(nextWidth));
   }, [open]);
 
   React.useEffect(() => {
@@ -205,10 +181,18 @@ export const FileTreeDialog = ({
       }
 
       const panelLeft = panelRef.current?.getBoundingClientRect().left ?? 0;
-      const nextWidth =
+      const rawWidth =
         side === 'left'
-          ? clampWidth(event.clientX - panelLeft)
-          : clampWidth(window.innerWidth - event.clientX);
+          ? event.clientX - panelLeft
+          : window.innerWidth - event.clientX;
+
+      if (rawWidth <= FILE_TREE_COLLAPSE_THRESHOLD) {
+        stopResizing();
+        onCollapse();
+        return;
+      }
+
+      const nextWidth = clampWidth(rawWidth, window.innerWidth);
       setPanelWidth(nextWidth);
       window.localStorage.setItem(FILE_TREE_WIDTH_KEY, String(nextWidth));
     };
@@ -233,7 +217,7 @@ export const FileTreeDialog = ({
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
-  }, [side]);
+  }, [onCollapse, side]);
 
   const startResizing = React.useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -293,6 +277,26 @@ export const FileTreeDialog = ({
 
     setExpandedDirs(new Set([ROOT_NODE_PATH]));
   }, [fullRootNode.path, open]);
+
+  React.useEffect(() => {
+    if (!open || !activeFilePath) {
+      return;
+    }
+
+    const ancestorPaths = collectAncestorDirectoryPaths(fullTree, activeFilePath);
+    if (ancestorPaths.size === 0) {
+      return;
+    }
+
+    setExpandedDirs((previous) => {
+      const next = new Set(previous);
+      next.add(ROOT_NODE_PATH);
+      ancestorPaths.forEach((path) => {
+        next.add(path);
+      });
+      return next;
+    });
+  }, [activeFilePath, fullTree, open]);
 
   const toggleDirectory = React.useCallback((path: string) => {
     setExpandedDirs((previous) => {
@@ -376,13 +380,18 @@ export const FileTreeDialog = ({
         type="button"
         aria-label="Resize files panel"
         className={cn(
-          'no-drag group absolute inset-y-0 z-10 w-2 cursor-col-resize',
-          side === 'left' ? 'right-0 translate-x-full' : 'left-0 -translate-x-full',
+          'no-drag group absolute inset-y-0 z-10 w-4 cursor-col-resize',
+          side === 'left' ? 'right-0' : 'left-0',
           !open && 'pointer-events-none opacity-0',
         )}
         onPointerDown={startResizing}
       >
-        <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-stone-300/70" />
+        <span
+          className={cn(
+            'absolute inset-y-0 w-px bg-transparent transition-colors group-hover:bg-stone-300/70',
+            side === 'left' ? 'right-0' : 'left-0',
+          )}
+        />
       </button>
 
       <div

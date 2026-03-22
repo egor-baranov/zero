@@ -73,6 +73,19 @@ const UNASSIGNED_WORKSPACE_ID = '';
 const normalizeMessageText = (value: string): string =>
   value.replace(/\s+/g, ' ').trim();
 
+const toPlainPreviewText = (value: string): string =>
+  normalizeMessageText(
+    value
+      .replace(/\r\n?/g, '\n')
+      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+      .replace(/```(?:[\w-]+)?/g, '')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+      .replace(/^\s*[-*+]\s+/gm, '')
+      .replace(/^\s*\d+\.\s+/gm, ''),
+  );
+
 const isDefaultThreadTitle = (title: string): boolean => {
   const normalized = title.trim().toLowerCase();
   return normalized === 'new chat' || normalized.startsWith('new chat ');
@@ -154,7 +167,7 @@ const toThreadTitleFromPrompt = (prompt: string): string => {
 };
 
 const toThreadPreviewFromPrompt = (prompt: string): string => {
-  const normalized = normalizeMessageText(prompt);
+  const normalized = toPlainPreviewText(prompt);
   if (!normalized) {
     return 'Conversation started';
   }
@@ -228,16 +241,22 @@ const parsePersistedState = (): ShellState => {
       ThreadRecord & {
         updatedAt?: unknown;
       }
-    >).map((thread) => ({
-      ...thread,
-      titleSource:
-        thread.titleSource === 'manual' || thread.titleSource === 'auto'
-          ? thread.titleSource
-          : isDefaultThreadTitle(thread.title)
-            ? 'auto'
-            : 'manual',
-      updatedAtMs: parseLegacyUpdatedAtMs(thread.updatedAtMs ?? thread.updatedAt),
-    }));
+    >).map((thread) => {
+      const previewSource =
+        typeof thread.preview === 'string' ? thread.preview : '';
+
+      return {
+        ...thread,
+        titleSource:
+          thread.titleSource === 'manual' || thread.titleSource === 'auto'
+            ? thread.titleSource
+            : isDefaultThreadTitle(thread.title)
+              ? 'auto'
+              : 'manual',
+        preview: toThreadPreviewFromPrompt(previewSource),
+        updatedAtMs: parseLegacyUpdatedAtMs(thread.updatedAtMs ?? thread.updatedAt),
+      };
+    });
 
     const nextState: ShellState = {
       workspaces: parsed.workspaces as WorkspaceRecord[],
@@ -297,6 +316,33 @@ export const useShellState = (): {
   openWorkspaceFromPath: (folderPath: string) => void;
 } => {
   const [state, setState] = React.useState<ShellState>(() => parsePersistedState());
+
+  React.useEffect(() => {
+    setState((previous) => {
+      let didUpdate = false;
+      const normalizedThreads = previous.threads.map((thread) => {
+        const nextPreview = toThreadPreviewFromPrompt(thread.preview);
+        if (nextPreview === thread.preview) {
+          return thread;
+        }
+
+        didUpdate = true;
+        return {
+          ...thread,
+          preview: nextPreview,
+        };
+      });
+
+      if (!didUpdate) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        threads: normalizedThreads,
+      };
+    });
+  }, []);
 
   React.useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));

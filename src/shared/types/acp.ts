@@ -1,4 +1,5 @@
 import type {
+  McpServer,
   PermissionOption,
   RequestPermissionRequest,
   SessionUpdate,
@@ -44,6 +45,8 @@ export interface AcpInitializeResult {
 
 export interface AcpSessionNewRequest {
   cwd: string;
+  agent?: AcpAgentConfig;
+  mcpServers?: McpServer[];
 }
 
 export interface AcpSessionModeOption {
@@ -107,6 +110,8 @@ export interface AcpSessionNewResult {
 export interface AcpSessionLoadRequest {
   sessionId: string;
   cwd: string;
+  agent?: AcpAgentConfig;
+  mcpServers?: McpServer[];
 }
 
 export interface AcpSessionLoadResult {
@@ -126,7 +131,15 @@ export interface AcpPromptResult {
 
 export interface AcpAuthenticateRequest {
   cwd: string;
+  agent?: AcpAgentConfig;
   methodId?: string;
+}
+
+export interface AcpTerminalAuthLaunchSpec {
+  command: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
 }
 
 export interface AcpAuthenticateResult {
@@ -135,6 +148,7 @@ export interface AcpAuthenticateResult {
   methodId: string | null;
   methodName: string | null;
   message: string;
+  terminalLaunchSpec?: AcpTerminalAuthLaunchSpec | null;
 }
 
 export interface AcpSetSessionModeRequest {

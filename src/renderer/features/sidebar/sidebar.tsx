@@ -181,7 +181,7 @@ export const Sidebar = ({
     <aside
       style={{ width }}
       className={cn(
-        'relative flex h-full flex-col bg-[rgba(249,250,252,0.08)] backdrop-blur-[6px] backdrop-saturate-140',
+        'relative flex h-full flex-col border-r border-stone-200/55 bg-[rgba(249,250,252,0.02)] backdrop-blur-[1px] backdrop-saturate-125',
         !isResizing && 'transition-[width,opacity] duration-200',
       )}
     >
@@ -194,13 +194,13 @@ export const Sidebar = ({
       <div className="px-3 pb-1 pt-2">
         <div className="flex items-center justify-between px-1">
           <p className="text-[12px] font-semibold tracking-[0.01em] text-stone-600">Threads</p>
-          <button
-            type="button"
-            aria-label="New project"
-            title="New project"
-            className={cn(
-              'no-drag inline-flex h-7 w-7 items-center justify-center rounded-md',
-              'text-stone-600 transition-colors hover:bg-stone-300/70',
+            <button
+              type="button"
+              aria-label="New project"
+              title="New project"
+              className={cn(
+              'zeroade-sidebar-hover-shadow no-drag inline-flex h-7 w-7 items-center justify-center rounded-md',
+              'text-stone-600 transition-colors hover:bg-white/55',
             )}
             onClick={onOpenFolder}
           >
@@ -233,7 +233,7 @@ export const Sidebar = ({
                 <section key={group.id} className="group/project space-y-0.5">
                   <div
                     className={cn(
-                      'no-drag group relative flex h-9 w-full items-center justify-between rounded-xl px-2 text-left transition-colors hover:bg-stone-300/70',
+                      'zeroade-sidebar-hover-shadow no-drag group relative flex h-9 w-full items-center justify-between rounded-xl px-2 text-left transition-colors hover:bg-white/55',
                     )}
                   >
                     <button
@@ -269,7 +269,7 @@ export const Sidebar = ({
                             type="button"
                             aria-label={`Project options for ${group.label}`}
                             className={cn(
-                              'inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:bg-stone-300/70 hover:text-stone-700',
+                              'zeroade-sidebar-hover-shadow inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:bg-white/55 hover:text-stone-700',
                               'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto',
                               'focus-visible:opacity-100 focus-visible:pointer-events-auto data-[state=open]:opacity-100 data-[state=open]:pointer-events-auto',
                             )}
@@ -294,7 +294,7 @@ export const Sidebar = ({
                         type="button"
                         aria-label={`Create new chat in ${group.label}`}
                         className={cn(
-                          'inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:bg-stone-300/70 hover:text-stone-700',
+                          'zeroade-sidebar-hover-shadow inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:bg-white/55 hover:text-stone-700',
                           'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto',
                           'focus-visible:opacity-100 focus-visible:pointer-events-auto',
                         )}
@@ -318,9 +318,9 @@ export const Sidebar = ({
                             <button
                               type="button"
                               className={cn(
-                                'no-drag flex w-full rounded-xl text-left transition-colors hover:bg-stone-300/70',
+                                'zeroade-sidebar-hover-shadow no-drag flex w-full rounded-xl text-left transition-colors hover:bg-white/55',
                                 'flex-col gap-0.5 py-1.5 pl-8 pr-9',
-                                thread.id === selectedThreadId && 'bg-stone-300/70',
+                                thread.id === selectedThreadId && 'bg-white/45',
                               )}
                               onClick={() => onSelectThread(thread.id)}
                             >
@@ -369,7 +369,7 @@ export const Sidebar = ({
                                   type="button"
                                   aria-label={`Thread options for ${thread.title}`}
                                   className={cn(
-                                    'absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:bg-stone-300/70 hover:text-stone-700',
+                                    'zeroade-sidebar-hover-shadow absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:bg-white/55 hover:text-stone-700',
                                     'opacity-0 pointer-events-none group-hover/thread:opacity-100 group-hover/thread:pointer-events-auto',
                                     'group-focus-within/thread:opacity-100 group-focus-within/thread:pointer-events-auto',
                                     'focus-visible:opacity-100 focus-visible:pointer-events-auto data-[state=open]:opacity-100 data-[state=open]:pointer-events-auto',
@@ -407,13 +407,13 @@ export const Sidebar = ({
         )}
       </ScrollArea>
 
-      <div className="border-t border-stone-200/65 px-2.5 py-2">
+      <div className="px-2.5 py-2">
         <button
           type="button"
           className={cn(
-            'no-drag flex h-8 w-full items-center rounded-lg text-stone-600 transition-colors hover:bg-stone-300/70',
+            'zeroade-sidebar-hover-shadow no-drag flex h-8 w-full items-center rounded-lg text-stone-600 transition-colors hover:bg-white/55',
             'gap-2 px-2.5 text-sm',
-            isSettingsOpen && 'bg-stone-200/80 text-stone-900',
+            isSettingsOpen && 'bg-white/45 text-stone-900',
           )}
           onClick={onOpenSettings}
         >
@@ -441,7 +441,7 @@ const SidebarAction = ({
       type="button"
       onClick={onClick}
       className={cn(
-        'no-drag mb-0.5 flex w-full items-center rounded-lg text-stone-600 transition-colors hover:bg-stone-300/70',
+        'zeroade-sidebar-hover-shadow no-drag mb-0.5 flex w-full items-center rounded-lg text-stone-600 transition-colors hover:bg-white/55',
         'h-8 gap-2 px-2.5 text-sm',
       )}
     >

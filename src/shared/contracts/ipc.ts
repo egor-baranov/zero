@@ -9,6 +9,8 @@ export const IPC_CHANNELS = {
   workspaceGitStatus: 'workspace:git-status',
   workspaceGitCheckoutBranch: 'workspace:git-checkout-branch',
   workspaceGitCreateBranch: 'workspace:git-create-branch',
+  workspaceGitCommit: 'workspace:git-commit',
+  workspaceGitPush: 'workspace:git-push',
   acpInitialize: 'acp:initialize',
   acpSessionNew: 'acp:session:new',
   acpSessionLoad: 'acp:session:load',

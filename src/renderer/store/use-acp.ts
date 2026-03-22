@@ -5,6 +5,7 @@ import type {
   SessionUpdate,
   ToolCallStatus,
 } from '@agentclientprotocol/sdk';
+import { readStoredMcpServers, toAcpMcpServers } from '@renderer/store/mcp-servers';
 import type {
   AcpAgentConfig,
   AcpConnectionState,
@@ -39,28 +40,30 @@ interface PersistedThreadAttachmentEntry {
 }
 type ThreadAttachmentHistoryMap = Record<string, PersistedThreadAttachmentEntry[]>;
 
+interface TimelineItemBase {
+  id: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
 export type TimelineItem =
-  | {
+  | (TimelineItemBase & {
       kind: 'user-message';
-      id: string;
       text: string;
       attachments?: AcpPromptAttachment[];
-    }
-  | {
+    })
+  | (TimelineItemBase & {
       kind: 'assistant-message';
-      id: string;
       text: string;
       noticeKind?: 'agent-change';
       iconUrl?: string | null;
-    }
-  | {
+    })
+  | (TimelineItemBase & {
       kind: 'plan';
-      id: string;
       entries: PlanEntry[];
-    }
-  | {
+    })
+  | (TimelineItemBase & {
       kind: 'tool-call';
-      id: string;
       toolCallId: string;
       title: string;
       status: ToolCallStatus | 'unknown';
@@ -68,7 +71,7 @@ export type TimelineItem =
       locations: string[];
       rawInput?: string;
       rawOutput?: string;
-    };
+    });
 
 interface SessionTimeline {
   items: TimelineItem[];
@@ -728,6 +731,7 @@ const withMessageChunk = (
   text: string,
   attachments?: AcpPromptAttachment[],
 ): TimelineItem[] => {
+  const nowMs = Date.now();
   const normalizedAttachments =
     role === 'user-message' ? normalizePromptAttachments(attachments) : [];
 
@@ -751,6 +755,7 @@ const withMessageChunk = (
         ...last,
         text: mergedText,
         attachments: mergedAttachments,
+        updatedAtMs: nowMs,
       };
       return [...items.slice(0, -1), mergedUserMessage];
     }
@@ -758,6 +763,7 @@ const withMessageChunk = (
     const mergedAssistantMessage: TimelineItem = {
       ...last,
       text: `${last.text}${text}`,
+      updatedAtMs: nowMs,
     };
     return [...items.slice(0, -1), mergedAssistantMessage];
   }
@@ -775,6 +781,8 @@ const withMessageChunk = (
       {
         kind: role,
         id: nextId('user'),
+        createdAtMs: nowMs,
+        updatedAtMs: nowMs,
         text: normalizedText,
         attachments: mergedAttachments,
       },
@@ -783,18 +791,21 @@ const withMessageChunk = (
 
   return [
     ...items,
-    {
-      kind: role,
-      id: nextId('assistant'),
-      text,
-    },
-  ];
+      {
+        kind: role,
+        id: nextId('assistant'),
+        createdAtMs: nowMs,
+        updatedAtMs: nowMs,
+        text,
+      },
+    ];
 };
 
 const withToolCall = (
   items: TimelineItem[],
   update: SessionUpdate,
 ): TimelineItem[] => {
+  const nowMs = Date.now();
   if (update.sessionUpdate !== 'tool_call' && update.sessionUpdate !== 'tool_call_update') {
     return items;
   }
@@ -809,6 +820,8 @@ const withToolCall = (
   const nextToolItem: TimelineItem = {
     kind: 'tool-call',
     id: existing?.id ?? nextId('tool'),
+    createdAtMs: existing?.createdAtMs ?? nowMs,
+    updatedAtMs: nowMs,
     toolCallId,
     title:
       (update.title ??
@@ -841,15 +854,19 @@ const withToolCall = (
 };
 
 const withPlan = (items: TimelineItem[], entries: PlanEntry[]): TimelineItem[] => {
-  const index = items.findIndex((item) => item.kind === 'plan');
+  const nowMs = Date.now();
+  const lastIndex = items.length - 1;
+  const last = items[lastIndex];
   const planItem: TimelineItem = {
     kind: 'plan',
-    id: 'plan-current',
+    id: last?.kind === 'plan' ? last.id : nextId('plan'),
+    createdAtMs: last?.kind === 'plan' ? last.createdAtMs : nowMs,
+    updatedAtMs: nowMs,
     entries,
   };
 
-  if (index >= 0) {
-    return [...items.slice(0, index), planItem, ...items.slice(index + 1)];
+  if (last?.kind === 'plan') {
+    return [...items.slice(0, -1), planItem];
   }
 
   return [...items, planItem];
@@ -957,6 +974,10 @@ export const useAcp = (): UseAcpResult => {
   const activeSessionIdRef = React.useRef<string | null>(activeSessionId);
   const attachmentReplayCursorBySessionIdRef =
     React.useRef<Record<string, number>>({});
+  const getCurrentMcpServers = React.useCallback(
+    () => toAcpMcpServers(readStoredMcpServers()),
+    [],
+  );
 
   const setActiveSessionIdSafely = React.useCallback(
     (nextSessionId: string | null): void => {
@@ -1240,6 +1261,40 @@ export const useAcp = (): UseAcpResult => {
     [agentPreset, resetRuntimeState],
   );
 
+  const getCurrentAgentConfig = React.useCallback((): AcpAgentConfig | null => {
+    if (agentPreset === 'custom') {
+      if (!customAgentConfig?.command.trim()) {
+        return null;
+      }
+
+      return {
+        kind: 'custom',
+        command: customAgentConfig.command,
+        args: customAgentConfig.args,
+        cwd: customAgentConfig.cwd,
+        env: customAgentConfig.env,
+      };
+    }
+
+    if (agentPreset === 'codex') {
+      return {
+        kind: 'codex',
+        config: codexAgentConfig ?? undefined,
+      };
+    }
+
+    if (agentPreset === 'claude') {
+      return {
+        kind: 'claude',
+        config: claudeAgentConfig ?? undefined,
+      };
+    }
+
+    return {
+      kind: 'mock',
+    };
+  }, [agentPreset, claudeAgentConfig, codexAgentConfig, customAgentConfig]);
+
   const initialize = React.useCallback(async (cwd: string): Promise<boolean> => {
     if (isInitializedRef.current) {
       return true;
@@ -1248,7 +1303,8 @@ export const useAcp = (): UseAcpResult => {
     if (!initializePromiseRef.current) {
       initializePromiseRef.current = (async () => {
         try {
-          if (agentPreset === 'custom' && !customAgentConfig?.command.trim()) {
+          const agent = getCurrentAgentConfig();
+          if (!agent) {
             setConnectionState('error');
             setLoadSessionSupported(false);
             loadSessionSupportedRef.current = false;
@@ -1256,29 +1312,6 @@ export const useAcp = (): UseAcpResult => {
             initializePromiseRef.current = null;
             return;
           }
-
-          const agent: AcpAgentConfig =
-            agentPreset === 'custom' && customAgentConfig
-              ? {
-                  kind: 'custom',
-                  command: customAgentConfig.command,
-                  args: customAgentConfig.args,
-                  cwd: customAgentConfig.cwd,
-                  env: customAgentConfig.env,
-                }
-              : agentPreset === 'codex'
-                ? {
-                    kind: 'codex',
-                    config: codexAgentConfig ?? undefined,
-                  }
-                : agentPreset === 'claude'
-                  ? {
-                      kind: 'claude',
-                      config: claudeAgentConfig ?? undefined,
-                    }
-                  : {
-                      kind: 'mock',
-                    };
 
           setConnectionState('connecting');
           const result = await window.desktop.acpInitialize({ cwd, agent });
@@ -1322,7 +1355,7 @@ export const useAcp = (): UseAcpResult => {
     } catch {
       return false;
     }
-  }, [agentPreset, claudeAgentConfig, codexAgentConfig, customAgentConfig]);
+  }, [getCurrentAgentConfig]);
 
   const ensureTimelineExists = React.useCallback((sessionId: string) => {
     setSessionTimelines((previous) => {
@@ -1358,7 +1391,11 @@ export const useAcp = (): UseAcpResult => {
 
         let created: AcpSessionNewResult;
         try {
-          created = await window.desktop.acpSessionNew({ cwd: normalizedCwd });
+          created = await window.desktop.acpSessionNew({
+            cwd: normalizedCwd,
+            agent: getCurrentAgentConfig() ?? undefined,
+            mcpServers: getCurrentMcpServers(),
+          });
         } catch (error) {
           if (isAuthenticationRequiredError(error)) {
             throw error instanceof Error ? error : new Error(toErrorMessage(error));
@@ -1380,6 +1417,8 @@ export const useAcp = (): UseAcpResult => {
             const loaded = await window.desktop.acpSessionLoad({
               sessionId: created.sessionId,
               cwd: normalizedCwd,
+              agent: getCurrentAgentConfig() ?? undefined,
+              mcpServers: getCurrentMcpServers(),
             });
 
             if (loaded.loaded && loaded.controls) {
@@ -1415,6 +1454,8 @@ export const useAcp = (): UseAcpResult => {
             const result = await window.desktop.acpSessionLoad({
               sessionId: existingSessionId,
               cwd: normalizedCwd,
+              agent: getCurrentAgentConfig() ?? undefined,
+              mcpServers: getCurrentMcpServers(),
             });
 
             if (result.loaded) {
@@ -1501,7 +1542,11 @@ export const useAcp = (): UseAcpResult => {
 
       let created: AcpSessionNewResult;
       try {
-        created = await window.desktop.acpSessionNew({ cwd: normalizedCwd });
+        created = await window.desktop.acpSessionNew({
+          cwd: normalizedCwd,
+          agent: getCurrentAgentConfig() ?? undefined,
+          mcpServers: getCurrentMcpServers(),
+        });
       } catch (error) {
         if (isAuthenticationRequiredError(error)) {
           throw error instanceof Error ? error : new Error(toErrorMessage(error));
@@ -1532,6 +1577,8 @@ export const useAcp = (): UseAcpResult => {
           const loaded = await window.desktop.acpSessionLoad({
             sessionId: created.sessionId,
             cwd: normalizedCwd,
+            agent: getCurrentAgentConfig() ?? undefined,
+            mcpServers: getCurrentMcpServers(),
           });
 
           if (loaded.loaded && loaded.controls) {
@@ -1547,7 +1594,14 @@ export const useAcp = (): UseAcpResult => {
       setActiveSessionIdSafely(created.sessionId);
       ensureTimelineExists(created.sessionId);
     },
-    [ensureTimelineExists, initialize, setActiveSessionIdSafely, threadSessionMap],
+    [
+      ensureTimelineExists,
+      getCurrentAgentConfig,
+      getCurrentMcpServers,
+      initialize,
+      setActiveSessionIdSafely,
+      threadSessionMap,
+    ],
   );
 
   const setSessionPrompting = React.useCallback((sessionId: string, isPrompting: boolean) => {
@@ -1819,8 +1873,11 @@ export const useAcp = (): UseAcpResult => {
 
   const authenticate = React.useCallback(
     async (cwd: string): Promise<AcpAuthenticateResult> =>
-      window.desktop.acpAuthenticate({ cwd }),
-    [],
+      window.desktop.acpAuthenticate({
+        cwd,
+        agent: getCurrentAgentConfig() ?? undefined,
+      }),
+    [getCurrentAgentConfig],
   );
 
   const invalidateThreadSession = React.useCallback(

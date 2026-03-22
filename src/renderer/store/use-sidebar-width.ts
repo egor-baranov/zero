@@ -3,8 +3,8 @@ import * as React from 'react';
 const SIDEBAR_WIDTH_KEY = 'zeroade.sidebar.width';
 const SIDEBAR_COLLAPSED_KEY = 'zeroade.sidebar.collapsed';
 const SIDEBAR_DEFAULT = 312;
-const SIDEBAR_MIN = 300;
-const SIDEBAR_MAX = 320;
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 520;
 const SIDEBAR_COLLAPSED_WIDTH = 0;
 
 const clamp = (value: number): number =>

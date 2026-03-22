@@ -14,8 +14,10 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { coldarkCold, coldarkDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { AcpPermissionRequestEvent, AcpPromptAttachment } from '@shared/types/acp';
 import type { TimelineItem } from '@renderer/store/use-acp';
+import type { WorkspaceGitFileStat } from '@shared/types/workspace';
 import { cn } from '@renderer/lib/cn';
 import { toLanguagePresentation } from '@renderer/lib/code-language-icons';
+import { InlineMonacoDiffEditor } from '@renderer/features/transcript/inline-monaco-diff-editor';
 import zeroLogo from '@renderer/assets/zero-logo.png';
 import { Dialog, DialogContent } from '@renderer/components/ui/dialog';
 import { Avatar, AvatarFallback, AvatarImage } from '@renderer/components/ui/avatar';
@@ -37,6 +39,7 @@ interface TranscriptProjectOption {
 interface TranscriptProps {
   threadId: string;
   workspaceName: string;
+  workspacePath: string;
   projects: TranscriptProjectOption[];
   selectedProjectId: string;
   timeline: TimelineItem[];
@@ -46,7 +49,6 @@ interface TranscriptProps {
   onSelectProject: (workspaceId: string) => void;
   onAddProject: () => void;
   onResolvePermission: (requestId: string, optionId: string) => void;
-  onCancelPermission: (requestId: string) => void;
   onOpenFile: (path: string) => void;
   onOpenLink: (url: string) => void;
   onSelectSuggestion: (value: string) => void;
@@ -89,6 +91,39 @@ interface ToolCallPresentation {
   statusLabel: string;
   isSuccess: boolean;
 }
+
+type AssistantTimelineItem = Extract<TimelineItem, { kind: 'assistant-message' }>;
+
+interface ChangedFileEntry {
+  path: string;
+  label: string;
+  additions: number | null;
+  deletions: number | null;
+  toolKinds: string[];
+  previewPatch: string | null;
+}
+
+interface InlineDiffPreviewState {
+  isLoading: boolean;
+  patch: string | null;
+  error: string | null;
+}
+
+type TranscriptRenderBlock =
+  | {
+      kind: 'timeline-item';
+      item: TimelineItem;
+    }
+  | {
+      kind: 'assistant-turn';
+      key: string;
+      items: TimelineItem[];
+      activities: TimelineItem[];
+      finalMessage: AssistantTimelineItem | null;
+      durationMs: number | null;
+      changedFiles: ChangedFileEntry[];
+      isComplete: boolean;
+    };
 
 interface RegistryAgentIconEntry {
   name: string;
@@ -755,6 +790,636 @@ const parseAgentChangedLabel = (value: string): string | null => {
   return label.length > 0 ? label : null;
 };
 
+const isFinalAssistantMessage = (item: TimelineItem): item is AssistantTimelineItem =>
+  item.kind === 'assistant-message' &&
+  item.noticeKind !== 'agent-change' &&
+  !isAgentChangedNotice(item.text);
+
+const normalizeLocationLabel = (path: string): string => {
+  const normalized = path.replaceAll('\\', '/');
+  if (normalized.startsWith('/workspace/')) {
+    return normalized.slice('/workspace/'.length);
+  }
+
+  return normalized;
+};
+
+const toNormalizedPathKey = (value: string): string =>
+  value.replaceAll('\\', '/').replace(/^\/+/, '');
+
+const normalizeFileSystemPath = (value: string): string =>
+  value.replaceAll('\\', '/').replace(/\/+$/, '');
+
+const isAbsoluteFileSystemPath = (value: string): boolean => {
+  const normalized = normalizeFileSystemPath(value);
+  return normalized.startsWith('/') || /^[a-zA-Z]:\//.test(normalized);
+};
+
+const isPathWithinRoot = (value: string, root: string): boolean => {
+  const normalizedValue = normalizeFileSystemPath(value);
+  const normalizedRoot = normalizeFileSystemPath(root);
+  if (!normalizedRoot) {
+    return false;
+  }
+
+  return (
+    normalizedValue === normalizedRoot ||
+    normalizedValue.startsWith(`${normalizedRoot}/`)
+  );
+};
+
+const getContainingDirectoryPath = (value: string): string => {
+  const normalized = normalizeFileSystemPath(value);
+  const lastSlashIndex = normalized.lastIndexOf('/');
+  if (lastSlashIndex <= 0) {
+    return normalized;
+  }
+
+  return normalized.slice(0, lastSlashIndex);
+};
+
+const resolveWorkspacePathCandidatesForFile = (
+  filePath: string,
+  workspacePath: string,
+  projectPaths: string[],
+): string[] => {
+  const seen = new Set<string>();
+  const pushCandidate = (value: string, candidates: string[]): void => {
+    const normalizedValue = normalizeFileSystemPath(value);
+    if (!normalizedValue || seen.has(normalizedValue)) {
+      return;
+    }
+
+    seen.add(normalizedValue);
+    candidates.push(normalizedValue);
+  };
+
+  const candidates: string[] = [];
+  const normalizedRoots = [workspacePath, ...projectPaths]
+    .map((entry) => normalizeFileSystemPath(entry))
+    .filter((entry) => entry.length > 0)
+    .sort((left, right) => right.length - left.length);
+
+  if (!isAbsoluteFileSystemPath(filePath)) {
+    for (const entry of normalizedRoots) {
+      pushCandidate(entry, candidates);
+    }
+    return candidates;
+  }
+
+  for (const entry of normalizedRoots) {
+    if (isPathWithinRoot(filePath, entry)) {
+      pushCandidate(entry, candidates);
+    }
+  }
+
+  pushCandidate(getContainingDirectoryPath(filePath), candidates);
+
+  return candidates;
+};
+
+const countTextLines = (value: string): number => {
+  const normalized = value.replace(/\r\n?/g, '\n');
+  if (normalized.length === 0) {
+    return 0;
+  }
+
+  return normalized.endsWith('\n')
+    ? normalized.split('\n').length - 1
+    : normalized.split('\n').length;
+};
+
+const toTextLines = (value: string): string[] => {
+  const normalized = value.replace(/\r\n?/g, '\n');
+  if (normalized.length === 0) {
+    return [];
+  }
+
+  const lines = normalized.split('\n');
+  if (normalized.endsWith('\n')) {
+    lines.pop();
+  }
+
+  return lines;
+};
+
+const buildSyntheticAddedFilePatch = (fileLabel: string, content: string): string => {
+  const lines = toTextLines(content);
+  const header = [
+    `diff --git a/${fileLabel} b/${fileLabel}`,
+    'new file mode 100644',
+    '--- /dev/null',
+    `+++ b/${fileLabel}`,
+    `@@ -0,0 +1,${lines.length} @@`,
+  ];
+
+  if (lines.length === 0) {
+    return header.join('\n');
+  }
+
+  return [...header, ...lines.map((line) => `+${line}`)].join('\n');
+};
+
+const buildSyntheticReplacementPatch = (
+  fileLabel: string,
+  previousValue: string,
+  nextValue: string,
+): string => {
+  const previousLines = toTextLines(previousValue);
+  const nextLines = toTextLines(nextValue);
+  const header = [
+    `diff --git a/${fileLabel} b/${fileLabel}`,
+    `--- a/${fileLabel}`,
+    `+++ b/${fileLabel}`,
+    `@@ -1,${previousLines.length} +1,${nextLines.length} @@`,
+  ];
+
+  return [
+    ...header,
+    ...previousLines.map((line) => `-${line}`),
+    ...nextLines.map((line) => `+${line}`),
+  ].join('\n');
+};
+
+const CHANGE_STATS_PATH_KEYS = [
+  'path',
+  'filePath',
+  'file_path',
+  'absolutePath',
+  'absolute_path',
+  'targetPath',
+  'target_path',
+];
+const CHANGE_STATS_PATCH_KEYS = ['patch', 'diff'];
+const CHANGE_STATS_CONTENT_KEYS = [
+  'content',
+  'text',
+  'value',
+  'new_string',
+  'newString',
+  'new_text',
+  'newText',
+  'new_content',
+  'newContent',
+  'replacement',
+  'replacement_text',
+  'body',
+];
+const CHANGE_STATS_STRING_PAIRS: Array<[string, string]> = [
+  ['old_string', 'new_string'],
+  ['oldString', 'newString'],
+  ['old_text', 'new_text'],
+  ['oldText', 'newText'],
+  ['old_content', 'new_content'],
+  ['oldContent', 'newContent'],
+  ['before', 'after'],
+  ['previous', 'updated'],
+];
+
+const isStructuredPayload = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const matchesPayloadLocation = (candidatePath: string, locationPath: string): boolean => {
+  const normalizedCandidate = toNormalizedPathKey(normalizeLocationLabel(candidatePath));
+  const normalizedLocation = toNormalizedPathKey(normalizeLocationLabel(locationPath));
+
+  return (
+    normalizedCandidate === normalizedLocation ||
+    normalizedCandidate.endsWith(`/${normalizedLocation}`) ||
+    normalizedLocation.endsWith(`/${normalizedCandidate}`)
+  );
+};
+
+const mergeChangeStats = (
+  values: Array<{ additions: number; deletions: number } | null>,
+): { additions: number; deletions: number } | null => {
+  const concreteValues = values.filter(
+    (value): value is { additions: number; deletions: number } => value !== null,
+  );
+  if (concreteValues.length === 0) {
+    return null;
+  }
+
+  return concreteValues.reduce(
+    (sum, value) => ({
+      additions: sum.additions + value.additions,
+      deletions: sum.deletions + value.deletions,
+    }),
+    { additions: 0, deletions: 0 },
+  );
+};
+
+const isWriteLikeToolKind = (toolKind: string): boolean => {
+  const normalizedToolKind = toolKind.trim().toLowerCase();
+  return normalizedToolKind.includes('write') || normalizedToolKind.includes('create');
+};
+
+const looksLikePatchText = (value: string): boolean =>
+  value.includes('*** Begin Patch') ||
+  value.includes('diff --git') ||
+  value.includes('\n@@') ||
+  /\n[+-][^\n]/.test(value);
+
+const deriveChangeStatsFromPayload = (
+  value: unknown,
+  locationPath: string,
+  toolKind: string,
+): { additions: number; deletions: number } | null => {
+  if (Array.isArray(value)) {
+    return mergeChangeStats(
+      value.map((entry) => deriveChangeStatsFromPayload(entry, locationPath, toolKind)),
+    );
+  }
+
+  if (!isStructuredPayload(value)) {
+    return null;
+  }
+
+  const scopedPathCandidate = CHANGE_STATS_PATH_KEYS.find(
+    (key) => typeof value[key] === 'string',
+  );
+  if (
+    scopedPathCandidate &&
+    typeof value[scopedPathCandidate] === 'string' &&
+    !matchesPayloadLocation(value[scopedPathCandidate] as string, locationPath)
+  ) {
+    return null;
+  }
+
+  for (const [oldKey, newKey] of CHANGE_STATS_STRING_PAIRS) {
+    if (typeof value[oldKey] === 'string' && typeof value[newKey] === 'string') {
+      return {
+        additions: countTextLines(value[newKey] as string),
+        deletions: countTextLines(value[oldKey] as string),
+      };
+    }
+  }
+
+  for (const key of CHANGE_STATS_PATCH_KEYS) {
+    if (typeof value[key] === 'string' && looksLikePatchText(value[key] as string)) {
+      return parsePatchChangeCounts(value[key] as string);
+    }
+  }
+
+  if (isWriteLikeToolKind(toolKind)) {
+    for (const key of CHANGE_STATS_CONTENT_KEYS) {
+      if (typeof value[key] === 'string' && (value[key] as string).trim().length > 0) {
+        return {
+          additions: countTextLines(value[key] as string),
+          deletions: 0,
+        };
+      }
+    }
+  }
+
+  return mergeChangeStats(
+    Object.values(value).map((entry) => deriveChangeStatsFromPayload(entry, locationPath, toolKind)),
+  );
+};
+
+const deriveChangePreviewFromPayload = (
+  value: unknown,
+  locationPath: string,
+  toolKind: string,
+): string | null => {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const preview = deriveChangePreviewFromPayload(entry, locationPath, toolKind);
+      if (preview) {
+        return preview;
+      }
+    }
+    return null;
+  }
+
+  if (!isStructuredPayload(value)) {
+    return null;
+  }
+
+  const scopedPathCandidate = CHANGE_STATS_PATH_KEYS.find(
+    (key) => typeof value[key] === 'string',
+  );
+  if (
+    scopedPathCandidate &&
+    typeof value[scopedPathCandidate] === 'string' &&
+    !matchesPayloadLocation(value[scopedPathCandidate] as string, locationPath)
+  ) {
+    return null;
+  }
+
+  const fileLabel = normalizeLocationLabel(locationPath);
+
+  for (const [oldKey, newKey] of CHANGE_STATS_STRING_PAIRS) {
+    if (typeof value[oldKey] === 'string' && typeof value[newKey] === 'string') {
+      return buildSyntheticReplacementPatch(
+        fileLabel,
+        value[oldKey] as string,
+        value[newKey] as string,
+      );
+    }
+  }
+
+  for (const key of CHANGE_STATS_PATCH_KEYS) {
+    if (typeof value[key] === 'string' && looksLikePatchText(value[key] as string)) {
+      return value[key] as string;
+    }
+  }
+
+  if (isWriteLikeToolKind(toolKind)) {
+    for (const key of CHANGE_STATS_CONTENT_KEYS) {
+      if (typeof value[key] === 'string' && (value[key] as string).trim().length > 0) {
+        return buildSyntheticAddedFilePatch(fileLabel, value[key] as string);
+      }
+    }
+  }
+
+  for (const entry of Object.values(value)) {
+    const preview = deriveChangePreviewFromPayload(entry, locationPath, toolKind);
+    if (preview) {
+      return preview;
+    }
+  }
+
+  return null;
+};
+
+const deriveToolCallChangeStats = (
+  item: Extract<TimelineItem, { kind: 'tool-call' }>,
+  locationPath: string,
+): { additions: number; deletions: number } | null => {
+  const inputPayload = parseRawPayload(item.rawInput);
+  const outputPayload = parseRawPayload(item.rawOutput);
+
+  return (
+    deriveChangeStatsFromPayload(inputPayload, locationPath, item.toolKind) ??
+    deriveChangeStatsFromPayload(outputPayload, locationPath, item.toolKind)
+  );
+};
+
+const deriveToolCallPreviewPatch = (
+  item: Extract<TimelineItem, { kind: 'tool-call' }>,
+  locationPath: string,
+): string | null => {
+  const inputPayload = parseRawPayload(item.rawInput);
+  const outputPayload = parseRawPayload(item.rawOutput);
+
+  return (
+    deriveChangePreviewFromPayload(inputPayload, locationPath, item.toolKind) ??
+    deriveChangePreviewFromPayload(outputPayload, locationPath, item.toolKind)
+  );
+};
+
+const FILE_MUTATION_TOOL_KIND_TOKENS = [
+  'edit',
+  'write',
+  'create',
+  'delete',
+  'rename',
+  'move',
+  'patch',
+  'replace',
+];
+
+const isFileMutationToolCall = (item: TimelineItem): item is Extract<TimelineItem, { kind: 'tool-call' }> => {
+  if (item.kind !== 'tool-call' || item.locations.length === 0) {
+    return false;
+  }
+
+  const normalizedToolKind = item.toolKind.trim().toLowerCase();
+  return FILE_MUTATION_TOOL_KIND_TOKENS.some((token) => normalizedToolKind.includes(token));
+};
+
+const collectChangedFiles = (
+  items: TimelineItem[],
+  gitFileStatsByPath: Record<string, WorkspaceGitFileStat>,
+): ChangedFileEntry[] => {
+  const fileMap = new Map<string, ChangedFileEntry>();
+
+  for (const item of items) {
+    if (!isFileMutationToolCall(item)) {
+      continue;
+    }
+
+    for (const locationPath of item.locations) {
+      if (!locationPath) {
+        continue;
+      }
+
+      const normalizedPathKey = toNormalizedPathKey(normalizeLocationLabel(locationPath));
+      const gitFileStat = gitFileStatsByPath[normalizedPathKey];
+      const derivedStats = deriveToolCallChangeStats(item, locationPath);
+      const derivedPreviewPatch = deriveToolCallPreviewPatch(item, locationPath);
+      const existing = fileMap.get(locationPath);
+
+      if (existing) {
+        if (!existing.toolKinds.includes(item.toolKind)) {
+          existing.toolKinds.push(item.toolKind);
+        }
+        if (!existing.previewPatch && derivedPreviewPatch) {
+          existing.previewPatch = derivedPreviewPatch;
+        }
+
+        if (gitFileStat) {
+          existing.additions = gitFileStat.additions;
+          existing.deletions = gitFileStat.deletions;
+          continue;
+        }
+
+        if (derivedStats) {
+          existing.additions = (existing.additions ?? 0) + derivedStats.additions;
+          existing.deletions = (existing.deletions ?? 0) + derivedStats.deletions;
+        }
+        continue;
+      }
+
+      fileMap.set(locationPath, {
+        path: locationPath,
+        label: normalizeLocationLabel(locationPath),
+        additions: gitFileStat?.additions ?? derivedStats?.additions ?? null,
+        deletions: gitFileStat?.deletions ?? derivedStats?.deletions ?? null,
+        toolKinds: [item.toolKind],
+        previewPatch: derivedPreviewPatch,
+      });
+    }
+  }
+
+  return Array.from(fileMap.values());
+};
+
+const formatWorkedDuration = (durationMs: number | null): string => {
+  const totalSeconds = Math.max(1, Math.round((durationMs ?? 0) / 1000));
+  if (totalSeconds < 60) {
+    return `Worked for ${totalSeconds}s`;
+  }
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds === 0 ? `Worked for ${minutes}m` : `Worked for ${minutes}m ${seconds}s`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes === 0
+    ? `Worked for ${hours}h`
+    : `Worked for ${hours}h ${remainingMinutes}m`;
+};
+
+const formatSignedChangeCount = (value: number, prefix: '+' | '-'): string =>
+  `${prefix}${Math.abs(value).toLocaleString()}`;
+
+const buildBestEffortFallbackStats = async (
+  file: ChangedFileEntry,
+  workspacePathCandidates: string[],
+): Promise<{ additions: number; deletions: number }> => {
+  if (file.previewPatch) {
+    const previewCounts = parsePatchChangeCounts(file.previewPatch);
+    if (previewCounts.additions > 0 || previewCounts.deletions > 0) {
+      return previewCounts;
+    }
+  }
+
+  for (const workspacePath of workspacePathCandidates) {
+    try {
+      const fileResult = await window.desktop.workspaceReadFile({
+        workspacePath,
+        filePath: file.path,
+      });
+
+      return {
+        additions: countTextLines(fileResult.content),
+        deletions: 0,
+      };
+    } catch {
+      // Try the next workspace root candidate.
+    }
+  }
+
+  return file.previewPatch ? parsePatchChangeCounts(file.previewPatch) : { additions: 0, deletions: 0 };
+};
+
+const looksLikeUnifiedDiffText = (value: string): boolean =>
+  value.includes('diff --git') || value.includes('\n@@') || value.startsWith('--- ');
+
+const buildBestEffortFallbackPatch = async (
+  file: ChangedFileEntry,
+  workspacePathCandidates: string[],
+): Promise<string> => {
+  if (file.previewPatch && looksLikeUnifiedDiffText(file.previewPatch)) {
+    return file.previewPatch;
+  }
+
+  for (const workspacePath of workspacePathCandidates) {
+    try {
+      const fileResult = await window.desktop.workspaceReadFile({
+        workspacePath,
+        filePath: file.path,
+      });
+
+      return buildSyntheticAddedFilePatch(file.label, fileResult.content);
+    } catch {
+      // Try the next workspace root candidate.
+    }
+  }
+
+  return file.previewPatch ?? '';
+};
+
+const parsePatchChangeCounts = (patch: string): { additions: number; deletions: number } => {
+  let additions = 0;
+  let deletions = 0;
+
+  for (const line of patch.replace(/\r\n?/g, '\n').split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) {
+      continue;
+    }
+
+    if (line.startsWith('+')) {
+      additions += 1;
+      continue;
+    }
+
+    if (line.startsWith('-')) {
+      deletions += 1;
+    }
+  }
+
+  return { additions, deletions };
+};
+
+const hasZeroChangeCounts = (value: { additions: number | null; deletions: number | null }): boolean =>
+  (value.additions ?? 0) === 0 && (value.deletions ?? 0) === 0;
+
+const buildTranscriptBlocks = (
+  timeline: TimelineItem[],
+  options: {
+    clockMs: number;
+    isThinking: boolean;
+    gitFileStatsByPath: Record<string, WorkspaceGitFileStat>;
+  },
+): TranscriptRenderBlock[] => {
+  const blocks: TranscriptRenderBlock[] = [];
+  let currentTurnItems: TimelineItem[] = [];
+
+  const flushCurrentTurn = (isFinalFlush: boolean): void => {
+    if (currentTurnItems.length === 0) {
+      return;
+    }
+
+    const finalIndex = [...currentTurnItems]
+      .map((item, index) => ({ item, index }))
+      .filter((entry) => isFinalAssistantMessage(entry.item))
+      .at(-1)?.index;
+
+    const finalMessage =
+      typeof finalIndex === 'number'
+        ? (currentTurnItems[finalIndex] as AssistantTimelineItem)
+        : null;
+    const activities =
+      typeof finalIndex === 'number'
+        ? currentTurnItems.filter((_, index) => index !== finalIndex)
+        : [...currentTurnItems];
+    const startedAtMs = currentTurnItems[0]?.createdAtMs ?? null;
+    const lastUpdatedAtMs = currentTurnItems.at(-1)?.updatedAtMs ?? null;
+    const endAtMs =
+      finalMessage?.updatedAtMs ??
+      (options.isThinking ? Math.max(options.clockMs, lastUpdatedAtMs ?? options.clockMs) : lastUpdatedAtMs);
+    const durationMs =
+      startedAtMs && endAtMs && endAtMs >= startedAtMs ? endAtMs - startedAtMs : null;
+    const isComplete = finalMessage !== null && (!isFinalFlush || !options.isThinking);
+
+    blocks.push({
+      kind: 'assistant-turn',
+      key: `${currentTurnItems[0]?.id ?? 'turn'}-${currentTurnItems.at(-1)?.id ?? 'tail'}`,
+      items: [...currentTurnItems],
+      activities,
+      finalMessage,
+      durationMs,
+      changedFiles: collectChangedFiles(currentTurnItems, options.gitFileStatsByPath),
+      isComplete,
+    });
+
+    currentTurnItems = [];
+  };
+
+  for (const item of timeline) {
+    if (item.kind === 'user-message') {
+      flushCurrentTurn(false);
+      blocks.push({
+        kind: 'timeline-item',
+        item,
+      });
+      continue;
+    }
+
+    currentTurnItems.push(item);
+  }
+
+  flushCurrentTurn(true);
+
+  return blocks;
+};
+
 const parseRegistryAgentIcons = (payload: unknown): RegistryAgentIconEntry[] => {
   if (typeof payload !== 'object' || payload === null || !Array.isArray((payload as { agents?: unknown[] }).agents)) {
     return [];
@@ -1033,9 +1698,494 @@ const UserFileAttachments = ({
   );
 };
 
+const TranscriptSectionDivider = ({
+  label,
+  collapsible = false,
+  isExpanded = true,
+  onToggle,
+}: {
+  label: string;
+  collapsible?: boolean;
+  isExpanded?: boolean;
+  onToggle?: () => void;
+}): JSX.Element => {
+  const content = (
+    <>
+      <span className="h-px flex-1 bg-stone-200/85" />
+      <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 text-[13px] font-medium text-stone-500">
+        <span>{label}</span>
+        {collapsible ? (
+          <ChevronDown
+            className={cn(
+              'h-4 w-4 transition-transform duration-150',
+              isExpanded ? 'rotate-0' : '-rotate-90',
+            )}
+          />
+        ) : null}
+      </span>
+      <span className="h-px flex-1 bg-stone-200/85" />
+    </>
+  );
+
+  if (!collapsible || !onToggle) {
+    return <div className="flex items-center">{content}</div>;
+  }
+
+  return (
+    <button
+      type="button"
+      className="no-drag flex w-full items-center text-left transition-colors hover:text-stone-700"
+      onClick={onToggle}
+    >
+      {content}
+    </button>
+  );
+};
+
+const TranscriptPlanCard = ({ item }: { item: Extract<TimelineItem, { kind: 'plan' }> }): JSX.Element => {
+  return (
+    <div className="rounded-2xl border border-stone-200/80 bg-stone-50/70 p-3.5">
+      <p className="text-[11px] font-medium text-stone-500">Plan update</p>
+      <div className="mt-2 space-y-1.5">
+        {item.entries.map((entry, index) => (
+          <div
+            key={`${entry.content}-${index}`}
+            className="flex items-start justify-between gap-3 rounded-xl border border-stone-200/65 bg-white/70 px-3 py-2"
+          >
+            <p className="text-[13px] text-stone-700">{entry.content}</p>
+            <span
+              className={cn(
+                'rounded-full px-2 py-0.5 text-[10px] font-medium',
+                entry.status === 'completed' && 'bg-emerald-100 text-emerald-700',
+                entry.status === 'in_progress' && 'bg-amber-100 text-amber-700',
+                entry.status === 'pending' && 'bg-stone-100 text-stone-600',
+              )}
+            >
+              {entry.status}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const TranscriptToolCall = ({
+  item,
+  isExpanded,
+  onToggle,
+  onOpenFile,
+}: {
+  item: Extract<TimelineItem, { kind: 'tool-call' }>;
+  isExpanded: boolean;
+  onToggle: () => void;
+  onOpenFile: (path: string) => void;
+}): JSX.Element => {
+  const presentation = buildToolCallPresentation(item);
+  const hasDetails =
+    Boolean(presentation.commandLine) ||
+    Boolean(presentation.outputText) ||
+    item.locations.length > 0;
+
+  return (
+    <div>
+      <button
+        type="button"
+        className="no-drag group flex items-center gap-2 text-left text-[15px] font-medium text-stone-600 transition-colors hover:text-stone-800"
+        onClick={onToggle}
+      >
+        <span>{item.toolKind === 'execute' ? 'Ran command' : item.title}</span>
+        {hasDetails ? (
+          <ChevronDown
+            className={cn(
+              'h-4 w-4 text-stone-500 opacity-0 transition-[transform,opacity] duration-150 group-hover:opacity-100 group-focus-visible:opacity-100',
+              isExpanded ? 'rotate-0' : '-rotate-90',
+            )}
+          />
+        ) : null}
+      </button>
+
+      {isExpanded && hasDetails ? (
+        <div className="mt-2 rounded-2xl bg-stone-200/70 px-4 py-3 text-stone-700">
+          <p className="text-[14px] text-stone-600">{presentation.shellLabel}</p>
+
+          {presentation.commandLine ? (
+            <pre className="mt-2 overflow-x-auto font-mono text-[13px] leading-7 text-stone-900">
+              {`$ ${presentation.commandLine}`}
+            </pre>
+          ) : null}
+
+          {presentation.outputText ? (
+            <pre className="mt-4 overflow-x-auto font-mono text-[13px] leading-7 text-stone-600">
+              {presentation.outputText}
+            </pre>
+          ) : null}
+
+          {item.locations.length > 0 ? (
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {item.locations.map((locationPath) => (
+                <button
+                  key={locationPath}
+                  type="button"
+                  className="no-drag rounded-full border border-stone-300 bg-stone-100 px-2 py-0.5 text-[11px] text-stone-700 hover:bg-stone-50"
+                  onClick={() => onOpenFile(locationPath)}
+                >
+                  {normalizeLocationLabel(locationPath)}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <div
+            className={cn(
+              'mt-3 flex justify-end text-[13px] font-medium',
+              presentation.isSuccess ? 'text-stone-500' : 'text-rose-600',
+            )}
+          >
+            {presentation.isSuccess ? '✓ ' : '✕ '}
+            {presentation.statusLabel}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const TranscriptChangedFilesPanel = ({
+  files,
+  workspacePath,
+  projectPaths,
+  onOpenFile,
+}: {
+  files: ChangedFileEntry[];
+  workspacePath: string;
+  projectPaths: string[];
+  onOpenFile: (path: string) => void;
+}): JSX.Element => {
+  const [diffStatsByPath, setDiffStatsByPath] = React.useState<
+    Record<string, { additions: number; deletions: number }>
+  >({});
+  const [expandedDiffsByPath, setExpandedDiffsByPath] = React.useState<Record<string, boolean>>({});
+  const [inlineDiffsByPath, setInlineDiffsByPath] = React.useState<
+    Record<string, InlineDiffPreviewState>
+  >({});
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    const filesNeedingFallback = files.filter(
+      (file) =>
+        typeof file.additions !== 'number' ||
+        typeof file.deletions !== 'number' ||
+        hasZeroChangeCounts(file),
+    );
+
+    if (filesNeedingFallback.length === 0) {
+      setDiffStatsByPath({});
+      return;
+    }
+
+    const loadDiffStats = async (): Promise<void> => {
+      const entries = await Promise.all(
+        filesNeedingFallback.map(async (file) => {
+          const workspacePathCandidates = resolveWorkspacePathCandidatesForFile(
+            file.path,
+            workspacePath,
+            projectPaths,
+          );
+
+          try {
+            for (const workspacePathCandidate of workspacePathCandidates) {
+              try {
+                const result = await window.desktop.workspaceDiffFile({
+                  workspacePath: workspacePathCandidate,
+                  filePath: file.path,
+                });
+
+                if (result.hasDiff && result.patch.trim()) {
+                  return [file.path, parsePatchChangeCounts(result.patch)] as const;
+                }
+              } catch {
+                // Try the next workspace root candidate.
+              }
+            }
+
+            return [
+              file.path,
+              await buildBestEffortFallbackStats(file, workspacePathCandidates),
+            ] as const;
+          } catch {
+            return [file.path, { additions: 0, deletions: 0 }] as const;
+          }
+        }),
+      );
+
+      if (!cancelled) {
+        setDiffStatsByPath(Object.fromEntries(entries));
+      }
+    };
+
+    void loadDiffStats();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [files, projectPaths, workspacePath]);
+
+  const resolvedFiles = React.useMemo(
+    () =>
+      files.map((file) => {
+        const fallback = diffStatsByPath[file.path];
+        const shouldUseFallback =
+          Boolean(fallback) &&
+          (
+            typeof file.additions !== 'number' ||
+            typeof file.deletions !== 'number' ||
+            (hasZeroChangeCounts(file) &&
+              ((fallback?.additions ?? 0) > 0 || (fallback?.deletions ?? 0) > 0))
+          );
+
+        return {
+          ...file,
+          additions: shouldUseFallback
+            ? fallback?.additions ?? null
+            : file.additions,
+          deletions: shouldUseFallback
+            ? fallback?.deletions ?? null
+            : file.deletions,
+        };
+      }),
+    [diffStatsByPath, files],
+  );
+
+  const loadInlineDiffPreview = React.useCallback(
+    async (file: ChangedFileEntry): Promise<void> => {
+      let shouldLoad = true;
+
+      setInlineDiffsByPath((previous) => {
+        const current = previous[file.path];
+        if (current?.isLoading || (current && (current.patch || current.error))) {
+          shouldLoad = false;
+          return previous;
+        }
+
+        return {
+          ...previous,
+          [file.path]: {
+            isLoading: true,
+            patch: null,
+            error: null,
+          },
+        };
+      });
+
+      if (!shouldLoad) {
+        return;
+      }
+
+      const workspacePathCandidates = resolveWorkspacePathCandidatesForFile(
+        file.path,
+        workspacePath,
+        projectPaths,
+      );
+
+      try {
+        let patch = '';
+        for (const workspacePathCandidate of workspacePathCandidates) {
+          try {
+            const result = await window.desktop.workspaceDiffFile({
+              workspacePath: workspacePathCandidate,
+              filePath: file.path,
+            });
+
+            if (result.hasDiff && result.patch.trim()) {
+              patch = result.patch;
+              break;
+            }
+          } catch {
+            // Try the next workspace root candidate.
+          }
+        }
+
+        if (!patch) {
+          patch = await buildBestEffortFallbackPatch(file, workspacePathCandidates);
+        }
+
+        setInlineDiffsByPath((previous) => ({
+          ...previous,
+          [file.path]: {
+            isLoading: false,
+            patch: patch || null,
+            error: patch ? null : 'No inline diff available.',
+          },
+        }));
+      } catch {
+        setInlineDiffsByPath((previous) => ({
+          ...previous,
+          [file.path]: {
+            isLoading: false,
+            patch: null,
+            error: 'Unable to load diff preview.',
+          },
+        }));
+      }
+    },
+    [projectPaths, workspacePath],
+  );
+
+  const toggleInlineDiffPreview = React.useCallback(
+    (file: ChangedFileEntry) => {
+      const isExpanded = Boolean(expandedDiffsByPath[file.path]);
+      if (!isExpanded) {
+        void loadInlineDiffPreview(file);
+      }
+
+      setExpandedDiffsByPath((previous) => ({
+        ...previous,
+        [file.path]: !previous[file.path],
+      }));
+    },
+    [expandedDiffsByPath, loadInlineDiffPreview],
+  );
+
+  const totalAdditions = resolvedFiles.reduce(
+    (sum, file) => sum + (typeof file.additions === 'number' ? file.additions : 0),
+    0,
+  );
+  const totalDeletions = resolvedFiles.reduce(
+    (sum, file) => sum + (typeof file.deletions === 'number' ? file.deletions : 0),
+    0,
+  );
+  const showTotals = resolvedFiles.some(
+    (file) => typeof file.additions === 'number' || typeof file.deletions === 'number',
+  );
+  const showHeaderTotals = files.length > 1 && showTotals;
+
+  return (
+    <div className="rounded-2xl bg-stone-100/80">
+      <div className="px-4 py-2">
+        <div className="flex items-center gap-2 text-[14px] font-medium text-stone-800">
+          <span>
+            {files.length} file{files.length === 1 ? '' : 's'} changed
+          </span>
+          {showHeaderTotals ? (
+            <>
+              <span className="text-emerald-600">
+                {formatSignedChangeCount(totalAdditions, '+')}
+              </span>
+              <span className="-ml-1 text-rose-600">
+                {formatSignedChangeCount(totalDeletions, '-')}
+              </span>
+            </>
+          ) : null}
+        </div>
+      </div>
+      <div>
+        {resolvedFiles.map((file, index) => {
+          const isExpanded = Boolean(expandedDiffsByPath[file.path]);
+          const diffPreview = inlineDiffsByPath[file.path];
+          const isLastFile = index === resolvedFiles.length - 1;
+
+          return (
+            <div key={file.path}>
+              <div
+                className={cn(
+                  'group/file-row flex items-center gap-2 pl-4 pr-2 transition-colors',
+                  'py-1.5',
+                  isLastFile && !isExpanded && 'rounded-b-2xl',
+                )}
+              >
+                <button
+                  type="button"
+                  className="no-drag flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left text-[13px] text-stone-700"
+                  onClick={(event) => {
+                    if (event.metaKey || event.ctrlKey) {
+                      onOpenFile(file.path);
+                      return;
+                    }
+
+                    toggleInlineDiffPreview(file);
+                  }}
+                  onDoubleClick={() => onOpenFile(file.path)}
+                >
+                  <FileText className="h-4 w-4 shrink-0 text-stone-500" />
+                  <span className="min-w-0 truncate">{file.label}</span>
+                  {typeof file.additions === 'number' || typeof file.deletions === 'number' ? (
+                    <span className="shrink-0 whitespace-nowrap text-[12px] font-medium">
+                      <span className="text-emerald-600">
+                        {formatSignedChangeCount(file.additions ?? 0, '+')}
+                      </span>
+                      <span className="ml-1 text-rose-600">
+                        {formatSignedChangeCount(file.deletions ?? 0, '-')}
+                      </span>
+                    </span>
+                  ) : null}
+                </button>
+
+                <div
+                  className="group/toggle flex h-7 w-8 shrink-0 items-center justify-end"
+                >
+                  <button
+                    type="button"
+                    aria-label={isExpanded ? 'Collapse diff preview' : 'Expand diff preview'}
+                    className={cn(
+                      'no-drag inline-flex items-center justify-center rounded-full bg-transparent text-stone-600 transition-all hover:bg-stone-300/85 focus-visible:bg-stone-300/85',
+                      'h-7 w-7',
+                      isExpanded
+                        ? 'opacity-100'
+                        : 'opacity-0 group-hover/file-row:opacity-100',
+                    )}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleInlineDiffPreview(file);
+                    }}
+                  >
+                    <ChevronDown
+                      className={cn('h-4 w-4 transition-transform', isExpanded && 'rotate-180')}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              {isExpanded ? (
+                <div className="bg-white/35">
+                  {diffPreview?.isLoading ? (
+                    <div
+                      className={cn(
+                        'bg-stone-100/80 px-3 py-2 text-[13px] text-stone-500',
+                        isLastFile && 'rounded-b-2xl',
+                      )}
+                    >
+                      Loading diff preview...
+                    </div>
+                  ) : diffPreview?.patch ? (
+                    <div className={cn('overflow-hidden', isLastFile && 'rounded-b-2xl')}>
+                      <InlineMonacoDiffEditor filePath={file.path} patch={diffPreview.patch} />
+                    </div>
+                  ) : (
+                    <div
+                      className={cn(
+                        'bg-stone-100/80 px-3 py-2 text-[13px] text-stone-500',
+                        isLastFile && 'rounded-b-2xl',
+                      )}
+                    >
+                      {diffPreview?.error ?? 'No inline diff available.'}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 export const Transcript = ({
   threadId,
   workspaceName,
+  workspacePath,
   projects,
   selectedProjectId,
   timeline,
@@ -1045,12 +2195,14 @@ export const Transcript = ({
   onSelectProject,
   onAddProject,
   onResolvePermission,
-  onCancelPermission,
   onOpenFile,
   onOpenLink,
   onSelectSuggestion,
 }: TranscriptProps): JSX.Element => {
   const [expandedToolCalls, setExpandedToolCalls] = React.useState<Record<string, boolean>>({});
+  const [expandedWorkedSections, setExpandedWorkedSections] = React.useState<
+    Record<string, boolean>
+  >({});
   const [showScrollToBottom, setShowScrollToBottom] = React.useState(false);
   const [agentIconByName, setAgentIconByName] = React.useState<Record<string, string>>({});
   const [imagePreview, setImagePreview] = React.useState<{
@@ -1058,6 +2210,10 @@ export const Transcript = ({
     label: string;
     absolutePath: string;
   } | null>(null);
+  const [clockMs, setClockMs] = React.useState(() => Date.now());
+  const [gitFileStatsByPath, setGitFileStatsByPath] = React.useState<
+    Record<string, WorkspaceGitFileStat>
+  >({});
   const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
   const bottomSentinelRef = React.useRef<HTMLDivElement | null>(null);
   const lastThreadIdRef = React.useRef(threadId);
@@ -1135,6 +2291,68 @@ export const Transcript = ({
       [toolCallId]: !previous[toolCallId],
     }));
   }, []);
+
+  const toggleWorkedSection = React.useCallback((sectionKey: string) => {
+    setExpandedWorkedSections((previous) => ({
+      ...previous,
+      [sectionKey]: !(previous[sectionKey] ?? true),
+    }));
+  }, []);
+
+  React.useEffect(() => {
+    if (!isThinking) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setClockMs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isThinking]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    const loadGitFileStats = async (): Promise<void> => {
+      if (!workspacePath.trim()) {
+        setGitFileStatsByPath({});
+        return;
+      }
+
+      try {
+        const result = await window.desktop.workspaceGitStatus({
+          workspacePath,
+        });
+
+        if (cancelled || !result.available) {
+          if (!cancelled) {
+            setGitFileStatsByPath({});
+          }
+          return;
+        }
+
+        const nextEntries = Object.fromEntries(
+          result.fileStats.map((entry) => [toNormalizedPathKey(entry.path), entry]),
+        );
+        if (!cancelled) {
+          setGitFileStatsByPath(nextEntries);
+        }
+      } catch {
+        if (!cancelled) {
+          setGitFileStatsByPath({});
+        }
+      }
+    };
+
+    void loadGitFileStats();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspacePath, timeline.at(-1)?.id, timeline.at(-1)?.updatedAtMs]);
 
   React.useEffect(() => {
     const tail = timeline[timeline.length - 1];
@@ -1252,6 +2470,45 @@ export const Transcript = ({
 
   const selectedProjectName =
     projects.find((project) => project.id === selectedProjectId)?.name ?? workspaceName;
+  const projectPaths = React.useMemo(
+    () => projects.map((project) => project.path),
+    [projects],
+  );
+
+  const transcriptBlocks = React.useMemo(
+    () => buildTranscriptBlocks(timeline, { clockMs, isThinking, gitFileStatsByPath }),
+    [clockMs, gitFileStatsByPath, isThinking, timeline],
+  );
+
+  const renderAgentTimelineItem = React.useCallback(
+    (item: Exclude<TimelineItem, { kind: 'user-message' }>): JSX.Element | null => {
+      if (item.kind === 'assistant-message') {
+        if (item.noticeKind === 'agent-change' || isAgentChangedNotice(item.text)) {
+          const parsedAgentLabel = parseAgentChangedLabel(item.text);
+          const resolvedIconUrl =
+            item.iconUrl ??
+            (parsedAgentLabel ? (agentIconByName[parsedAgentLabel.toLowerCase()] ?? null) : null);
+          return <AgentChangedNotice text={item.text} iconUrl={resolvedIconUrl} />;
+        }
+
+        return <AssistantMessage text={item.text} onOpenLink={onOpenLink} />;
+      }
+
+      if (item.kind === 'plan') {
+        return <TranscriptPlanCard item={item} />;
+      }
+
+      return (
+        <TranscriptToolCall
+          item={item}
+          isExpanded={expandedToolCalls[item.toolCallId] === true}
+          onToggle={() => toggleToolCallDetails(item.toolCallId)}
+          onOpenFile={onOpenFile}
+        />
+      );
+    },
+    [agentIconByName, expandedToolCalls, onOpenFile, onOpenLink, toggleToolCallDetails],
+  );
 
   const hasSelectedThread = threadId.trim().length > 0;
 
@@ -1275,158 +2532,120 @@ export const Transcript = ({
           {timeline.length === 0 ? (
             <EmptyState />
           ) : (
-            timeline.map((item) => {
-              if (item.kind === 'user-message') {
-                const attachments = item.attachments ?? [];
-                const imageAttachments = attachments.filter((attachment) => isImageAttachment(attachment));
-                const fileAttachments = attachments.filter((attachment) => !isImageAttachment(attachment));
-                const hasText = item.text.trim().length > 0;
+            transcriptBlocks.map((block) => {
+              if (block.kind === 'timeline-item') {
+                const item = block.item;
 
-                return (
-                  <div key={item.id} className="flex justify-end">
-                    <div className="flex max-w-[78%] flex-col items-end gap-2">
-                      {imageAttachments.length > 0 ? (
-                        <UserImageAttachments
-                          attachments={imageAttachments}
-                          onOpenFile={onOpenFile}
-                          onPreview={setImagePreview}
-                        />
-                      ) : null}
+                if (item.kind === 'user-message') {
+                  const attachments = item.attachments ?? [];
+                  const imageAttachments = attachments.filter((attachment) =>
+                    isImageAttachment(attachment),
+                  );
+                  const fileAttachments = attachments.filter(
+                    (attachment) => !isImageAttachment(attachment),
+                  );
+                  const hasText = item.text.trim().length > 0;
 
-                      {hasText ? (
-                        <div className="rounded-[14px] bg-stone-200/70 px-3 py-1 text-[14px] leading-6 text-stone-700">
-                          <MarkdownText
-                            text={item.text}
-                            keyPrefix={`user-inline-${item.id}`}
-                            onOpenLink={onOpenLink}
-                          />
-                        </div>
-                      ) : null}
-
-                      {fileAttachments.length > 0 ? (
-                        <UserFileAttachments attachments={fileAttachments} onOpenFile={onOpenFile} />
-                      ) : null}
-                    </div>
-                  </div>
-                );
-              }
-
-              if (item.kind === 'assistant-message') {
-                if (item.noticeKind === 'agent-change' || isAgentChangedNotice(item.text)) {
-                  const parsedAgentLabel = parseAgentChangedLabel(item.text);
-                  const resolvedIconUrl =
-                    item.iconUrl ??
-                    (parsedAgentLabel
-                      ? (agentIconByName[parsedAgentLabel.toLowerCase()] ?? null)
-                      : null);
                   return (
-                    <AgentChangedNotice
-                      key={item.id}
-                      text={item.text}
-                      iconUrl={resolvedIconUrl}
-                    />
+                    <div key={item.id} className="flex justify-end">
+                      <div className="flex max-w-[78%] flex-col items-end gap-2">
+                        {imageAttachments.length > 0 ? (
+                          <UserImageAttachments
+                            attachments={imageAttachments}
+                            onOpenFile={onOpenFile}
+                            onPreview={setImagePreview}
+                          />
+                        ) : null}
+
+                        {hasText ? (
+                          <div className="rounded-[14px] bg-stone-200/70 px-3 py-1 text-[14px] leading-6 text-stone-700">
+                            <MarkdownText
+                              text={item.text}
+                              keyPrefix={`user-inline-${item.id}`}
+                              onOpenLink={onOpenLink}
+                            />
+                          </div>
+                        ) : null}
+
+                        {fileAttachments.length > 0 ? (
+                          <UserFileAttachments
+                            attachments={fileAttachments}
+                            onOpenFile={onOpenFile}
+                          />
+                        ) : null}
+                      </div>
+                    </div>
                   );
                 }
 
-                return <AssistantMessage key={item.id} text={item.text} onOpenLink={onOpenLink} />;
-              }
-
-              if (item.kind === 'plan') {
                 return (
-                  <div key={item.id} className="rounded-2xl border border-stone-200/80 bg-stone-50/70 p-3.5">
-                    <p className="text-[11px] font-medium text-stone-500">Plan update</p>
-                    <div className="mt-2 space-y-1.5">
-                      {item.entries.map((entry, index) => (
-                        <div
-                          key={`${entry.content}-${index}`}
-                          className="flex items-start justify-between gap-3 rounded-xl border border-stone-200/65 bg-white/70 px-3 py-2"
-                        >
-                          <p className="text-[13px] text-stone-700">{entry.content}</p>
-                          <span
-                            className={cn(
-                              'rounded-full px-2 py-0.5 text-[10px] font-medium',
-                              entry.status === 'completed' && 'bg-emerald-100 text-emerald-700',
-                              entry.status === 'in_progress' && 'bg-amber-100 text-amber-700',
-                              entry.status === 'pending' && 'bg-stone-100 text-stone-600',
-                            )}
-                          >
-                            {entry.status}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
+                  <div key={item.id}>
+                    {renderAgentTimelineItem(item as Exclude<TimelineItem, { kind: 'user-message' }>)}
                   </div>
                 );
               }
 
-              const isExpanded = expandedToolCalls[item.toolCallId] === true;
-              const presentation = buildToolCallPresentation(item);
-              const hasDetails =
-                Boolean(presentation.commandLine) ||
-                Boolean(presentation.outputText) ||
-                item.locations.length > 0;
+              if (!block.isComplete || !block.finalMessage) {
+                return (
+                  <div key={block.key} className="space-y-5">
+                    {block.items.map((activity) => (
+                      <div key={activity.id}>
+                        {renderAgentTimelineItem(
+                          activity as Exclude<TimelineItem, { kind: 'user-message' }>,
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+
+              const hasWorkedSection = block.activities.length > 0;
+              const isWorkedExpanded = expandedWorkedSections[block.key] ?? false;
 
               return (
-                <div key={item.id}>
-                  <button
-                    type="button"
-                    className="no-drag group flex items-center gap-2 text-left text-[15px] font-medium text-stone-600 transition-colors hover:text-stone-800"
-                    onClick={() => toggleToolCallDetails(item.toolCallId)}
-                  >
-                    <span>
-                      {item.toolKind === 'execute' ? 'Ran command' : item.title}
-                    </span>
-                    {hasDetails ? (
-                      <ChevronDown
-                        className={cn(
-                          'h-4 w-4 text-stone-500 opacity-0 transition-[transform,opacity] duration-150 group-hover:opacity-100 group-focus-visible:opacity-100',
-                          isExpanded ? 'rotate-0' : '-rotate-90',
-                        )}
+                <div key={block.key} className="space-y-5">
+                  {hasWorkedSection ? (
+                    <div className="space-y-5">
+                      <TranscriptSectionDivider
+                        label={formatWorkedDuration(block.durationMs)}
+                        collapsible
+                        isExpanded={isWorkedExpanded}
+                        onToggle={() => toggleWorkedSection(block.key)}
                       />
-                    ) : null}
-                  </button>
 
-                  {isExpanded && hasDetails ? (
-                    <div className="mt-2 rounded-2xl bg-stone-200/70 px-4 py-3 text-stone-700">
-                      <p className="text-[14px] text-stone-600">{presentation.shellLabel}</p>
-
-                      {presentation.commandLine ? (
-                        <pre className="mt-2 overflow-x-auto font-mono text-[13px] leading-7 text-stone-900">
-                          {`$ ${presentation.commandLine}`}
-                        </pre>
-                      ) : null}
-
-                      {presentation.outputText ? (
-                        <pre className="mt-4 overflow-x-auto font-mono text-[13px] leading-7 text-stone-600">
-                          {presentation.outputText}
-                        </pre>
-                      ) : null}
-
-                      {item.locations.length > 0 ? (
-                        <div className="mt-3 flex flex-wrap gap-1.5">
-                          {item.locations.map((locationPath) => (
-                            <button
-                              key={locationPath}
-                              type="button"
-                              className="no-drag rounded-full border border-stone-300 bg-stone-100 px-2 py-0.5 text-[11px] text-stone-700 hover:bg-stone-50"
-                              onClick={() => onOpenFile(locationPath)}
-                            >
-                              {locationPath}
-                            </button>
+                      {isWorkedExpanded ? (
+                        <div className="space-y-5">
+                          {block.activities.map((activity) => (
+                            <div key={activity.id}>
+                              {renderAgentTimelineItem(
+                                activity as Exclude<TimelineItem, { kind: 'user-message' }>,
+                              )}
+                            </div>
                           ))}
                         </div>
                       ) : null}
-
-                      <div
-                        className={cn(
-                          'mt-3 flex justify-end text-[13px] font-medium',
-                          presentation.isSuccess ? 'text-stone-500' : 'text-rose-600',
-                        )}
-                      >
-                        {presentation.isSuccess ? '✓ ' : '✕ '}
-                        {presentation.statusLabel}
-                      </div>
                     </div>
+                  ) : null}
+
+                  {block.finalMessage ? (
+                    <div className="space-y-5">
+                      {hasWorkedSection && isWorkedExpanded ? (
+                        <TranscriptSectionDivider label="Final message" />
+                      ) : null}
+                      <AssistantMessage
+                        text={block.finalMessage.text}
+                        onOpenLink={onOpenLink}
+                      />
+                    </div>
+                  ) : null}
+
+                  {block.finalMessage && block.changedFiles.length > 0 ? (
+                    <TranscriptChangedFilesPanel
+                      files={block.changedFiles}
+                      workspacePath={workspacePath}
+                      projectPaths={projectPaths}
+                      onOpenFile={onOpenFile}
+                    />
                   ) : null}
                 </div>
               );
@@ -1434,42 +2653,29 @@ export const Transcript = ({
           )}
 
           {pendingPermission ? (
-            <div className="rounded-2xl border border-stone-200/85 bg-stone-50/80 p-3.5">
-              <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">
-                Permission request
-              </p>
-              <h3 className="mt-1 text-[15px] font-semibold text-stone-800">
+            <div className="rounded-[26px] bg-stone-100/80 p-3.5">
+              <h3 className="text-[15px] font-semibold text-stone-900">
                 {pendingPermission.toolCall.title ?? 'Tool approval needed'}
               </h3>
-              <p className="mt-1 text-[13px] text-stone-500">
+              <p className="mt-1 text-[13px] text-stone-600">
                 The agent requested permission to run a tool call for this session.
               </p>
-
-              <div className="mt-3 rounded-xl border border-stone-200 bg-white/70 px-3 py-2">
-                <p className="text-[11px] font-medium text-stone-600">Session</p>
-                <p className="mt-0.5 text-[11px] text-stone-500">{pendingPermission.sessionId}</p>
-              </div>
 
               <div className="mt-3 space-y-1.5">
                 {pendingPermission.options.map((option) => (
                   <button
                     key={option.optionId}
                     type="button"
-                    className="no-drag w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-left text-[13px] text-stone-700 transition-colors hover:bg-stone-100"
+                    className={`
+                      no-drag w-full rounded-2xl border-none bg-stone-200/55 px-3 py-2 text-left text-[13px] font-medium
+                      text-stone-800 transition-colors hover:bg-stone-300/75
+                    `}
                     onClick={() => onResolvePermission(pendingPermission.requestId, option.optionId)}
                   >
                     {option.name}
                   </button>
                 ))}
               </div>
-
-              <button
-                type="button"
-                className="no-drag mt-2.5 w-full rounded-xl px-3 py-2 text-[13px] text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-700"
-                onClick={() => onCancelPermission(pendingPermission.requestId)}
-              >
-                Cancel prompt
-              </button>
             </div>
           ) : null}
 

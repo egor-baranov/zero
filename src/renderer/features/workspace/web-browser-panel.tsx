@@ -19,6 +19,7 @@ interface WebBrowserPanelProps {
     id: number;
     url: string;
   } | null;
+  onRequestClose: () => void;
 }
 
 interface BrowserTab {
@@ -84,15 +85,22 @@ interface BrowserWebviewElement extends HTMLElement {
 const DEFAULT_HOME_URL = 'https://www.google.com';
 const WEB_PANEL_WIDTH_KEY = 'zeroade.webpanel.width';
 const WEB_PANEL_WIDTH_DEFAULT = 620;
-const WEB_PANEL_WIDTH_MIN = 440;
+const WEB_PANEL_WIDTH_OPEN = 250;
+const WEB_PANEL_WIDTH_MIN = 400;
 const WEB_PANEL_WIDTH_MAX = 980;
+const WEB_PANEL_WIDTH_COLLAPSE_THRESHOLD = 48;
 const WEB_PANEL_PUSH_PREFIX = '__zeroade_browser_push__:';
 const GOOGLE_VOLATILE_HOME_QUERY_PARAMS = new Set(['zx', 'no_sw_cr']);
 const createTabId = (): string => `web-tab-${Date.now()}-${Math.random().toString(16).slice(2, 9)}`;
 const createPushId = (): string => `browser-push-${Date.now()}-${Math.random().toString(16).slice(2, 9)}`;
 
-const clampWidth = (value: number): number =>
-  Math.min(Math.max(value, WEB_PANEL_WIDTH_MIN), WEB_PANEL_WIDTH_MAX);
+const clampWidth = (value: number): number => {
+  const maxFromViewport = Math.max(WEB_PANEL_WIDTH_OPEN, Math.floor(window.innerWidth * 0.7));
+  return Math.min(
+    WEB_PANEL_WIDTH_MAX,
+    Math.max(WEB_PANEL_WIDTH_MIN, Math.min(value, maxFromViewport)),
+  );
+};
 
 const readStoredWidth = (): number => {
   const raw = window.localStorage.getItem(WEB_PANEL_WIDTH_KEY);
@@ -383,7 +391,11 @@ const isSameNavigableUrl = (left: string, right: string): boolean => {
   }
 };
 
-export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JSX.Element => {
+export const WebBrowserPanel = ({
+  open,
+  openRequest,
+  onRequestClose,
+}: WebBrowserPanelProps): JSX.Element => {
   const initialTab = React.useMemo<BrowserTab>(
     () => ({
       id: createTabId(),
@@ -478,6 +490,16 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
   React.useEffect(() => {
     setPanelWidth(readStoredWidth());
   }, []);
+
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const nextWidth = clampWidth(WEB_PANEL_WIDTH_OPEN);
+    setPanelWidth(nextWidth);
+    window.localStorage.setItem(WEB_PANEL_WIDTH_KEY, String(nextWidth));
+  }, [open]);
 
   React.useEffect(() => {
     if (!open) {
@@ -745,7 +767,17 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
         return;
       }
 
-      const nextWidth = clampWidth(window.innerWidth - event.clientX);
+      const rawWidth = window.innerWidth - event.clientX;
+      if (rawWidth <= WEB_PANEL_WIDTH_COLLAPSE_THRESHOLD) {
+        const resetWidth = clampWidth(WEB_PANEL_WIDTH_OPEN);
+        setPanelWidth(resetWidth);
+        window.localStorage.setItem(WEB_PANEL_WIDTH_KEY, String(resetWidth));
+        stopResizing();
+        onRequestClose();
+        return;
+      }
+
+      const nextWidth = clampWidth(rawWidth);
       setPanelWidth(nextWidth);
       window.localStorage.setItem(WEB_PANEL_WIDTH_KEY, String(nextWidth));
     };
@@ -778,7 +810,7 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
-  }, []);
+  }, [onRequestClose]);
 
   const startResizing = React.useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -1156,13 +1188,13 @@ export const WebBrowserPanel = ({ open, openRequest }: WebBrowserPanelProps): JS
         type="button"
         aria-label="Resize browser panel"
         className={cn(
-          'no-drag group absolute inset-y-0 left-0 z-10 w-2 -translate-x-1 cursor-col-resize',
+          'no-drag group absolute inset-y-0 left-0 z-10 w-4 cursor-col-resize',
           !open && 'pointer-events-none opacity-0',
         )}
         onPointerDown={startResizing}
         onLostPointerCapture={stopResizing}
       >
-        <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-stone-300/70" />
+        <span className="absolute inset-y-0 left-0 w-px bg-transparent transition-colors group-hover:bg-stone-300/70" />
       </button>
 
       <div

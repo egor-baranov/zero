@@ -11,6 +11,8 @@ const buttonVariants = cva(
           'bg-stone-900 text-stone-50 shadow-[0_8px_24px_-18px_rgba(15,15,15,0.85)] hover:bg-stone-800',
         secondary:
           'border border-stone-200 bg-white/90 text-stone-700 hover:bg-stone-100',
+        outline:
+          'border border-stone-200 bg-transparent text-stone-700 hover:bg-stone-100/80',
         ghost: 'text-stone-600 hover:bg-stone-100',
       },
       size: {

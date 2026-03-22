@@ -8,6 +8,16 @@
   --zeroade-accent-surface: #ffffff;
   --zeroade-accent-text: #1c1917;
   --zeroade-selection: rgba(74, 74, 74, 0.18);
+  --zeroade-sidebar-hover-shadow: 0 12px 28px -18px rgba(32, 28, 24, 0.26),
+    0 4px 12px -10px rgba(32, 28, 24, 0.18);
+  --zeroade-diff-insert-line-bg: #dce8d7;
+  --zeroade-diff-insert-text-bg: #cfe0c8;
+  --zeroade-diff-insert-gutter-bg: #d3e2cb;
+  --zeroade-diff-insert-number: #109457;
+  --zeroade-diff-delete-line-bg: #eedbd5;
+  --zeroade-diff-delete-text-bg: #e8d1ca;
+  --zeroade-diff-delete-gutter-bg: #ead4cd;
+  --zeroade-diff-delete-number: #cf5b4d;
 }
 
 :root[data-zeroade-accent='orange'] {
@@ -73,6 +83,16 @@
   --zeroade-text-muted: #a7a7b0;
   --zeroade-text-faint: #8a8a94;
   --zeroade-selection: rgba(148, 163, 184, 0.22);
+  --zeroade-sidebar-hover-shadow: 0 14px 30px -20px rgba(0, 0, 0, 0.62),
+    0 6px 14px -12px rgba(0, 0, 0, 0.52);
+  --zeroade-diff-insert-line-bg: rgba(64, 89, 72, 0.55);
+  --zeroade-diff-insert-text-bg: rgba(57, 81, 65, 0.72);
+  --zeroade-diff-insert-gutter-bg: rgba(54, 76, 61, 0.72);
+  --zeroade-diff-insert-number: #74c18f;
+  --zeroade-diff-delete-line-bg: rgba(111, 78, 75, 0.5);
+  --zeroade-diff-delete-text-bg: rgba(102, 71, 68, 0.68);
+  --zeroade-diff-delete-gutter-bg: rgba(95, 66, 63, 0.72);
+  --zeroade-diff-delete-number: #e49589;
 }
 
 :root[data-zeroade-theme='dark'] body {
@@ -99,6 +119,8 @@
 }
 
 :root[data-zeroade-theme='dark'] .bg-white,
+:root[data-zeroade-theme='dark'] [class~='bg-white/45'],
+:root[data-zeroade-theme='dark'] [class~='bg-white/55'],
 :root[data-zeroade-theme='dark'] [class~='bg-white/95'],
 :root[data-zeroade-theme='dark'] [class~='bg-white/90'],
 :root[data-zeroade-theme='dark'] [class~='bg-white/85'],
@@ -195,7 +217,10 @@
 :root[data-zeroade-theme='dark'] [class~='hover:bg-stone-100']:hover,
 :root[data-zeroade-theme='dark'] [class~='hover:bg-stone-100/70']:hover,
 :root[data-zeroade-theme='dark'] [class~='hover:bg-stone-100/80']:hover,
+:root[data-zeroade-theme='dark'] [class~='hover:bg-white/40']:hover,
+:root[data-zeroade-theme='dark'] [class~='hover:bg-white/55']:hover,
 :root[data-zeroade-theme='dark'] [class~='hover:bg-stone-200']:hover,
+:root[data-zeroade-theme='dark'] [class~='hover:bg-stone-200/45']:hover,
 :root[data-zeroade-theme='dark'] [class~='hover:bg-stone-200/55']:hover,
 :root[data-zeroade-theme='dark'] [class~='hover:bg-stone-200/65']:hover,
 :root[data-zeroade-theme='dark'] [class~='hover:bg-stone-200/70']:hover,
@@ -299,6 +324,120 @@
     rgba(255, 255, 255, 0.16) 56%,
     rgba(255, 255, 255, 0) 74%
   );
+}
+
+.zeroade-sidebar-hover-shadow {
+  transition:
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease;
+}
+
+.zeroade-sidebar-hover-shadow:hover,
+.zeroade-sidebar-hover-shadow:focus-visible {
+  box-shadow: var(--zeroade-sidebar-hover-shadow);
+}
+
+.zeroade-inline-monaco-diff .monaco-editor .line-insert,
+.zeroade-inline-monaco-diff .monaco-diff-editor .line-insert,
+.zeroade-side-by-side-diff .monaco-editor .line-insert,
+.zeroade-side-by-side-diff .monaco-diff-editor .line-insert {
+  background-color: var(--zeroade-diff-insert-line-bg) !important;
+}
+
+.zeroade-inline-monaco-diff .monaco-editor .char-insert,
+.zeroade-inline-monaco-diff .monaco-diff-editor .char-insert,
+.zeroade-side-by-side-diff .monaco-editor .char-insert,
+.zeroade-side-by-side-diff .monaco-diff-editor .char-insert {
+  background-color: var(--zeroade-diff-insert-text-bg) !important;
+}
+
+.zeroade-inline-monaco-diff .monaco-editor .line-delete,
+.zeroade-inline-monaco-diff .monaco-diff-editor .line-delete,
+.zeroade-side-by-side-diff .monaco-editor .line-delete,
+.zeroade-side-by-side-diff .monaco-diff-editor .line-delete {
+  background-color: var(--zeroade-diff-delete-line-bg) !important;
+}
+
+.zeroade-inline-monaco-diff .monaco-editor .char-delete,
+.zeroade-inline-monaco-diff .monaco-diff-editor .char-delete,
+.zeroade-inline-monaco-diff .monaco-editor .inline-deleted-text,
+.zeroade-side-by-side-diff .monaco-editor .char-delete,
+.zeroade-side-by-side-diff .monaco-diff-editor .char-delete,
+.zeroade-side-by-side-diff .monaco-editor .inline-deleted-text {
+  background-color: var(--zeroade-diff-delete-text-bg) !important;
+}
+
+.zeroade-inline-monaco-diff .monaco-editor .gutter-insert,
+.zeroade-inline-monaco-diff .monaco-diff-editor .gutter-insert,
+.zeroade-inline-monaco-diff .monaco-editor .inline-added-margin-view-zone {
+  background-color: var(--zeroade-diff-insert-gutter-bg) !important;
+}
+
+.zeroade-inline-monaco-diff .monaco-editor .gutter-delete,
+.zeroade-inline-monaco-diff .monaco-diff-editor .gutter-delete,
+.zeroade-inline-monaco-diff .monaco-editor .inline-deleted-margin-view-zone {
+  background-color: var(--zeroade-diff-delete-gutter-bg) !important;
+}
+
+.zeroade-inline-monaco-diff .monaco-editor .line-insert,
+.zeroade-inline-monaco-diff .monaco-editor .char-insert,
+.zeroade-inline-monaco-diff .monaco-editor .line-delete,
+.zeroade-inline-monaco-diff .monaco-editor .char-delete,
+.zeroade-side-by-side-diff .monaco-editor .line-insert,
+.zeroade-side-by-side-diff .monaco-editor .char-insert,
+.zeroade-side-by-side-diff .monaco-editor .line-delete,
+.zeroade-side-by-side-diff .monaco-editor .char-delete {
+  border-color: transparent !important;
+}
+
+.zeroade-inline-monaco-diff .monaco-editor .line-numbers.zeroade-diff-line-number-insert {
+  background-color: var(--zeroade-diff-insert-gutter-bg) !important;
+  box-shadow: inset 4px 0 0 var(--zeroade-diff-insert-number);
+  color: var(--zeroade-diff-insert-number) !important;
+  padding-left: 6px;
+}
+
+.zeroade-inline-monaco-diff .monaco-editor .line-numbers.zeroade-diff-line-number-delete {
+  background-color: var(--zeroade-diff-delete-gutter-bg) !important;
+  box-shadow: inset 4px 0 0 var(--zeroade-diff-delete-number);
+  color: var(--zeroade-diff-delete-number) !important;
+  padding-left: 6px;
+}
+
+.zeroade-side-by-side-diff
+  .original-in-monaco-diff-editor
+  .margin-view-overlays
+  .line-numbers {
+  opacity: 0 !important;
+}
+
+.zeroade-side-by-side-diff
+  .monaco-scrollable-element.original-in-monaco-diff-editor
+  > .scrollbar.vertical {
+  left: 0 !important;
+  right: auto !important;
+}
+
+.zeroade-side-by-side-diff .zeroade-side-by-side-diff-gutter-line {
+  color: var(--vscode-editorLineNumber-foreground);
+}
+
+.zeroade-side-by-side-diff .zeroade-side-by-side-diff-gutter-line-insert {
+  background-color: var(--zeroade-diff-insert-gutter-bg);
+  box-shadow: inset 4px 0 0 var(--zeroade-diff-insert-number);
+  color: var(--zeroade-diff-insert-number);
+}
+
+.zeroade-side-by-side-diff .zeroade-side-by-side-diff-gutter-line-delete {
+  background-color: var(--zeroade-diff-delete-gutter-bg);
+  box-shadow: inset -4px 0 0 var(--zeroade-diff-delete-number);
+  color: var(--zeroade-diff-delete-number);
+}
+
+.monaco-editor .monaco-scrollable-element > .scrollbar > .slider,
+.monaco-diff-editor .monaco-scrollable-element > .scrollbar > .slider {
+  border-radius: 999px !important;
 }
 
 * {

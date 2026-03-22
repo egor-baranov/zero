@@ -8,16 +8,22 @@ interface BrowserPushPanelProps {
   open: boolean;
   items: BrowserPushItem[];
   onOpenUrl: (url: string) => void;
+  onRequestClose: () => void;
 }
 
 const BROWSER_PUSH_PANEL_WIDTH_KEY = 'zeroade.notifications-panel.width.v1';
 const BROWSER_PUSH_PANEL_WIDTH_DEFAULT = 336;
-const BROWSER_PUSH_PANEL_WIDTH_MIN = 260;
+const BROWSER_PUSH_PANEL_WIDTH_OPEN = 250;
+const BROWSER_PUSH_PANEL_WIDTH_MIN = 0;
 const BROWSER_PUSH_PANEL_WIDTH_MAX = 560;
+const BROWSER_PUSH_PANEL_COLLAPSE_THRESHOLD = 48;
 
 const clampWidth = (width: number, viewportWidth: number): number => {
-  const maxFromViewport = Math.max(BROWSER_PUSH_PANEL_WIDTH_MIN, Math.floor(viewportWidth * 0.6));
-  return Math.min(BROWSER_PUSH_PANEL_WIDTH_MAX, Math.max(BROWSER_PUSH_PANEL_WIDTH_MIN, Math.min(width, maxFromViewport)));
+  const maxFromViewport = Math.max(BROWSER_PUSH_PANEL_WIDTH_OPEN, Math.floor(viewportWidth * 0.6));
+  return Math.min(
+    BROWSER_PUSH_PANEL_WIDTH_MAX,
+    Math.max(BROWSER_PUSH_PANEL_WIDTH_MIN, Math.min(width, maxFromViewport)),
+  );
 };
 
 const readStoredPanelWidth = (): number => {
@@ -52,6 +58,7 @@ export const BrowserPushPanel = ({
   open,
   items,
   onOpenUrl,
+  onRequestClose,
 }: BrowserPushPanelProps): JSX.Element => {
   const [panelWidth, setPanelWidth] = React.useState<number>(() => readStoredPanelWidth());
   const resizePointerIdRef = React.useRef<number | null>(null);
@@ -64,6 +71,16 @@ export const BrowserPushPanel = ({
 
     window.localStorage.setItem(BROWSER_PUSH_PANEL_WIDTH_KEY, String(panelWidth));
   }, [panelWidth]);
+
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const nextWidth = clampWidth(BROWSER_PUSH_PANEL_WIDTH_OPEN, window.innerWidth);
+    setPanelWidth(nextWidth);
+    window.localStorage.setItem(BROWSER_PUSH_PANEL_WIDTH_KEY, String(nextWidth));
+  }, [open]);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') {
@@ -97,7 +114,17 @@ export const BrowserPushPanel = ({
         return;
       }
 
-      const next = clampWidth(window.innerWidth - event.clientX, window.innerWidth);
+      const rawWidth = window.innerWidth - event.clientX;
+      if (rawWidth <= BROWSER_PUSH_PANEL_COLLAPSE_THRESHOLD) {
+        const resetWidth = clampWidth(BROWSER_PUSH_PANEL_WIDTH_OPEN, window.innerWidth);
+        setPanelWidth(resetWidth);
+        window.localStorage.setItem(BROWSER_PUSH_PANEL_WIDTH_KEY, String(resetWidth));
+        stopResizing();
+        onRequestClose();
+        return;
+      }
+
+      const next = clampWidth(rawWidth, window.innerWidth);
       setPanelWidth(next);
     };
 
@@ -118,7 +145,7 @@ export const BrowserPushPanel = ({
       window.removeEventListener('pointerup', handlePointerUp);
       window.removeEventListener('blur', stopResizing);
     };
-  }, [stopResizing]);
+  }, [onRequestClose, stopResizing]);
 
   const startResizing = (event: React.PointerEvent<HTMLButtonElement>): void => {
     resizePointerIdRef.current = event.pointerId;
@@ -141,12 +168,12 @@ export const BrowserPushPanel = ({
         type="button"
         aria-label="Resize notifications panel"
         className={cn(
-          'no-drag group absolute inset-y-0 left-0 z-10 w-2 -translate-x-1 cursor-col-resize',
+          'no-drag group absolute inset-y-0 left-0 z-10 w-4 cursor-col-resize',
           !open && 'pointer-events-none opacity-0',
         )}
         onPointerDown={startResizing}
       >
-        <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-stone-300/80" />
+        <span className="absolute inset-y-0 left-0 w-px bg-transparent transition-colors group-hover:bg-stone-300/80" />
       </button>
 
       <div

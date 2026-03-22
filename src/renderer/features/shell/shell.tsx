@@ -16,13 +16,13 @@ import { Composer, type AgentPresetSelection } from '@renderer/features/composer
 import { Transcript } from '@renderer/features/transcript/transcript';
 import { ToolbarActions } from '@renderer/features/toolbar/toolbar-actions';
 import { RunConfigurationDialog } from '@renderer/features/toolbar/run-configuration-dialog';
-import { CommitDialog } from '@renderer/features/toolbar/commit-dialog';
 import { RenameThreadDialog } from '@renderer/features/shell/rename-thread-dialog';
 import {
   CommandPalette,
   type CommandPaletteItem,
 } from '@renderer/features/command-palette/command-palette';
 import { TerminalPanel } from '@renderer/features/terminal/terminal-panel';
+import { CommitPanel } from '@renderer/features/workspace/commit-panel';
 import { FileTreeDialog } from '@renderer/features/workspace/file-tree-dialog';
 import { BrowserPushPanel } from '@renderer/features/workspace/browser-push-panel';
 import { ReviewPanel } from '@renderer/features/workspace/review-panel';
@@ -51,18 +51,38 @@ import {
   type AppNotificationItem,
 } from '@renderer/store/browser-pushes';
 import { useSidebarWidth } from '@renderer/store/use-sidebar-width';
+import { useRunConfigurations } from '@renderer/store/use-run-configurations';
 import { useShellState } from '@renderer/store/use-shell-state';
 import { useAcp, type TimelineItem } from '@renderer/store/use-acp';
 import { useWorkspaceReview } from '@renderer/store/use-workspace-review';
-import type { AcpCustomAgentConfig, AcpPromptAttachment } from '@shared/types/acp';
+import type {
+  AcpCustomAgentConfig,
+  AcpPromptAttachment,
+  AcpTerminalAuthLaunchSpec,
+} from '@shared/types/acp';
 import type { UpdaterState } from '@shared/types/updater';
 import zeroLogo from '@renderer/assets/zero-logo.png';
 
 const getFolderName = (folderPath: string): string =>
   folderPath.split(/[\\/]/).filter(Boolean).pop() ?? folderPath;
-const RUN_CONFIGURATION_COMMAND_KEY = 'zeroade.run.command';
 const normalizeMessageText = (value: string): string =>
   value.replace(/\s+/g, ' ').trim();
+
+interface RunTerminalRequest {
+  id: number;
+  configurationId: string;
+  configurationName: string;
+  command: string;
+}
+
+interface InterruptTerminalRequest {
+  id: number;
+}
+
+interface ActiveRunExecution {
+  configurationId: string;
+  configurationName: string;
+}
 
 interface LatestTimelineMessage {
   id: string;
@@ -484,6 +504,7 @@ const readStoredReviewPanelWidth = (): number => {
 
 const toCleanErrorText = (value: string): string =>
   value
+    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
     .replace(ANSI_ESCAPE_PATTERN, '')
     .replace(LOOSE_ANSI_PATTERN, '')
     .replace(/\s+/g, ' ')
@@ -545,6 +566,11 @@ const toErrorMessage = (error: unknown): string => {
   return String(error);
 };
 
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+
 const isAuthenticationRequiredMessage = (value: string): boolean => {
   const normalized = value.toLowerCase();
   return (
@@ -553,6 +579,58 @@ const isAuthenticationRequiredMessage = (value: string): boolean => {
     normalized.includes('call authenticate(') ||
     normalized.includes('authenticate agent')
   );
+};
+
+const quotePosixShellArg = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
+
+const toPosixShellCommand = (command: string, args: string[]): string =>
+  [command, ...args].map((entry) => quotePosixShellArg(entry)).join(' ');
+
+const toPosixShellCommandWithEnv = (
+  command: string,
+  args: string[],
+  env: Record<string, string>,
+): string => {
+  const envEntries = Object.entries(env).filter(
+    ([key]) => key.trim().length > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key),
+  );
+  if (envEntries.length === 0) {
+    return toPosixShellCommand(command, args);
+  }
+
+  const envPrefix = envEntries
+    .map(([key, value]) => `${key}=${quotePosixShellArg(value)}`)
+    .join(' ');
+  return `${envPrefix} ${toPosixShellCommand(command, args)}`;
+};
+
+const toWindowsShellArg = (value: string): string =>
+  /\s|"/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+
+const toTerminalLaunchCommand = (
+  launchSpec: AcpTerminalAuthLaunchSpec,
+  platform: NodeJS.Platform,
+): string => {
+  if (platform === 'win32') {
+    const command = [launchSpec.command, ...launchSpec.args].map(toWindowsShellArg).join(' ');
+    const envCommands = Object.entries(launchSpec.env)
+      .filter(([key]) => key.trim().length > 0)
+      .map(([key, value]) => `set "${key}=${value.replace(/"/g, '""')}"`);
+    return [
+      `cd /d "${launchSpec.cwd.replace(/"/g, '""')}"`,
+      ...envCommands,
+      command,
+    ]
+      .filter((entry) => entry.trim().length > 0)
+      .join(' && ');
+  }
+
+  const shellCommand = toPosixShellCommandWithEnv(
+    launchSpec.command,
+    launchSpec.args,
+    launchSpec.env,
+  );
+  return `cd ${quotePosixShellArg(launchSpec.cwd)} && ${shellCommand}`;
 };
 
 export const Shell = (): JSX.Element => {
@@ -614,7 +692,7 @@ export const Shell = (): JSX.Element => {
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = React.useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = React.useState(false);
   const [isRunConfigurationOpen, setIsRunConfigurationOpen] = React.useState(false);
-  const [isCommitDialogOpen, setIsCommitDialogOpen] = React.useState(false);
+  const [isCommitPanelOpen, setIsCommitPanelOpen] = React.useState(false);
   const [isWebBrowserOpen, setIsWebBrowserOpen] = React.useState(false);
   const [browserOpenRequest, setBrowserOpenRequest] = React.useState<BrowserOpenRequest | null>(null);
   const [browserPushItems, setBrowserPushItems] = React.useState<AppNotificationItem[]>(() =>
@@ -622,16 +700,16 @@ export const Shell = (): JSX.Element => {
   );
   const [isBrowserPushPanelOpen, setIsBrowserPushPanelOpen] = React.useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
-  const [runConfigurationCommand, setRunConfigurationCommand] = React.useState('');
   const [threadRenameTarget, setThreadRenameTarget] =
     React.useState<RenameThreadTarget | null>(null);
   const [completedThreadIds, setCompletedThreadIds] = React.useState<Set<string>>(
     () => new Set(),
   );
-  const [runRequest, setRunRequest] = React.useState<{
-    id: number;
-    command: string;
-  } | null>(null);
+  const [runRequest, setRunRequest] = React.useState<RunTerminalRequest | null>(null);
+  const [interruptRequest, setInterruptRequest] =
+    React.useState<InterruptTerminalRequest | null>(null);
+  const [activeRunExecution, setActiveRunExecution] =
+    React.useState<ActiveRunExecution | null>(null);
   const [queuedPromptsByThread, setQueuedPromptsByThread] = React.useState<
     Record<string, QueuedPrompt[]>
   >({});
@@ -684,6 +762,7 @@ export const Shell = (): JSX.Element => {
   const previousThreadPromptingByIdRef = React.useRef<Record<string, boolean>>({});
   const appliedSessionTitleByThreadRef = React.useRef<Record<string, string>>({});
   const syncedPreviewByThreadRef = React.useRef<Record<string, string>>({});
+  const authRecheckEpochRef = React.useRef(0);
   const pendingComposerSubmitRef = React.useRef<{
     text: string;
     attachments: AcpPromptAttachment[];
@@ -712,6 +791,15 @@ export const Shell = (): JSX.Element => {
 
   const sessionWorkspacePath = selectedThreadWorkspace?.path ?? workspaces[0]?.path ?? '';
   const workspacePath = sessionWorkspacePath || '/';
+  const {
+    configurations: runConfigurations,
+    selectedConfigurationId: selectedRunConfigurationId,
+    selectedConfiguration: selectedRunConfiguration,
+    saveConfiguration: saveRunConfiguration,
+    deleteConfiguration: deleteRunConfiguration,
+    selectConfiguration: selectRunConfiguration,
+    touchConfiguration: touchRunConfiguration,
+  } = useRunConfigurations(workspacePath);
 
   const {
     isFileTreeOpen,
@@ -728,10 +816,12 @@ export const Shell = (): JSX.Element => {
     closeReviewPanel,
     toggleReviewPanelVisibility,
     openFile,
+    openDiff,
     setActiveReviewFile,
     closeReviewFile,
     reorderReviewFiles,
   } = useWorkspaceReview(workspacePath);
+  const focusedReviewRelativePath = activeReviewFile?.relativePath ?? null;
 
   const ensureSessionForThreadRef = React.useRef(ensureSessionForThread);
 
@@ -740,14 +830,88 @@ export const Shell = (): JSX.Element => {
   }, [ensureSessionForThread]);
 
   React.useEffect(() => {
+    authRecheckEpochRef.current += 1;
     if (!sessionWorkspacePath) {
       return;
     }
 
-    void ensureSessionForThreadRef.current(selectedThreadId, sessionWorkspacePath).catch(() => {
-      // Keep the shell interactive even if ACP startup fails.
-    });
+    let cancelled = false;
+
+    void ensureSessionForThreadRef.current(selectedThreadId, sessionWorkspacePath)
+      .then(() => {
+        if (cancelled) {
+          return;
+        }
+
+        setIsAgentAuthRequired(false);
+        setAgentAuthMessage(null);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        const cleanedError = toCleanErrorText(toErrorMessage(error));
+        if (!isAuthenticationRequiredMessage(cleanedError)) {
+          // Keep the shell interactive even if ACP startup fails.
+          return;
+        }
+
+        setIsAgentAuthRequired(true);
+        setAgentAuthMessage(cleanedError || 'Authentication required. Use Authenticate agent.');
+        setStatusText('Authentication required');
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [agentPreset, agentSelectionEpoch, selectedThreadId, sessionWorkspacePath]);
+
+  const beginAgentAuthCompletionCheck = React.useCallback(() => {
+    if (!sessionWorkspacePath) {
+      return;
+    }
+
+    authRecheckEpochRef.current += 1;
+    const checkEpoch = authRecheckEpochRef.current;
+
+    void (async () => {
+      for (let attempt = 0; attempt < 180; attempt += 1) {
+        if (checkEpoch !== authRecheckEpochRef.current) {
+          return;
+        }
+
+        if (attempt > 0) {
+          await sleep(1000);
+          if (checkEpoch !== authRecheckEpochRef.current) {
+            return;
+          }
+        }
+
+        try {
+          await ensureSessionForThreadRef.current(selectedThreadId, sessionWorkspacePath);
+          if (checkEpoch !== authRecheckEpochRef.current) {
+            return;
+          }
+
+          setIsAgentAuthRequired(false);
+          setAgentAuthMessage(null);
+          setStatusText('Agent authenticated');
+          return;
+        } catch (error) {
+          const cleanedError = toCleanErrorText(toErrorMessage(error));
+          if (!isAuthenticationRequiredMessage(cleanedError)) {
+            if (checkEpoch !== authRecheckEpochRef.current) {
+              return;
+            }
+
+            setStatusText('Agent authentication check failed');
+            return;
+          }
+        }
+      }
+    })();
+  }, [selectedThreadId, sessionWorkspacePath]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -965,9 +1129,20 @@ export const Shell = (): JSX.Element => {
 
       setIsAgentAuthRequired(result.requiresUserAction);
       setAgentAuthMessage(result.message || null);
+      if (result.requiresUserAction && result.terminalLaunchSpec) {
+        const authLabel = result.methodName?.trim() || 'Agent';
+        setIsTerminalOpen(true);
+        setRunRequest({
+          id: Date.now(),
+          configurationId: `agent-auth-${result.methodId ?? 'unknown'}`,
+          configurationName: `${authLabel} authentication`,
+          command: toTerminalLaunchCommand(result.terminalLaunchSpec, platform),
+        });
+        beginAgentAuthCompletionCheck();
+      }
       setStatusText(
         result.requiresUserAction
-          ? 'Complete authentication in terminal'
+          ? 'Complete authentication in built-in terminal'
           : 'Agent authenticated',
       );
     } catch (error) {
@@ -982,7 +1157,14 @@ export const Shell = (): JSX.Element => {
     } finally {
       setIsAgentAuthLaunching(false);
     }
-  }, [authenticate, isAgentAuthLaunching, pushErrorToast, workspacePath]);
+  }, [
+    authenticate,
+    beginAgentAuthCompletionCheck,
+    isAgentAuthLaunching,
+    platform,
+    pushErrorToast,
+    workspacePath,
+  ]);
 
   React.useEffect(() => {
     return () => {
@@ -1495,8 +1677,18 @@ export const Shell = (): JSX.Element => {
       return;
     }
 
+    setIsCommitPanelOpen(false);
     void openFileTree();
   }, [closeFileTree, isFileTreeOpen, openFileTree]);
+
+  const handleOpenCommitPanel = React.useCallback(() => {
+    closeFileTree();
+    setIsCommitPanelOpen(true);
+  }, [closeFileTree]);
+
+  const handleCloseCommitPanel = React.useCallback(() => {
+    setIsCommitPanelOpen(false);
+  }, []);
 
   const unreadBrowserPushCount = React.useMemo(
     () => browserPushItems.reduce((count, item) => (item.read ? count : count + 1), 0),
@@ -1874,33 +2066,53 @@ export const Shell = (): JSX.Element => {
     }
 
     setIsWebBrowserOpen(false);
+    setIsCommitPanelOpen(false);
     closeFileTree();
     setIsTerminalOpen(false);
   }, [closeFileTree, isSettingsOpen]);
 
-  React.useEffect(() => {
-    const savedCommand = window.localStorage.getItem(RUN_CONFIGURATION_COMMAND_KEY);
-    if (savedCommand) {
-      setRunConfigurationCommand(savedCommand);
-    }
-  }, []);
+  const handleRunConfiguration = React.useCallback(
+    (configurationId: string) => {
+      const configuration = runConfigurations.find((item) => item.id === configurationId);
+      if (!configuration) {
+        setIsRunConfigurationOpen(true);
+        return;
+      }
 
-  const handleSaveAndRun = React.useCallback((command: string) => {
-    const trimmed = command.trim();
-    if (!trimmed) {
+      selectRunConfiguration(configuration.id);
+      touchRunConfiguration(configuration.id);
+      setIsRunConfigurationOpen(false);
+      setIsTerminalOpen(true);
+      setRunRequest({
+        id: Date.now(),
+        configurationId: configuration.id,
+        configurationName: configuration.name,
+        command: configuration.command,
+      });
+      setStatusText(`Running ${configuration.name}`);
+    },
+    [runConfigurations, selectRunConfiguration, touchRunConfiguration],
+  );
+
+  const handleRunSelectedConfiguration = React.useCallback(() => {
+    if (!selectedRunConfiguration) {
+      setIsRunConfigurationOpen(true);
       return;
     }
 
-    setRunConfigurationCommand(trimmed);
-    window.localStorage.setItem(RUN_CONFIGURATION_COMMAND_KEY, trimmed);
-    setIsRunConfigurationOpen(false);
-    setIsTerminalOpen(true);
-    setRunRequest({
+    handleRunConfiguration(selectedRunConfiguration.id);
+  }, [handleRunConfiguration, selectedRunConfiguration]);
+
+  const handleInterruptRun = React.useCallback(() => {
+    if (!activeRunExecution) {
+      return;
+    }
+
+    setInterruptRequest({
       id: Date.now(),
-      command: trimmed,
     });
-    setStatusText(`Running: ${trimmed}`);
-  }, []);
+    setStatusText(`Interrupt sent to ${activeRunExecution.configurationName}`);
+  }, [activeRunExecution]);
 
   React.useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -2005,6 +2217,7 @@ export const Shell = (): JSX.Element => {
         keywords: 'files tree review',
         icon: 'folder',
         onSelect: () => {
+          setIsCommitPanelOpen(false);
           void openFileTree();
         },
       },
@@ -2018,6 +2231,7 @@ export const Shell = (): JSX.Element => {
     openFile,
     openFileTree,
     recentWorkspaces,
+    setIsCommitPanelOpen,
     selectThread,
     selectWorkspace,
     threadGroups,
@@ -2497,7 +2711,7 @@ export const Shell = (): JSX.Element => {
             <div className="drag-region flex h-full min-w-0">
               <div
                 className={cn(
-                  'shrink-0 overflow-hidden bg-[rgba(249,250,252,0.16)] backdrop-blur-[12px] backdrop-saturate-140',
+                  'shrink-0 overflow-hidden border-r border-stone-200/65 bg-[rgba(249,250,252,0.09)] backdrop-blur-[2px] backdrop-saturate-125',
                   !isResizing && 'transition-[width] duration-200 ease-out',
                 )}
                 style={{ width: activeSidebarWidth }}
@@ -2507,7 +2721,7 @@ export const Shell = (): JSX.Element => {
                     <button
                       type="button"
                       aria-label="Collapse sidebar"
-                      className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-200/55 hover:text-stone-700"
+                      className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-white/55 hover:text-stone-700"
                       onClick={toggleCollapsed}
                     >
                       <PanelLeftClose className="h-4 w-4" />
@@ -2519,7 +2733,7 @@ export const Shell = (): JSX.Element => {
                       type="button"
                       className={cn(
                         'no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors',
-                        'hover:bg-stone-200/55 hover:text-stone-700',
+                        'hover:bg-white/55 hover:text-stone-700',
                         'disabled:cursor-not-allowed disabled:opacity-65',
                       )}
                       onClick={() => {
@@ -2547,7 +2761,7 @@ export const Shell = (): JSX.Element => {
                     <button
                       type="button"
                       aria-label="Expand sidebar"
-                      className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-200/55 hover:text-stone-700"
+                      className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-white/55 hover:text-stone-700"
                       onClick={toggleCollapsed}
                     >
                       <PanelLeftOpen className="h-4 w-4" />
@@ -2591,7 +2805,7 @@ export const Shell = (): JSX.Element => {
                         <button
                           type="button"
                           aria-label="Thread options"
-                          className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-xl text-stone-500 transition-colors hover:bg-stone-200/65 hover:text-stone-700 max-[980px]:hidden"
+                          className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-xl text-stone-500 transition-colors hover:bg-stone-200/45 hover:text-stone-700 max-[980px]:hidden"
                         >
                           <Ellipsis className="h-3.5 w-3.5" />
                         </button>
@@ -2614,12 +2828,16 @@ export const Shell = (): JSX.Element => {
                     onToggleFilesView={toggleReviewPanelVisibility}
                     isFilesViewOpen={isReviewPanelVisible}
                     openFilesCount={reviewFiles.length}
-                    onOpenCommitDialog={() => {
-                      setIsCommitDialogOpen(true);
-                    }}
                     onOpenRunConfiguration={() => {
                       setIsRunConfigurationOpen(true);
                     }}
+                    runConfigurations={runConfigurations}
+                    selectedRunConfigurationId={selectedRunConfigurationId}
+                    selectedRunConfigurationName={selectedRunConfiguration?.name ?? null}
+                    isRunInProgress={Boolean(activeRunExecution)}
+                    onSelectRunConfiguration={selectRunConfiguration}
+                    onRunSelectedConfiguration={handleRunSelectedConfiguration}
+                    onInterruptRun={handleInterruptRun}
                     onOpenWebBrowser={() => {
                       setIsWebBrowserOpen((previous) => !previous);
                     }}
@@ -2647,6 +2865,11 @@ export const Shell = (): JSX.Element => {
                 isResizing={isResizing}
                 showResizeHandle={!isCollapsed}
                 onStartResizing={startResizing}
+                workspacePath={workspacePath}
+                agentPreset={agentPreset}
+                codexAgentConfig={codexAgentConfig}
+                claudeAgentConfig={claudeAgentConfig}
+                customAgentConfig={customAgentConfig}
               />
             </main>
           ) : (
@@ -2705,7 +2928,7 @@ export const Shell = (): JSX.Element => {
                   className="no-drag relative w-0 cursor-col-resize"
                   onPointerDown={() => startResizing()}
                 >
-                  <span className="absolute inset-y-0 -left-3 w-6" />
+                  <span className="absolute inset-y-0 -left-5 w-10" />
                 </button>
               )}
 
@@ -2717,9 +2940,28 @@ export const Shell = (): JSX.Element => {
                     files={files}
                     loading={isLoadingTree}
                     workspaceName={workspaceName}
-                    activeFilePath={activeReviewFilePath}
+                    activeFilePath={focusedReviewRelativePath}
                     onOpenFile={(path) => {
                       void openFile(path);
+                    }}
+                    onCollapse={closeFileTree}
+                  />
+
+                  <CommitPanel
+                    open={isCommitPanelOpen}
+                    side="left"
+                    workspacePath={workspacePath}
+                    activeFilePath={focusedReviewRelativePath}
+                    onOpenDiff={(path) => {
+                      void openDiff(path);
+                    }}
+                    onRequestClose={handleCloseCommitPanel}
+                    onCommitted={({ message, pushed }) => {
+                      setStatusText(
+                        pushed
+                          ? `Committed and pushed: ${message}`
+                          : `Committed: ${message}`,
+                      );
                     }}
                   />
 
@@ -2745,12 +2987,8 @@ export const Shell = (): JSX.Element => {
                           <ReviewPanel
                             open={isReviewPanelOpen}
                             loading={isLoadingFile}
-                            tabs={reviewFiles.map((file) => file.relativePath)}
+                            tabs={reviewFiles}
                             activeFilePath={activeReviewFilePath}
-                            content={activeReviewFile?.content ?? ''}
-                            fileContentByPath={Object.fromEntries(
-                              reviewFiles.map((file) => [file.relativePath, file.content]),
-                            )}
                             onSelectTab={setActiveReviewFile}
                             onCloseTab={closeReviewFile}
                             onReorderTabs={reorderReviewFiles}
@@ -2759,10 +2997,11 @@ export const Shell = (): JSX.Element => {
                       ) : null}
 
                       <div className="min-w-0 flex flex-1 flex-col">
-                        <div className="mx-auto flex h-full w-full max-w-[830px] flex-col px-6 pb-3 pt-2">
+                        <div className="mx-auto flex h-full w-full max-w-[830px] flex-col px-6 pb-1.5 pt-2">
                           <Transcript
                             threadId={selectedThreadId}
                             workspaceName={workspaceName}
+                            workspacePath={workspacePath}
                             projects={workspaces.map((workspace) => ({
                               id: workspace.id,
                               name: workspace.name,
@@ -2784,12 +3023,6 @@ export const Shell = (): JSX.Element => {
                                 outcome: 'selected',
                                 optionId,
                               });
-                            }}
-                            onCancelPermission={(requestId) => {
-                              void resolvePermission(requestId, {
-                                outcome: 'cancelled',
-                              });
-                              void cancelPrompt();
                             }}
                             onOpenFile={(path) => {
                               void openFile(path);
@@ -2864,6 +3097,9 @@ export const Shell = (): JSX.Element => {
                             onSetSessionModel={setSessionModel}
                             onSetSessionConfigOption={setSessionConfigOption}
                             onCancel={cancelPrompt}
+                            onOpenCommitDialog={() => {
+                              handleOpenCommitPanel();
+                            }}
                             prefillRequest={composerPrefillRequest}
                           />
                         </div>
@@ -2873,15 +3109,22 @@ export const Shell = (): JSX.Element => {
                       open={isTerminalOpen}
                       cwd={workspacePath}
                       runRequest={runRequest}
+                      interruptRequest={interruptRequest}
+                      onExecutionStateChange={setActiveRunExecution}
                       onRequestClose={() => setIsTerminalOpen(false)}
                     />
                   </div>
 
-                  <WebBrowserPanel open={isWebBrowserOpen} openRequest={browserOpenRequest} />
+                  <WebBrowserPanel
+                    open={isWebBrowserOpen}
+                    openRequest={browserOpenRequest}
+                    onRequestClose={() => setIsWebBrowserOpen(false)}
+                  />
                   <BrowserPushPanel
                     open={isBrowserPushPanelOpen}
                     items={browserPushItems}
                     onOpenUrl={handleOpenBrowserPushUrl}
+                    onRequestClose={() => setIsBrowserPushPanelOpen(false)}
                   />
                 </div>
               </main>
@@ -2891,7 +3134,7 @@ export const Shell = (): JSX.Element => {
       ) : (
         <main className="relative flex min-h-0 flex-1 bg-[#fdfdff]">
           <div className="drag-region absolute inset-x-0 top-0 h-11" />
-          <div className="no-drag mx-auto flex h-full w-full max-w-[830px] flex-col items-center justify-center px-6 pb-8 pt-4">
+          <div className="no-drag mx-auto flex h-full w-full max-w-[830px] flex-col items-center justify-center px-6 pb-4 pt-4">
             <div className="mt-5 flex flex-col items-center gap-0">
               <h1 className="text-[34px] font-semibold tracking-[-0.02em] text-stone-900">Set up</h1>
               <img src={zeroLogo} alt="Zero logo" className="h-24 w-auto object-contain" />
@@ -3084,29 +3327,12 @@ export const Shell = (): JSX.Element => {
 
       <RunConfigurationDialog
         open={isRunConfigurationOpen}
-        command={runConfigurationCommand}
+        configurations={runConfigurations}
+        selectedConfigurationId={selectedRunConfigurationId}
         onOpenChange={setIsRunConfigurationOpen}
-        onSaveAndRun={handleSaveAndRun}
-      />
-
-      <CommitDialog
-        open={isCommitDialogOpen}
-        branchName="main"
-        changesSummary="-"
-        onOpenChange={setIsCommitDialogOpen}
-        onContinue={({ includeUnstaged, message, nextStep }) => {
-          setIsCommitDialogOpen(false);
-          const summary = message ? `Commit queued: ${message}` : 'Commit queued';
-          const suffix =
-            nextStep === 'commit'
-              ? ''
-              : nextStep === 'commit-and-push'
-                ? ' + push'
-                : ' + PR';
-          setStatusText(
-            `${summary}${includeUnstaged ? ' (include unstaged)' : ''}${suffix}`.trim(),
-          );
-        }}
+        onSelectConfiguration={selectRunConfiguration}
+        onSaveConfiguration={saveRunConfiguration}
+        onDeleteConfiguration={deleteRunConfiguration}
       />
 
       <Dialog

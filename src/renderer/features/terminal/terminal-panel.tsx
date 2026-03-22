@@ -8,8 +8,10 @@ import '@xterm/xterm/css/xterm.css';
 
 const TERMINAL_PANEL_HEIGHT_KEY = 'zeroade.terminal-panel.height.v1';
 const TERMINAL_PANEL_HEIGHT_DEFAULT = 256;
-const TERMINAL_PANEL_HEIGHT_MIN = 168;
+const TERMINAL_PANEL_HEIGHT_OPEN = 250;
+const TERMINAL_PANEL_HEIGHT_MIN = 0;
 const TERMINAL_PANEL_HEIGHT_MAX = 680;
+const TERMINAL_PANEL_HEIGHT_COLLAPSE_THRESHOLD = 48;
 
 const getTerminalTheme = () => {
   if (document.documentElement.dataset.zeroadeTheme === 'dark') {
@@ -34,8 +36,17 @@ interface TerminalPanelProps {
   cwd: string;
   runRequest: {
     id: number;
+    configurationId: string;
+    configurationName: string;
     command: string;
   } | null;
+  interruptRequest: {
+    id: number;
+  } | null;
+  onExecutionStateChange: (execution: {
+    configurationId: string;
+    configurationName: string;
+  } | null) => void;
   onRequestClose: () => void;
 }
 
@@ -51,16 +62,30 @@ interface TerminalTabSessionProps {
   open: boolean;
   runRequest: {
     id: number;
+    configurationId: string;
+    configurationName: string;
     command: string;
+    tabId: string;
+  } | null;
+  interruptRequest: {
+    id: number;
   } | null;
   onRunRequestHandled: (requestId: number) => void;
+  onInterruptRequestHandled: (requestId: number) => void;
+  onSessionExit: (tabId: string) => void;
+}
+
+interface ActiveTerminalExecution {
+  configurationId: string;
+  configurationName: string;
+  tabId: string;
 }
 
 const createTerminalTabId = (): string =>
   `terminal-tab-${Date.now()}-${Math.random().toString(16).slice(2, 9)}`;
 
 const clampPanelHeight = (value: number): number => {
-  const viewportMax = Math.max(TERMINAL_PANEL_HEIGHT_MIN, window.innerHeight - 180);
+  const viewportMax = Math.max(TERMINAL_PANEL_HEIGHT_OPEN, window.innerHeight - 180);
   const maxHeight = Math.min(TERMINAL_PANEL_HEIGHT_MAX, viewportMax);
   return Math.min(Math.max(value, TERMINAL_PANEL_HEIGHT_MIN), maxHeight);
 };
@@ -72,7 +97,7 @@ const readStoredPanelHeight = (): number => {
   }
 
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed)) {
+  if (!Number.isFinite(parsed) || parsed <= 0) {
     return TERMINAL_PANEL_HEIGHT_DEFAULT;
   }
 
@@ -98,7 +123,10 @@ const TerminalTabSession = ({
   active,
   open,
   runRequest,
+  interruptRequest,
   onRunRequestHandled,
+  onInterruptRequestHandled,
+  onSessionExit,
 }: TerminalTabSessionProps): JSX.Element => {
   const terminalContainerRef = React.useRef<HTMLDivElement | null>(null);
   const terminalRef = React.useRef<XTerm | null>(null);
@@ -224,10 +252,11 @@ const TerminalTabSession = ({
       const exitCodeText = typeof event.exitCode === 'number' ? String(event.exitCode) : '?';
       terminal.writeln(`\r\n[Process exited: ${exitCodeText}]`);
       terminalIdRef.current = null;
+      onSessionExit(tab.id);
     });
 
     return unsubscribe;
-  }, []);
+  }, [onSessionExit, tab.id]);
 
   React.useEffect(() => {
     if (!open || !active) {
@@ -263,6 +292,27 @@ const TerminalTabSession = ({
 
     void executeCommand();
   }, [active, ensureSession, onRunRequestHandled, open, runRequest]);
+
+  React.useEffect(() => {
+    if (!interruptRequest) {
+      return;
+    }
+
+    const terminalId = terminalIdRef.current;
+    if (!terminalId) {
+      onInterruptRequestHandled(interruptRequest.id);
+      return;
+    }
+
+    void window.desktop
+      .terminalWrite({
+        terminalId,
+        data: '\u0003',
+      })
+      .finally(() => {
+        onInterruptRequestHandled(interruptRequest.id);
+      });
+  }, [interruptRequest, onInterruptRequestHandled]);
 
   React.useEffect(() => {
     if (!open || !active) {
@@ -331,6 +381,8 @@ export const TerminalPanel = ({
   open,
   cwd,
   runRequest,
+  interruptRequest,
+  onExecutionStateChange,
   onRequestClose,
 }: TerminalPanelProps): JSX.Element => {
   const initialTab = React.useRef<TerminalTab>({
@@ -347,12 +399,20 @@ export const TerminalPanel = ({
   const [isResizing, setIsResizing] = React.useState(false);
   const [pendingRunRequest, setPendingRunRequest] = React.useState<{
     id: number;
+    configurationId: string;
+    configurationName: string;
     command: string;
+    tabId: string;
   } | null>(null);
+  const [pendingInterruptRequest, setPendingInterruptRequest] = React.useState<{
+    id: number;
+  } | null>(null);
+  const [activeExecution, setActiveExecution] = React.useState<ActiveTerminalExecution | null>(null);
   const resizingRef = React.useRef(false);
   const resizePointerIdRef = React.useRef<number | null>(null);
   const resizeHandleRef = React.useRef<HTMLButtonElement | null>(null);
   const lastRunRequestIdRef = React.useRef<number | null>(null);
+  const lastInterruptRequestIdRef = React.useRef<number | null>(null);
   const createTab = React.useCallback((nextCwd: string): TerminalTab => {
     const tab: TerminalTab = {
       id: createTerminalTabId(),
@@ -385,13 +445,66 @@ export const TerminalPanel = ({
   }, [createTab, cwd, open, tabs.length]);
 
   React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const nextHeight = clampPanelHeight(TERMINAL_PANEL_HEIGHT_OPEN);
+    setPanelHeight(nextHeight);
+    window.localStorage.setItem(TERMINAL_PANEL_HEIGHT_KEY, String(nextHeight));
+  }, [open]);
+
+  React.useEffect(() => {
     if (!runRequest || runRequest.id === lastRunRequestIdRef.current) {
       return;
     }
 
     lastRunRequestIdRef.current = runRequest.id;
-    setPendingRunRequest(runRequest);
-  }, [runRequest]);
+    const targetTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? createTab(cwd);
+
+    if (!tabs.some((tab) => tab.id === targetTab.id)) {
+      setTabs([targetTab]);
+      setActiveTabId(targetTab.id);
+    }
+
+    setTabs((previous) => {
+      const hasTarget = previous.some((tab) => tab.id === targetTab.id);
+      const nextTabs = hasTarget ? previous : [...previous, targetTab];
+
+      return nextTabs.map((tab) =>
+        tab.id === targetTab.id
+          ? {
+              ...tab,
+              label: runRequest.configurationName,
+              cwd,
+            }
+          : tab,
+      );
+    });
+    setActiveTabId(targetTab.id);
+    setPendingRunRequest({
+      ...runRequest,
+      tabId: targetTab.id,
+    });
+    setActiveExecution({
+      configurationId: runRequest.configurationId,
+      configurationName: runRequest.configurationName,
+      tabId: targetTab.id,
+    });
+  }, [activeTabId, createTab, cwd, runRequest, tabs]);
+
+  React.useEffect(() => {
+    if (!interruptRequest || interruptRequest.id === lastInterruptRequestIdRef.current) {
+      return;
+    }
+
+    lastInterruptRequestIdRef.current = interruptRequest.id;
+    if (!activeExecution) {
+      return;
+    }
+
+    setPendingInterruptRequest(interruptRequest);
+  }, [activeExecution, interruptRequest]);
 
   React.useEffect(() => {
     setTabs((previous) =>
@@ -428,7 +541,17 @@ export const TerminalPanel = ({
         return;
       }
 
-      const nextHeight = clampPanelHeight(window.innerHeight - event.clientY);
+      const rawHeight = window.innerHeight - event.clientY;
+      if (rawHeight <= TERMINAL_PANEL_HEIGHT_COLLAPSE_THRESHOLD) {
+        const resetHeight = clampPanelHeight(TERMINAL_PANEL_HEIGHT_OPEN);
+        setPanelHeight(resetHeight);
+        window.localStorage.setItem(TERMINAL_PANEL_HEIGHT_KEY, String(resetHeight));
+        stopResizing();
+        onRequestClose();
+        return;
+      }
+
+      const nextHeight = clampPanelHeight(rawHeight);
       setPanelHeight(nextHeight);
       window.localStorage.setItem(TERMINAL_PANEL_HEIGHT_KEY, String(nextHeight));
     };
@@ -461,7 +584,7 @@ export const TerminalPanel = ({
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
-  }, []);
+  }, [onRequestClose]);
 
   const startResizing = React.useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -494,6 +617,7 @@ export const TerminalPanel = ({
 
       const nextTabs = tabs.filter((tab) => tab.id !== tabId);
       setTabs(nextTabs);
+      setActiveExecution((previous) => (previous?.tabId === tabId ? null : previous));
 
       if (nextTabs.length === 0) {
         setActiveTabId('');
@@ -545,6 +669,32 @@ export const TerminalPanel = ({
     });
   }, []);
 
+  const handleInterruptRequestHandled = React.useCallback((requestId: number) => {
+    setPendingInterruptRequest((previous) => {
+      if (!previous || previous.id !== requestId) {
+        return previous;
+      }
+
+      return null;
+    });
+    setActiveExecution(null);
+  }, []);
+
+  const handleSessionExit = React.useCallback((tabId: string) => {
+    setActiveExecution((previous) => (previous?.tabId === tabId ? null : previous));
+  }, []);
+
+  React.useEffect(() => {
+    onExecutionStateChange(
+      activeExecution
+        ? {
+            configurationId: activeExecution.configurationId,
+            configurationName: activeExecution.configurationName,
+          }
+        : null,
+    );
+  }, [activeExecution, onExecutionStateChange]);
+
   const activeRunRequest = open ? pendingRunRequest : null;
 
   return (
@@ -560,7 +710,7 @@ export const TerminalPanel = ({
           ref={resizeHandleRef}
           type="button"
           aria-label="Resize terminal panel"
-          className="no-drag absolute inset-x-0 top-0 z-20 h-2 -translate-y-1 cursor-row-resize"
+          className="no-drag absolute inset-x-0 top-0 z-20 h-4 cursor-row-resize"
           onPointerDown={startResizing}
         />
       ) : null}
@@ -681,8 +831,13 @@ export const TerminalPanel = ({
                   tab={tab}
                   active={open && isActive}
                   open={open}
-                  runRequest={isActive ? activeRunRequest : null}
+                  runRequest={activeRunRequest?.tabId === tab.id ? activeRunRequest : null}
+                  interruptRequest={
+                    activeExecution?.tabId === tab.id ? pendingInterruptRequest : null
+                  }
                   onRunRequestHandled={handleRunRequestHandled}
+                  onInterruptRequestHandled={handleInterruptRequestHandled}
+                  onSessionExit={handleSessionExit}
                 />
               </div>
             );

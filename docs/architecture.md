@@ -71,7 +71,7 @@ Key files:
 - `contracts/ipc.ts`
 - `types/acp.ts`
 - `types/preload.ts`
-- `types/settings.ts`
+- `types/settings.ts`int
 - `types/workspace.ts`
 
 ## ACP Flow

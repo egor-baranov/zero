@@ -1,9 +1,11 @@
 import { ipcMain } from 'electron';
 import { IPC_CHANNELS } from '@shared/contracts/ipc';
 import type {
+  WorkspaceGitCommitRequest,
   WorkspaceDiffFileRequest,
   WorkspaceGitCheckoutBranchRequest,
   WorkspaceGitCreateBranchRequest,
+  WorkspaceGitPushRequest,
   WorkspaceGitStatusRequest,
   WorkspaceListFilesRequest,
   WorkspaceReadFileRequest,
@@ -45,5 +47,15 @@ export const registerWorkspaceIpc = (workspaceService: WorkspaceService): void =
   ipcMain.handle(
     IPC_CHANNELS.workspaceGitCreateBranch,
     (_event, request: WorkspaceGitCreateBranchRequest) => workspaceService.createBranch(request),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.workspaceGitCommit,
+    (_event, request: WorkspaceGitCommitRequest) => workspaceService.commit(request),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.workspaceGitPush,
+    (_event, request: WorkspaceGitPushRequest) => workspaceService.push(request),
   );
 };

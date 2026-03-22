@@ -31,11 +31,13 @@ import type {
   ReadAttachmentPreviewResult,
 } from '@shared/types/preload';
 import type {
+  WorkspaceGitCommitRequest,
   WorkspaceDiffFileRequest,
   WorkspaceDiffFileResult,
   WorkspaceGitCheckoutBranchRequest,
   WorkspaceGitCreateBranchRequest,
   WorkspaceGitMutationResult,
+  WorkspaceGitPushRequest,
   WorkspaceGitStatusRequest,
   WorkspaceGitStatusResult,
   WorkspaceListFilesRequest,
@@ -103,6 +105,14 @@ export const desktopApi: DesktopApi = {
     request: WorkspaceGitCreateBranchRequest,
   ): Promise<WorkspaceGitMutationResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.workspaceGitCreateBranch, request),
+  workspaceGitCommit: (
+    request: WorkspaceGitCommitRequest,
+  ): Promise<WorkspaceGitMutationResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.workspaceGitCommit, request),
+  workspaceGitPush: (
+    request: WorkspaceGitPushRequest,
+  ): Promise<WorkspaceGitMutationResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.workspaceGitPush, request),
   workspaceRevealFile: (
     request: WorkspaceRevealFileRequest,
   ): Promise<WorkspaceRevealFileResult> =>

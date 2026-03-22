@@ -24,49 +24,32 @@ export const PermissionDialog = ({
         }
       }}
     >
-      <DialogContent className="no-drag max-w-[540px] rounded-[24px] p-5">
+      <DialogContent className="no-drag max-w-[640px] rounded-[28px] border-none bg-stone-100/80 p-4">
         <div className="space-y-4">
           <div>
-            <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">
-              Permission Request
-            </p>
-            <h2 className="mt-1 text-lg font-semibold text-stone-800">
+            <h2 className="text-lg font-semibold text-stone-900">
               {request?.toolCall.title ?? 'Tool approval needed'}
             </h2>
-            <p className="mt-1 text-sm text-stone-500">
+            <p className="mt-1 text-sm text-stone-600">
               The agent requested permission to run a tool call for this session.
             </p>
           </div>
 
-          <div className="rounded-2xl border border-stone-200 bg-stone-50/80 p-3">
-            <p className="text-xs font-medium text-stone-600">Session</p>
-            <p className="mt-1 text-xs text-stone-500">{request?.sessionId}</p>
-          </div>
-
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             {request?.options.map((option) => (
               <Button
                 key={option.optionId}
                 variant="secondary"
-                className="h-10 w-full justify-start rounded-xl border border-stone-200/95 px-3 text-sm"
+                className={`
+                  h-10 w-full justify-start rounded-2xl border-none bg-stone-200/55 px-3 text-sm font-medium
+                  text-stone-800 hover:bg-stone-300/75 focus-visible:ring-stone-400
+                `}
                 onClick={() => onResolve(request.requestId, option.optionId)}
               >
                 {option.name}
               </Button>
             ))}
           </div>
-
-          <Button
-            variant="ghost"
-            className="h-9 w-full rounded-xl text-sm text-stone-500"
-            onClick={() => {
-              if (request) {
-                onCancel(request.requestId);
-              }
-            }}
-          >
-            Cancel Prompt
-          </Button>
         </div>
       </DialogContent>
     </Dialog>

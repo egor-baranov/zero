@@ -26,16 +26,16 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@renderer/components/ui/dropdown-menu';
+import { SideBySideDiffView } from '@renderer/features/workspace/side-by-side-diff-view';
 import { toFileIconComponent } from '@renderer/lib/code-language-icons';
 import { cn } from '@renderer/lib/cn';
+import type { ReviewFileState } from '@renderer/store/use-workspace-review';
 
 interface ReviewPanelProps {
   open: boolean;
   loading: boolean;
-  tabs: string[];
+  tabs: ReviewFileState[];
   activeFilePath: string | null;
-  content: string;
-  fileContentByPath: Record<string, string>;
   onSelectTab: (path: string) => void;
   onCloseTab: (path: string) => void;
   onReorderTabs: (sourcePath: string, targetPath: string) => void;
@@ -167,8 +167,6 @@ export const ReviewPanel = ({
   loading,
   tabs,
   activeFilePath,
-  content,
-  fileContentByPath,
   onSelectTab,
   onCloseTab,
   onReorderTabs,
@@ -189,6 +187,27 @@ export const ReviewPanel = ({
   const [rightPanePaths, setRightPanePaths] = React.useState<string[]>([]);
   const [splitRatio, setSplitRatio] = React.useState(SPLIT_RATIO_DEFAULT);
   const [isSplitResizing, setIsSplitResizing] = React.useState(false);
+  const tabById = React.useMemo(
+    () => new Map(tabs.map((tab) => [tab.id, tab])),
+    [tabs],
+  );
+  const activeTab = React.useMemo(() => {
+    if (!activeFilePath) {
+      return tabs.at(-1) ?? null;
+    }
+
+    return tabById.get(activeFilePath) ?? tabs.at(-1) ?? null;
+  }, [activeFilePath, tabById, tabs]);
+  const activeFileTab = activeTab?.kind === 'file' ? activeTab : null;
+  const fileContentByPath = React.useMemo(
+    () =>
+      Object.fromEntries(
+        tabs
+          .filter((tab) => tab.kind === 'file')
+          .map((tab) => [tab.relativePath, tab.content]),
+      ),
+    [tabs],
+  );
 
   const toEditorContent = React.useCallback(
     (path: string | null): string => {
@@ -201,13 +220,9 @@ export const ReviewPanel = ({
         return editedValue;
       }
 
-      if (path === activeFilePath) {
-        return loading ? 'Loading file content...' : content;
-      }
-
-      return fileContentByPath[path] ?? '';
+      return fileContentByPath[path] ?? (loading ? 'Loading file content...' : '');
     },
-    [activeFilePath, content, fileContentByPath, loading],
+    [fileContentByPath, loading],
   );
 
   const createEditor = React.useCallback((container: HTMLDivElement) => {
@@ -288,7 +303,7 @@ export const ReviewPanel = ({
       return tabs;
     }
 
-    return tabs.filter((path) => !rightPanePathSet.has(path));
+    return tabs.filter((tab) => !rightPanePathSet.has(tab.id));
   }, [isSplitView, rightPanePathSet, tabs]);
 
   const rightTabs = React.useMemo(() => {
@@ -296,16 +311,21 @@ export const ReviewPanel = ({
       return [];
     }
 
-    return tabs.filter((path) => path !== activeFilePath && rightPanePathSet.has(path));
+    return tabs.filter(
+      (tab) => tab.kind === 'file' && tab.id !== activeFilePath && rightPanePathSet.has(tab.id),
+    );
   }, [activeFilePath, isSplitView, rightPanePathSet, tabs]);
 
-  const effectiveSecondaryPath = React.useMemo(() => {
+  const effectiveSecondaryPath = React.useMemo<ReviewFileState | null>(() => {
     if (!isSplitView) {
       return null;
     }
 
-    if (secondaryFilePath && rightTabs.includes(secondaryFilePath)) {
-      return secondaryFilePath;
+    if (secondaryFilePath) {
+      const nextTab = rightTabs.find((tab) => tab.id === secondaryFilePath) ?? null;
+      if (nextTab) {
+        return nextTab;
+      }
     }
 
     return rightTabs[0] ?? null;
@@ -340,6 +360,11 @@ export const ReviewPanel = ({
 
   const handleDropInPane = React.useCallback(
     (side: 'left' | 'right', path: string): void => {
+      const droppedTab = tabById.get(path);
+      if (!droppedTab) {
+        return;
+      }
+
       if (side === 'left') {
         setRightPanePaths((previous) => {
           const next = previous.filter((candidatePath) => candidatePath !== path);
@@ -359,14 +384,21 @@ export const ReviewPanel = ({
         return;
       }
 
+      if (droppedTab.kind !== 'file') {
+        handleUnsplit();
+        onSelectTab(path);
+        return;
+      }
+
       const nextRightPaths = Array.from(
         new Set([...rightPanePaths.filter((candidatePath) => candidatePath !== activeFilePath), path]),
       );
 
       if (path === activeFilePath) {
         const nextPrimaryPath =
-          tabs.find((candidatePath) => candidatePath !== path && !nextRightPaths.includes(candidatePath)) ??
-          tabs.find((candidatePath) => candidatePath !== path);
+          tabs.find((candidateTab) => candidateTab.id !== path && !nextRightPaths.includes(candidateTab.id))
+            ?.id ??
+          tabs.find((candidateTab) => candidateTab.id !== path)?.id;
 
         if (nextPrimaryPath) {
           onSelectTab(nextPrimaryPath);
@@ -377,7 +409,7 @@ export const ReviewPanel = ({
       setRightPanePaths(nextRightPaths);
       setSecondaryFilePath(path);
     },
-    [activeFilePath, onSelectTab, rightPanePaths, secondaryFilePath, tabs],
+    [activeFilePath, handleUnsplit, onSelectTab, rightPanePaths, secondaryFilePath, tabById, tabs],
   );
 
   const handleSelectSecondaryTab = React.useCallback(
@@ -435,6 +467,11 @@ export const ReviewPanel = ({
   );
 
   React.useEffect(() => {
+    if (activeTab?.kind === 'diff' && isSplitView) {
+      handleUnsplit();
+      return;
+    }
+
     if (!isSplitView) {
       if (rightPanePaths.length > 0) {
         setRightPanePaths([]);
@@ -446,7 +483,7 @@ export const ReviewPanel = ({
     const sanitizedRightPaths = rightPanePaths.filter(
       (path, index, currentPaths) =>
         path !== activeFilePath &&
-        tabs.includes(path) &&
+        tabs.some((tab) => tab.id === path && tab.kind === 'file') &&
         currentPaths.indexOf(path) === index,
     );
 
@@ -462,12 +499,14 @@ export const ReviewPanel = ({
       return;
     }
 
-    if (secondaryFilePath !== effectiveSecondaryPath) {
-      setSecondaryFilePath(effectiveSecondaryPath);
+    if (secondaryFilePath !== effectiveSecondaryPath.id) {
+      setSecondaryFilePath(effectiveSecondaryPath.id);
     }
   }, [
+    activeTab?.kind,
     activeFilePath,
     effectiveSecondaryPath,
+    handleUnsplit,
     isSplitView,
     leftTabs.length,
     rightPanePaths,
@@ -569,11 +608,11 @@ export const ReviewPanel = ({
       return;
     }
 
-    const model = getModelForPath(activeFilePath);
+    const model = getModelForPath(activeFileTab?.relativePath ?? null);
     if (editor.getModel() !== model) {
       editor.setModel(model);
     }
-  }, [activeFilePath, getModelForPath]);
+  }, [activeFilePath, activeFileTab, getModelForPath]);
 
   React.useEffect(() => {
     if (!isSplitView || !effectiveSecondaryPath) {
@@ -585,7 +624,7 @@ export const ReviewPanel = ({
       return;
     }
 
-    const model = getModelForPath(effectiveSecondaryPath);
+    const model = getModelForPath(effectiveSecondaryPath.relativePath);
     if (editor.getModel() !== model) {
       editor.setModel(model);
     }
@@ -597,14 +636,16 @@ export const ReviewPanel = ({
   }, [isSplitView, splitRatio]);
 
   React.useEffect(() => {
-    const keep = new Set(tabs);
+    const keep = new Set(
+      tabs.filter((tab) => tab.kind === 'file').map((tab) => tab.relativePath),
+    );
 
-    if (!activeFilePath) {
+    if (!activeFileTab) {
       keep.add(EMPTY_MODEL_KEY);
     }
 
     if (effectiveSecondaryPath) {
-      keep.add(effectiveSecondaryPath);
+      keep.add(effectiveSecondaryPath.relativePath);
     }
 
     modelsRef.current.forEach((model, key) => {
@@ -616,7 +657,7 @@ export const ReviewPanel = ({
       modelsRef.current.delete(key);
       editedContentByPathRef.current.delete(key);
     });
-  }, [activeFilePath, effectiveSecondaryPath, tabs]);
+  }, [activeFileTab, effectiveSecondaryPath, tabs]);
 
   React.useEffect(() => {
     if (!tabs.length) {
@@ -658,49 +699,49 @@ export const ReviewPanel = ({
   );
 
   const renderTabBar = (
-    paths: string[],
+    tabItems: ReviewFileState[],
     currentPath: string | null,
     onSelectPath: (path: string) => void,
     showOptions: boolean,
   ): JSX.Element => (
     <div className="flex min-h-10 items-center bg-white/90">
       <div className="min-w-0 flex-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <div className="flex w-max min-w-full items-center gap-2 px-2 py-1.5">
-          {paths.map((path) => {
-            const tabName = getFileName(path);
-            const isActive = path === currentPath;
+        <div className="flex w-max min-w-full items-center gap-2 px-2 pb-1.5 pt-0">
+          {tabItems.map((tab) => {
+            const tabName = getFileName(tab.relativePath);
+            const isActive = tab.id === currentPath;
 
             return (
               <button
-                key={path}
+                key={tab.id}
                 type="button"
                 draggable
                 className={cn(
                   'no-drag group flex h-8 max-w-[220px] shrink-0 items-center gap-1.5 rounded-[12px] bg-stone-50 px-3 text-[13px] text-stone-600 transition-colors hover:bg-stone-100 hover:text-stone-900',
                   isActive && 'bg-stone-200/75 text-stone-900',
-                  draggingTabPath === path && 'opacity-60',
-                  dragOverTabPath === path && draggingTabPath !== path && 'bg-stone-200/65',
+                  draggingTabPath === tab.id && 'opacity-60',
+                  dragOverTabPath === tab.id && draggingTabPath !== tab.id && 'bg-stone-200/65',
                 )}
-                onClick={() => onSelectPath(path)}
+                onClick={() => onSelectPath(tab.id)}
                 onDragStart={(event) => {
-                  setDraggingTabPath(path);
+                  setDraggingTabPath(tab.id);
                   event.dataTransfer.effectAllowed = 'move';
-                  event.dataTransfer.setData('text/plain', path);
+                  event.dataTransfer.setData('text/plain', tab.id);
                 }}
                 onDragOver={(event) => {
                   event.preventDefault();
-                  if (draggingTabPath && draggingTabPath !== path) {
-                    setDragOverTabPath(path);
+                  if (draggingTabPath && draggingTabPath !== tab.id) {
+                    setDragOverTabPath(tab.id);
                   }
                 }}
                 onDrop={(event) => {
                   event.preventDefault();
                   const sourcePath = draggingTabPath ?? event.dataTransfer.getData('text/plain');
-                  if (!sourcePath || sourcePath === path) {
+                  if (!sourcePath || sourcePath === tab.id) {
                     return;
                   }
 
-                  onReorderTabs(sourcePath, path);
+                  onReorderTabs(sourcePath, tab.id);
                 }}
                 onDragEnd={() => {
                   setDraggingTabPath(null);
@@ -708,11 +749,11 @@ export const ReviewPanel = ({
                   setDropSide(null);
                 }}
                 onDragLeave={() => {
-                  if (dragOverTabPath === path) {
+                  if (dragOverTabPath === tab.id) {
                     setDragOverTabPath(null);
                   }
                 }}
-                title={path}
+                title={tab.relativePath}
               >
                 <FileTypeIcon fileName={tabName} />
                 <span className="truncate">{tabName}</span>
@@ -722,13 +763,13 @@ export const ReviewPanel = ({
                   className="inline-flex h-3.5 w-3 items-center justify-center rounded text-stone-400 opacity-0 transition group-hover:opacity-100 hover:bg-stone-300/70 hover:text-stone-700"
                   onClick={(event) => {
                     event.stopPropagation();
-                    onCloseTab(path);
+                    onCloseTab(tab.id);
                   }}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault();
                       event.stopPropagation();
-                      onCloseTab(path);
+                      onCloseTab(tab.id);
                     }
                   }}
                 >
@@ -748,7 +789,7 @@ export const ReviewPanel = ({
   return (
     <section className="flex h-full w-full min-w-0 flex-col">
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#fdfdff]">
-        <div className="relative min-h-0 flex-1 bg-[#fdfdff] p-2">
+        <div className="relative min-h-0 flex-1 bg-[#fdfdff] px-2 pb-2 pt-0">
           <div
             ref={editorsContainerRef}
             className="flex h-full w-full min-w-0"
@@ -768,7 +809,18 @@ export const ReviewPanel = ({
             >
               {renderTabBar(isSplitView ? leftTabs : tabs, activeFilePath, onSelectTab, !isSplitView)}
               <div className="min-h-0 flex-1">
-                <div ref={primaryEditorContainerRef} className="h-full w-full" />
+                <div
+                  ref={primaryEditorContainerRef}
+                  className={cn('h-full w-full', activeTab?.kind === 'diff' && 'hidden')}
+                />
+                {activeTab?.kind === 'diff' ? (
+                  <SideBySideDiffView
+                    filePath={activeTab.relativePath}
+                    originalContent={activeTab.originalContent ?? ''}
+                    modifiedContent={activeTab.modifiedContent ?? ''}
+                    patch={activeTab.patch ?? ''}
+                  />
+                ) : null}
               </div>
             </div>
 
@@ -788,7 +840,7 @@ export const ReviewPanel = ({
                   <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-stone-300/80" />
                 </button>
                 <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[#fdfdff]">
-                  {renderTabBar(rightTabs, effectiveSecondaryPath, handleSelectSecondaryTab, true)}
+                  {renderTabBar(rightTabs, effectiveSecondaryPath?.id ?? null, handleSelectSecondaryTab, true)}
                   <div className="min-h-0 flex-1">
                     <div ref={secondaryEditorContainerRef} className="h-full w-full" />
                   </div>
