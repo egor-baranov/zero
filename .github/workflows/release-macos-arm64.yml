@@ -206,7 +206,7 @@ jobs:
           if-no-files-found: error
 
       - name: Prepare Pages artifacts for main
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && vars.ZEROADE_ENABLE_PAGES_DEPLOY == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -271,7 +271,7 @@ jobs:
           HTML
 
       - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && vars.ZEROADE_ENABLE_PAGES_DEPLOY == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: out/pages
@@ -294,7 +294,7 @@ jobs:
             ${{ steps.prepare.outputs.main_update_file }}
 
   deploy-pages:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && vars.ZEROADE_ENABLE_PAGES_DEPLOY == 'true'
     needs: build-macos-arm64
     runs-on: ubuntu-latest
     environment:
