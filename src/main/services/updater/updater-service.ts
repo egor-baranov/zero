@@ -37,7 +37,6 @@ const PACKAGE_REPOSITORY_URL = toRepositoryUrlFromPackageJson(
 );
 const DEFAULT_UPDATE_REPOSITORY_URL =
   PACKAGE_REPOSITORY_URL || 'https://github.com/REPLACE_ME_OWNER/REPLACE_ME_REPO';
-const DEFAULT_MAIN_UPDATE_BASE_PATH = 'updates/main';
 
 const parseGitHubRepository = (
   repositoryUrl: string,
@@ -66,32 +65,6 @@ const parseGitHubRepository = (
 const isPlaceholderRepository = (repositoryUrl: string): boolean =>
   repositoryUrl.includes('REPLACE_ME_OWNER') || repositoryUrl.includes('REPLACE_ME_REPO');
 
-const toGitHubPagesBaseUrl = (repositoryUrl: string): string => {
-  const parsed = parseGitHubRepository(repositoryUrl);
-  if (!parsed) {
-    return '';
-  }
-
-  return `https://${parsed.owner}.github.io/${parsed.repo}`;
-};
-
-const joinUrlPath = (baseUrl: string, pathName: string): string => {
-  const trimmedBase = baseUrl.replace(/\/+$/, '');
-  const trimmedPath = pathName.replace(/^\/+/, '');
-  return `${trimmedBase}/${trimmedPath}`;
-};
-
-const getPrereleaseChannel = (version: string): string | null => {
-  const trimmed = version.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const match = trimmed.match(/^\d+\.\d+\.\d+-([0-9A-Za-z-]+)(?:[.+-].+)?$/);
-  const channel = match?.[1]?.trim() ?? '';
-  return channel || null;
-};
-
 const toErrorMessage = (error: unknown): string => {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message.trim();
@@ -114,7 +87,6 @@ type UpdaterListener = (event: UpdaterRendererEvent) => void;
 export class UpdaterService {
   private readonly listeners = new Set<UpdaterListener>();
   private readonly repositoryUrl: string;
-  private readonly mainUpdateBaseUrl: string;
   private state: UpdaterState;
   private started = false;
   private isConfigured = false;
@@ -123,12 +95,6 @@ export class UpdaterService {
   constructor() {
     this.repositoryUrl =
       process.env.ZEROADE_UPDATE_REPOSITORY_URL?.trim() || DEFAULT_UPDATE_REPOSITORY_URL;
-    this.mainUpdateBaseUrl =
-      process.env.ZEROADE_MAIN_UPDATE_BASE_URL?.trim() ||
-      joinUrlPath(
-        toGitHubPagesBaseUrl(this.repositoryUrl),
-        DEFAULT_MAIN_UPDATE_BASE_PATH,
-      );
 
     this.state = {
       status: 'idle',
@@ -185,38 +151,23 @@ export class UpdaterService {
     }
 
     this.isConfigured = true;
-    const currentChannel = getPrereleaseChannel(app.getVersion());
-    autoUpdater.allowPrerelease = currentChannel !== null;
+    autoUpdater.allowPrerelease = false;
     autoUpdater.allowDowngrade = false;
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
-
-    if (currentChannel === 'main' && this.mainUpdateBaseUrl) {
-      autoUpdater.channel = 'main';
-      autoUpdater.setFeedURL({
-        provider: 'generic',
-        url: this.mainUpdateBaseUrl,
-      });
-    } else {
-      autoUpdater.setFeedURL({
-        provider: 'github',
-        owner: parsed.owner,
-        repo: parsed.repo,
-        private: false,
-      });
-    }
+    autoUpdater.setFeedURL({
+      provider: 'github',
+      owner: parsed.owner,
+      repo: parsed.repo,
+      private: false,
+    });
 
     this.attachAutoUpdaterListeners();
     this.updateState({
       status: 'idle',
       isConfigured: true,
-      message: currentChannel
-        ? `Auto-update ready (${currentChannel} channel)`
-        : 'Auto-update ready',
-      repositoryUrl:
-        currentChannel === 'main' && this.mainUpdateBaseUrl
-          ? this.mainUpdateBaseUrl
-          : this.repositoryUrl,
+      message: 'Auto-update ready',
+      repositoryUrl: this.repositoryUrl,
     });
 
     setTimeout(() => {

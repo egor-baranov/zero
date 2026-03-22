@@ -2,16 +2,12 @@ name: Release macOS Apple Silicon
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 jobs:
   build-macos-arm64:
@@ -35,16 +31,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Set CI prerelease version for main builds
-        if: github.ref == 'refs/heads/main'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          NEXT_VERSION="$(node -e 'const fs=require("fs"); const pkg=JSON.parse(fs.readFileSync("./package.json","utf8")); const m=String(pkg.version||"").match(/^(\d+)\.(\d+)\.(\d+)(?:-.+)?$/); if(!m){throw new Error("Unsupported package.json version: "+pkg.version);} const major=Number(m[1]); const minor=Number(m[2]); const patch=Number(m[3])+1; process.stdout.write(`${major}.${minor}.${patch}-main.${process.env.GITHUB_RUN_NUMBER}`);')"
-          npm version "${NEXT_VERSION}" --no-git-tag-version
-          echo "Using main prerelease version: ${NEXT_VERSION}"
 
       - name: Lint
         run: npm run lint
@@ -190,13 +176,11 @@ jobs:
 
           VERSION="$(node -p "require('./package.json').version")"
           node scripts/generate-latest-mac-yml.mjs "${STABLE_ZIP}" "${VERSION}" latest-mac.yml
-          node scripts/generate-latest-mac-yml.mjs "${STABLE_ZIP}" "${VERSION}" main-mac.yml
 
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "zip_file=${STABLE_ZIP}" >> "${GITHUB_OUTPUT}"
           echo "dmg_file=${STABLE_DMG}" >> "${GITHUB_OUTPUT}"
           echo "update_file=${RELEASE_DIR}/latest-mac.yml" >> "${GITHUB_OUTPUT}"
-          echo "main_update_file=${RELEASE_DIR}/main-mac.yml" >> "${GITHUB_OUTPUT}"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
@@ -205,85 +189,14 @@ jobs:
           path: out/release-assets
           if-no-files-found: error
 
-      - name: Prepare Pages artifacts for main
-        if: github.ref == 'refs/heads/main' && vars.ZEROADE_ENABLE_PAGES_DEPLOY == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PAGES_DIR="out/pages"
-          MAIN_DIR="${PAGES_DIR}/updates/main"
-          mkdir -p "${MAIN_DIR}"
-
-          cp "${{ steps.prepare.outputs.dmg_file }}" "${MAIN_DIR}/Zero-darwin-arm64.dmg"
-          cp "${{ steps.prepare.outputs.zip_file }}" "${MAIN_DIR}/Zero-darwin-arm64.zip"
-          cp "${{ steps.prepare.outputs.main_update_file }}" "${MAIN_DIR}/main-mac.yml"
-
-          cat > "${PAGES_DIR}/index.html" <<'HTML'
-          <!doctype html>
-          <html lang="en">
-            <head>
-              <meta charset="utf-8" />
-              <meta name="viewport" content="width=device-width, initial-scale=1" />
-              <title>Zero main builds</title>
-              <style>
-                body {
-                  margin: 0;
-                  padding: 40px 24px;
-                  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-                  background: #f8f8f6;
-                  color: #2f2d2b;
-                }
-                main {
-                  max-width: 760px;
-                  margin: 0 auto;
-                }
-                h1 {
-                  margin: 0 0 12px;
-                  font-size: 28px;
-                }
-                p {
-                  margin: 0 0 20px;
-                  color: #6b645d;
-                  line-height: 1.55;
-                }
-                ul {
-                  margin: 0;
-                  padding-left: 20px;
-                }
-                a {
-                  color: #111111;
-                }
-              </style>
-            </head>
-            <body>
-              <main>
-                <h1>Zero main builds</h1>
-                <p>Fixed URLs for the latest main-channel macOS artifacts.</p>
-                <ul>
-                  <li><a href="./updates/main/Zero-darwin-arm64.dmg">Download DMG</a></li>
-                  <li><a href="./updates/main/Zero-darwin-arm64.zip">Download ZIP</a></li>
-                  <li><a href="./updates/main/main-mac.yml">Updater metadata</a></li>
-                </ul>
-              </main>
-            </body>
-          </html>
-          HTML
-
-      - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/main' && vars.ZEROADE_ENABLE_PAGES_DEPLOY == 'true'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: out/pages
-
       - name: Publish GitHub release assets
-        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.prepare.outputs.version) }}
-          name: ${{ startsWith(github.ref, 'refs/tags/v') && format('Release {0}', github.ref_name) || format('Main build v{0}', steps.prepare.outputs.version) }}
-          prerelease: ${{ github.ref == 'refs/heads/main' }}
-          make_latest: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          prerelease: false
+          make_latest: true
           generate_release_notes: true
           fail_on_unmatched_files: true
           target_commitish: ${{ github.sha }}
@@ -291,16 +204,3 @@ jobs:
             ${{ steps.prepare.outputs.dmg_file }}
             ${{ steps.prepare.outputs.zip_file }}
             ${{ steps.prepare.outputs.update_file }}
-            ${{ steps.prepare.outputs.main_update_file }}
-
-  deploy-pages:
-    if: github.ref == 'refs/heads/main' && vars.ZEROADE_ENABLE_PAGES_DEPLOY == 'true'
-    needs: build-macos-arm64
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy Pages
-        id: deployment
-        uses: actions/deploy-pages@v4

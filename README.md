@@ -49,17 +49,7 @@ If you want to override it at runtime, set:
 export ZEROADE_UPDATE_REPOSITORY_URL="https://github.com/egor-baranov/zero"
 ```
 
-For packaged `main` builds, the app uses a fixed GitHub Pages feed by default:
-
-```bash
-https://egor-baranov.github.io/zero/updates/main/main-mac.yml
-```
-
-You can override that too:
-
-```bash
-export ZEROADE_MAIN_UPDATE_BASE_URL="https://egor-baranov.github.io/zero/updates/main"
-```
+Packaged builds check stable updates from GitHub Releases (`latest-mac.yml`).
 
 ## GitHub macOS Build + Release
 
@@ -70,13 +60,10 @@ This repo includes a GitHub Actions workflow at:
 What it does:
 
 - Builds macOS Apple Silicon (`arm64`) with Electron Forge
-- On push to `main`, publishes a GitHub prerelease build with a version like
-  `1.0.1-main.123`
 - On tag push (`v*`), publishes a stable GitHub release
 - Generates:
   - `Zero-darwin-arm64.dmg` for user installs
   - `Zero-darwin-arm64.zip` + `latest-mac.yml` for `electron-updater`
-  - `main-mac.yml` so packaged `main` builds can keep following later `main` builds
 - Uploads the macOS assets to the GitHub Release
 
 Release flow:
@@ -87,21 +74,6 @@ git push origin v1.0.1
 ```
 
 The release assets from that tag can be linked directly from your website, and the packaged app can auto-update from GitHub Releases.
-
-Channel behavior:
-
-- Packaged builds from `main` use their prerelease version (for example `-main.123`)
-  to follow newer `main` builds automatically via GitHub Pages.
-- Tagged releases stay on the stable channel and continue to use `latest-mac.yml`.
-
-Constant `main` URLs:
-
-- Latest main macOS Apple Silicon installer:
-  `https://egor-baranov.github.io/zero/updates/main/Zero-darwin-arm64.dmg`
-- Latest main updater ZIP:
-  `https://egor-baranov.github.io/zero/updates/main/Zero-darwin-arm64.zip`
-- Latest main updater metadata:
-  `https://egor-baranov.github.io/zero/updates/main/main-mac.yml`
 
 Canonical stable URLs:
 
