@@ -1,25 +1,6 @@
 import * as React from 'react';
 import { EllipsisVertical, X } from 'lucide-react';
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
-import 'monaco-editor/min/vs/editor/editor.main.css';
-import 'monaco-editor/esm/vs/basic-languages/css/css.contribution';
-import 'monaco-editor/esm/vs/basic-languages/html/html.contribution';
-import 'monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution';
-import 'monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution';
-import 'monaco-editor/esm/vs/basic-languages/shell/shell.contribution';
-import 'monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution';
-import 'monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution';
-import 'monaco-editor/esm/vs/language/json/monaco.contribution';
-// eslint-disable-next-line import/default
-import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-// eslint-disable-next-line import/default
-import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
-// eslint-disable-next-line import/default
-import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
-// eslint-disable-next-line import/default
-import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
-// eslint-disable-next-line import/default
-import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,50 +8,35 @@ import {
   DropdownMenuTrigger,
 } from '@renderer/components/ui/dropdown-menu';
 import { SideBySideDiffView } from '@renderer/features/workspace/side-by-side-diff-view';
+import {
+  clearWorkspacePathDiagnostics,
+  closeWorkspaceModelInLsp,
+  ensureMonacoLsp,
+  syncWorkspaceModelWithLsp,
+} from '@renderer/lib/monaco-lsp';
+import { attachPeekReferencesHeaderFormatter } from '@renderer/lib/monaco-peek-header';
 import { toFileIconComponent } from '@renderer/lib/code-language-icons';
 import { cn } from '@renderer/lib/cn';
+import { ensureMonacoSetup, getMonacoLanguage } from '@renderer/lib/monaco-setup';
+import { ensureMonacoThemes } from '@renderer/lib/monaco-theme';
+import {
+  readResolvedCodeFontFamily,
+  readResolvedMonacoTheme,
+} from '@renderer/store/ui-preferences';
 import type { ReviewFileState } from '@renderer/store/use-workspace-review';
 
 interface ReviewPanelProps {
   open: boolean;
   loading: boolean;
+  workspacePath: string;
   tabs: ReviewFileState[];
   activeFilePath: string | null;
   onSelectTab: (path: string) => void;
   onCloseTab: (path: string) => void;
   onReorderTabs: (sourcePath: string, targetPath: string) => void;
+  onRefreshPath: (path: string) => Promise<void>;
+  onStatusText?: (text: string) => void;
 }
-
-interface MonacoEnvironmentGlobal {
-  MonacoEnvironment?: {
-    getWorker: (_moduleId: string, label: string) => Worker;
-  };
-}
-
-const monacoGlobal = globalThis as typeof globalThis & MonacoEnvironmentGlobal;
-
-monacoGlobal.MonacoEnvironment = {
-  ...(monacoGlobal.MonacoEnvironment ?? {}),
-  getWorker: (_moduleId, label) => {
-    if (label === 'json') {
-      return new jsonWorker();
-    }
-
-    if (label === 'css' || label === 'scss' || label === 'less') {
-      return new cssWorker();
-    }
-
-    if (label === 'html' || label === 'handlebars' || label === 'razor') {
-      return new htmlWorker();
-    }
-
-    if (label === 'typescript' || label === 'javascript') {
-      return new tsWorker();
-    }
-
-    return new editorWorker();
-  },
-};
 
 const getFileName = (filePath: string | null): string => {
   if (!filePath) {
@@ -88,8 +54,8 @@ const SPLIT_RATIO_MAX = 0.72;
 const clampSplitRatio = (value: number): number =>
   Math.min(Math.max(value, SPLIT_RATIO_MIN), SPLIT_RATIO_MAX);
 
-const getMonacoTheme = (): 'vs' | 'vs-dark' =>
-  document.documentElement.dataset.zeroadeTheme === 'dark' ? 'vs-dark' : 'vs';
+const getMonacoTheme = (): string =>
+  readResolvedMonacoTheme();
 
 const getModelUri = (pathKey: string): monaco.Uri => {
   if (pathKey === EMPTY_MODEL_KEY) {
@@ -106,53 +72,6 @@ const getModelUri = (pathKey: string): monaco.Uri => {
   });
 };
 
-const getFileExtension = (fileName: string): string => {
-  const parts = fileName.toLowerCase().split('.');
-  if (parts.length < 2) {
-    return '';
-  }
-
-  return parts.at(-1) ?? '';
-};
-
-const getMonacoLanguage = (fileName: string): string => {
-  const extension = getFileExtension(fileName);
-
-  if (extension === 'ts' || extension === 'tsx') {
-    return 'typescript';
-  }
-
-  if (extension === 'js' || extension === 'jsx' || extension === 'mjs' || extension === 'cjs') {
-    return 'javascript';
-  }
-
-  if (extension === 'json') {
-    return 'json';
-  }
-
-  if (extension === 'md') {
-    return 'markdown';
-  }
-
-  if (extension === 'css' || extension === 'scss' || extension === 'less') {
-    return 'css';
-  }
-
-  if (extension === 'html') {
-    return 'html';
-  }
-
-  if (extension === 'yml' || extension === 'yaml') {
-    return 'yaml';
-  }
-
-  if (extension === 'sh' || extension === 'zsh' || extension === 'bash') {
-    return 'shell';
-  }
-
-  return 'plaintext';
-};
-
 interface FileTypeIconProps {
   fileName: string;
 }
@@ -165,6 +84,7 @@ const FileTypeIcon = ({ fileName }: FileTypeIconProps): JSX.Element => {
 export const ReviewPanel = ({
   open,
   loading,
+  workspacePath,
   tabs,
   activeFilePath,
   onSelectTab,
@@ -178,6 +98,7 @@ export const ReviewPanel = ({
   const secondaryEditorRef = React.useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const modelsRef = React.useRef<Map<string, monaco.editor.ITextModel>>(new Map());
   const editedContentByPathRef = React.useRef<Map<string, string>>(new Map());
+  const lspSyncTimeoutByPathRef = React.useRef<Map<string, number>>(new Map());
   const splitResizeActiveRef = React.useRef(false);
   const [draggingTabPath, setDraggingTabPath] = React.useState<string | null>(null);
   const [dragOverTabPath, setDragOverTabPath] = React.useState<string | null>(null);
@@ -225,7 +146,37 @@ export const ReviewPanel = ({
     [fileContentByPath, loading],
   );
 
+  const scheduleLspSyncForModel = React.useCallback(
+    (model: monaco.editor.ITextModel | null): void => {
+      if (!model || !workspacePath || workspacePath === '/') {
+        return;
+      }
+
+      const pathKey = model.uri.path.replace(/^\/+/, '');
+      if (!pathKey || pathKey === EMPTY_MODEL_KEY) {
+        return;
+      }
+
+      const existingTimeout = lspSyncTimeoutByPathRef.current.get(pathKey);
+      if (typeof existingTimeout === 'number') {
+        window.clearTimeout(existingTimeout);
+      }
+
+      const timeoutId = window.setTimeout(() => {
+        lspSyncTimeoutByPathRef.current.delete(pathKey);
+        void syncWorkspaceModelWithLsp(workspacePath, model);
+      }, 120);
+
+      lspSyncTimeoutByPathRef.current.set(pathKey, timeoutId);
+    },
+    [workspacePath],
+  );
+
   const createEditor = React.useCallback((container: HTMLDivElement) => {
+    ensureMonacoSetup();
+    ensureMonacoThemes();
+    ensureMonacoLsp(workspacePath);
+
     const editor = monaco.editor.create(container, {
       value: '',
       language: 'plaintext',
@@ -243,13 +194,29 @@ export const ReviewPanel = ({
         top: 12,
         bottom: 12,
       },
-      fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+      fontFamily: readResolvedCodeFontFamily(),
       overviewRulerLanes: 0,
       hideCursorInOverviewRuler: true,
       scrollbar: {
         horizontalScrollbarSize: 8,
         verticalScrollbarSize: 8,
       },
+    });
+
+    editor.addAction({
+      id: 'zeroade.find-references',
+      label: 'Find References',
+      keybindings: [monaco.KeyMod.Shift | monaco.KeyCode.F12],
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 1.6,
+      run: (currentEditor) => {
+        currentEditor.trigger('zeroade', 'editor.action.referenceSearch.trigger', null);
+      },
+    });
+
+    const detachPeekReferencesHeaderFormatter = attachPeekReferencesHeaderFormatter(editor);
+    editor.onDidDispose(() => {
+      detachPeekReferencesHeaderFormatter();
     });
 
     editor.onDidChangeModelContent(() => {
@@ -264,10 +231,11 @@ export const ReviewPanel = ({
       }
 
       editedContentByPathRef.current.set(pathKey, model.getValue());
+      scheduleLspSyncForModel(model);
     });
 
     return editor;
-  }, []);
+  }, [scheduleLspSyncForModel, workspacePath]);
 
   const getModelForPath = React.useCallback(
     (path: string | null): monaco.editor.ITextModel => {
@@ -277,18 +245,21 @@ export const ReviewPanel = ({
       const nextLanguage = getMonacoLanguage(getFileName(path));
 
       if (!model) {
-      const uri = getModelUri(pathKey);
-      model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(nextValue, nextLanguage, uri);
-      modelsRef.current.set(pathKey, model);
-    }
+        const uri = getModelUri(pathKey);
+        model =
+          monaco.editor.getModel(uri) ?? monaco.editor.createModel(nextValue, nextLanguage, uri);
+        modelsRef.current.set(pathKey, model);
+        scheduleLspSyncForModel(model);
+      }
 
-    if (model.getValue() !== nextValue) {
-      editedContentByPathRef.current.delete(pathKey);
-      model.setValue(nextValue);
-    }
+      if (model.getValue() !== nextValue) {
+        editedContentByPathRef.current.delete(pathKey);
+        model.setValue(nextValue);
+      }
 
       if (model.getLanguageId() !== nextLanguage) {
         monaco.editor.setModelLanguage(model, nextLanguage);
+        scheduleLspSyncForModel(model);
       }
 
       return model;
@@ -396,9 +367,10 @@ export const ReviewPanel = ({
 
       if (path === activeFilePath) {
         const nextPrimaryPath =
-          tabs.find((candidateTab) => candidateTab.id !== path && !nextRightPaths.includes(candidateTab.id))
-            ?.id ??
-          tabs.find((candidateTab) => candidateTab.id !== path)?.id;
+          tabs.find(
+            (candidateTab) =>
+              candidateTab.id !== path && !nextRightPaths.includes(candidateTab.id),
+          )?.id ?? tabs.find((candidateTab) => candidateTab.id !== path)?.id;
 
         if (nextPrimaryPath) {
           onSelectTab(nextPrimaryPath);
@@ -548,8 +520,19 @@ export const ReviewPanel = ({
   }, [stopSplitResizing]);
 
   React.useEffect(() => {
+    ensureMonacoLsp(workspacePath);
+  }, [workspacePath]);
+
+  React.useEffect(() => {
     const applyTheme = (): void => {
+      ensureMonacoSetup();
+      ensureMonacoThemes();
       monaco.editor.setTheme(getMonacoTheme());
+      const nextOptions = {
+        fontFamily: readResolvedCodeFontFamily(),
+      };
+      primaryEditorRef.current?.updateOptions(nextOptions);
+      secondaryEditorRef.current?.updateOptions(nextOptions);
     };
 
     applyTheme();
@@ -594,13 +577,18 @@ export const ReviewPanel = ({
 
   React.useEffect(() => {
     return () => {
+      lspSyncTimeoutByPathRef.current.forEach((timeoutId) => {
+        window.clearTimeout(timeoutId);
+      });
+      lspSyncTimeoutByPathRef.current.clear();
       modelsRef.current.forEach((model) => {
+        void closeWorkspaceModelInLsp(workspacePath, model);
         model.dispose();
       });
       modelsRef.current.clear();
       editedContentByPathRef.current.clear();
     };
-  }, []);
+  }, [workspacePath]);
 
   React.useEffect(() => {
     const editor = primaryEditorRef.current;
@@ -636,9 +624,7 @@ export const ReviewPanel = ({
   }, [isSplitView, splitRatio]);
 
   React.useEffect(() => {
-    const keep = new Set(
-      tabs.filter((tab) => tab.kind === 'file').map((tab) => tab.relativePath),
-    );
+    const keep = new Set(tabs.filter((tab) => tab.kind === 'file').map((tab) => tab.relativePath));
 
     if (!activeFileTab) {
       keep.add(EMPTY_MODEL_KEY);
@@ -656,8 +642,10 @@ export const ReviewPanel = ({
       model.dispose();
       modelsRef.current.delete(key);
       editedContentByPathRef.current.delete(key);
+      clearWorkspacePathDiagnostics(key);
+      void closeWorkspaceModelInLsp(workspacePath, model);
     });
-  }, [activeFileTab, effectiveSecondaryPath, tabs]);
+  }, [activeFileTab, effectiveSecondaryPath, tabs, workspacePath]);
 
   React.useEffect(() => {
     if (!tabs.length) {

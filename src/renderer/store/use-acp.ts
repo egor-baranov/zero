@@ -89,17 +89,17 @@ interface UseAcpResult {
   customAgentConfig: AcpCustomAgentConfig | null;
   loadSessionSupported: boolean;
   activeSessionId: string | null;
+  activeSessionThreadId: string | null;
   activeTimeline: SessionTimeline;
   threadPromptingById: Record<string, boolean>;
   threadSessionTitleById: Record<string, string>;
   threadSessionUpdatedAtById: Record<string, number>;
   activeSessionControls: AcpSessionControls | null;
   pendingPermission: AcpPermissionRequestEvent | null;
-  setAgentPreset: (preset: AcpAgentPreset, options?: { resetThreadId?: string }) => void;
+  setAgentPreset: (preset: AcpAgentPreset) => void;
   saveAgentConfig: (
     preset: 'codex' | 'claude' | 'custom',
     config: AcpCustomAgentConfig,
-    options?: { resetThreadId?: string },
   ) => void;
   ensureSessionForThread: (threadId: string, cwd: string) => Promise<void>;
   sendPrompt: (text: string, attachments?: AcpPromptAttachment[]) => Promise<void>;
@@ -1199,16 +1199,12 @@ export const useAcp = (): UseAcpResult => {
   }, [setActiveSessionIdSafely]);
 
   const setAgentPreset = React.useCallback(
-    (preset: AcpAgentPreset, options?: { resetThreadId?: string }) => {
+    (preset: AcpAgentPreset) => {
       if (preset === agentPreset) {
         return;
       }
 
       const nextThreadSessionMap = readThreadSessionMap(preset);
-      const resetThreadId = options?.resetThreadId?.trim();
-      if (resetThreadId && resetThreadId in nextThreadSessionMap) {
-        delete nextThreadSessionMap[resetThreadId];
-      }
       const nextThreadAttachmentHistoryMap = readThreadAttachmentHistoryMap(preset);
       setAgentPresetState(preset);
       threadSessionMapRef.current = nextThreadSessionMap;
@@ -1224,7 +1220,6 @@ export const useAcp = (): UseAcpResult => {
     (
       preset: 'codex' | 'claude' | 'custom',
       config: AcpCustomAgentConfig,
-      options?: { resetThreadId?: string },
     ) => {
       const nextConfig = normalizeAgentConfig(config);
       if (!nextConfig) {
@@ -1233,10 +1228,6 @@ export const useAcp = (): UseAcpResult => {
 
       if (preset === 'custom') {
         const nextThreadSessionMap = readThreadSessionMap('custom');
-        const resetThreadId = options?.resetThreadId?.trim();
-        if (resetThreadId && resetThreadId in nextThreadSessionMap) {
-          delete nextThreadSessionMap[resetThreadId];
-        }
         const nextThreadAttachmentHistoryMap = readThreadAttachmentHistoryMap('custom');
         setCustomAgentConfig(nextConfig);
         setAgentPresetState('custom');
@@ -1961,6 +1952,20 @@ export const useAcp = (): UseAcpResult => {
     return sessionTimelines[activeSessionId] ?? defaultTimeline();
   }, [activeSessionId, sessionTimelines]);
 
+  const activeSessionThreadId = React.useMemo(() => {
+    if (!activeSessionId) {
+      return null;
+    }
+
+    for (const [threadId, sessionId] of Object.entries(threadSessionMap)) {
+      if (sessionId === activeSessionId) {
+        return threadId;
+      }
+    }
+
+    return null;
+  }, [activeSessionId, threadSessionMap]);
+
   const threadPromptingById = React.useMemo(() => {
     const promptingById: Record<string, boolean> = {};
 
@@ -2019,6 +2024,7 @@ export const useAcp = (): UseAcpResult => {
     customAgentConfig,
     loadSessionSupported,
     activeSessionId,
+    activeSessionThreadId,
     activeTimeline,
     threadPromptingById,
     threadSessionTitleById,

@@ -440,6 +440,287 @@
   border-radius: 999px !important;
 }
 
+.monaco-editor .zone-widget .zone-widget-container.reference-zone-widget {
+  background: var(--vscode-editorWidget-background);
+  border-top-width: 0 !important;
+  border-bottom-width: 0 !important;
+  border-radius: 12px 12px 10px 10px !important;
+  overflow: hidden;
+  box-shadow: 0 12px 28px -24px var(--vscode-widget-shadow, rgba(15, 23, 42, 0.18));
+}
+
+.monaco-editor .peekview-widget .head {
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  min-height: 22px;
+  padding: 0 6px 0 10px;
+  background: var(--vscode-peekViewTitle-background);
+}
+
+.monaco-editor .peekview-widget .head .peekview-title {
+  flex: 1 1 auto;
+  gap: 4px;
+  margin-left: 0;
+  min-width: 0;
+  font-size: 10px;
+  letter-spacing: 0.01em;
+}
+
+.monaco-editor .peekview-widget .head .peekview-title .filename {
+  color: var(--vscode-peekViewTitleLabel-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.monaco-editor .peekview-widget .head .peekview-title .dirname,
+.monaco-editor .peekview-widget .head .peekview-title .meta {
+  color: var(--vscode-peekViewTitleDescription-foreground);
+}
+
+.monaco-editor .peekview-widget .head .peekview-title .meta:not(:empty)::before {
+  opacity: 0.45;
+  padding: 0 0.45em;
+}
+
+.monaco-editor .peekview-widget .head .peekview-title.zeroade-peekview-title-formatted {
+  align-items: center;
+}
+
+.monaco-editor
+  .peekview-widget
+  .head
+  .peekview-title.zeroade-peekview-title-formatted
+  .filename {
+  flex: 1 1 auto;
+  font-weight: 400;
+}
+
+.monaco-editor
+  .peekview-widget
+  .head
+  .peekview-title.zeroade-peekview-title-formatted
+  .dirname {
+  display: none;
+}
+
+.monaco-editor
+  .peekview-widget
+  .head
+  .peekview-title.zeroade-peekview-title-formatted
+  .meta {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 12px;
+  font-size: 10px;
+  color: var(--vscode-peekViewTitleDescription-foreground);
+  white-space: nowrap;
+}
+
+.monaco-editor
+  .peekview-widget
+  .head
+  .peekview-title.zeroade-peekview-title-formatted
+  .meta:not(:empty)::before {
+  content: none;
+}
+
+.monaco-editor .peekview-widget .head .peekview-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 0;
+}
+
+.monaco-editor .peekview-widget .head .peekview-actions .action-item {
+  display: flex;
+  align-items: center;
+  margin: 0;
+}
+
+.monaco-editor .peekview-widget .head .peekview-actions .action-label.codicon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  line-height: 1;
+  border-radius: 999px;
+  opacity: 0.82;
+}
+
+.monaco-editor .peekview-widget .head .peekview-actions .action-label.codicon:hover,
+.monaco-editor .peekview-widget .head .peekview-actions .action-label.codicon:focus {
+  background: rgba(28, 25, 23, 0.08);
+  opacity: 1;
+}
+
+:root[data-zeroade-theme='dark']
+  .monaco-editor
+  .peekview-widget
+  .head
+  .peekview-actions
+  .action-label.codicon:hover,
+:root[data-zeroade-theme='dark']
+  .monaco-editor
+  .peekview-widget
+  .head
+  .peekview-actions
+  .action-label.codicon:focus {
+  background: rgba(244, 244, 245, 0.12);
+}
+
+.monaco-editor .peekview-widget > .body {
+  border-top-color: transparent;
+}
+
+.monaco-editor .reference-zone-widget .messages {
+  color: var(--vscode-peekViewTitleDescription-foreground);
+  font-size: 13px;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree {
+  border-right: 0;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .monaco-list-rows {
+  padding: 10px 12px 12px;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .monaco-list-row {
+  border-radius: 8px !important;
+  overflow: hidden;
+  margin: 2px 0;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .monaco-tl-indent,
+.monaco-editor .reference-zone-widget .ref-tree .monaco-tl-twistie {
+  display: none !important;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .monaco-tl-twistie {
+  width: 0 !important;
+  padding-right: 0 !important;
+  transform: none !important;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .monaco-list-row.focused,
+.monaco-editor .reference-zone-widget .ref-tree .monaco-list-row.selected {
+  outline: none !important;
+}
+
+.monaco-editor
+  .reference-zone-widget
+  .ref-tree
+  .monaco-list:focus
+  .monaco-list-rows
+  > .monaco-list-row.selected:not(.highlighted) {
+  background: transparent !important;
+  border-left: 0 !important;
+  box-shadow: none !important;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .monaco-list-row:hover:not(.selected):not(.focused) {
+  background: transparent !important;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .reference-file,
+.monaco-editor .reference-zone-widget .ref-tree .reference {
+  box-sizing: border-box;
+  width: 100%;
+  padding-right: 0;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .reference-file {
+  padding-left: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .reference {
+  display: flex;
+  align-items: center;
+  padding-left: 0;
+  width: calc(100% - 16px);
+  margin: 0 8px;
+  border-radius: 10px;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .zeroade-peek-reference-label {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: none;
+  overflow: hidden;
+  padding: 0 12px;
+  margin: 0;
+  border-radius: 0;
+  background: transparent !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monaco-editor
+  .reference-zone-widget
+  .ref-tree
+  .monaco-list-row:hover:not(.selected):not(.focused)
+  .reference {
+  background: var(--vscode-list-hoverBackground, rgba(148, 163, 184, 0.12));
+}
+
+.monaco-editor
+  .reference-zone-widget
+  .ref-tree
+  .monaco-list-row.selected
+  .reference {
+  background: var(--vscode-peekViewResult-selectionBackground);
+}
+
+.monaco-editor
+  .reference-zone-widget
+  .ref-tree
+  .monaco-list-row.selected
+  .zeroade-peek-reference-label {
+  color: var(--vscode-peekViewResult-selectionForeground) !important;
+}
+
+.monaco-editor
+  .reference-zone-widget
+  .ref-tree
+  .monaco-list-row.focused:not(.selected)
+  .reference {
+  background: var(--vscode-list-hoverBackground, rgba(148, 163, 184, 0.12));
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .reference-file .count {
+  margin-top: auto;
+  margin-bottom: auto;
+  padding: 0;
+  background: transparent;
+  color: var(--vscode-peekViewTitleDescription-foreground);
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.monaco-editor .reference-zone-widget .ref-tree .referenceMatch .highlight {
+  border: 0 !important;
+  outline: none !important;
+  box-shadow: none !important;
+  padding: 0 0.08em;
+  border-radius: 6px;
+  background-clip: padding-box;
+}
+
+.monaco-editor .reference-zone-widget .preview .reference-decoration {
+  border-radius: 6px;
+}
+
 * {
   box-sizing: border-box;
 }

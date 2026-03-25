@@ -1,9 +1,13 @@
 import { shell } from 'electron';
-import { promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type {
+  WorkspaceCopyEntryRequest,
+  WorkspaceCopyEntryResult,
+  WorkspaceDeleteEntryRequest,
+  WorkspaceDeleteEntryResult,
   WorkspaceGitCommitRequest,
   WorkspaceDiffFileRequest,
   WorkspaceDiffFileResult,
@@ -11,6 +15,8 @@ import type {
   WorkspaceGitCheckoutBranchRequest,
   WorkspaceGitCreateBranchRequest,
   WorkspaceGitMutationResult,
+  WorkspaceMoveEntryRequest,
+  WorkspaceMoveEntryResult,
   WorkspaceGitPushRequest,
   WorkspaceGitStatusRequest,
   WorkspaceGitStatusResult,
@@ -18,6 +24,8 @@ import type {
   WorkspaceListFilesResult,
   WorkspaceReadFileRequest,
   WorkspaceReadFileResult,
+  WorkspaceWriteFileRequest,
+  WorkspaceWriteFileResult,
   WorkspaceRevealFileRequest,
   WorkspaceRevealFileResult,
 } from '@shared/types/workspace';
@@ -70,6 +78,93 @@ const ensureInsideWorkspace = (
   ) {
     throw new Error('Path is outside of workspace');
   }
+};
+
+const ensureDestinationAvailable = async (absolutePath: string): Promise<void> => {
+  try {
+    await fs.lstat(absolutePath);
+    throw new Error('Destination already exists');
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException | undefined;
+    if (failure?.code === 'ENOENT') {
+      return;
+    }
+
+    throw error;
+  }
+};
+
+const ensureParentDirectoryExists = async (absolutePath: string): Promise<void> => {
+  const parentDirectory = path.dirname(absolutePath);
+  const parentStat = await fs.stat(parentDirectory);
+  if (!parentStat.isDirectory()) {
+    throw new Error('Destination parent is not a directory');
+  }
+};
+
+const isSameOrDescendantPath = (parentPath: string, candidatePath: string): boolean => {
+  const normalizedParent = path.resolve(parentPath);
+  const normalizedCandidate = path.resolve(candidatePath);
+
+  return (
+    normalizedCandidate === normalizedParent ||
+    normalizedCandidate.startsWith(`${normalizedParent}${path.sep}`)
+  );
+};
+
+const copyEntryRecursive = async (
+  sourcePath: string,
+  destinationPath: string,
+): Promise<void> => {
+  const sourceStat = await fs.lstat(sourcePath);
+
+  if (sourceStat.isDirectory()) {
+    await fs.cp(sourcePath, destinationPath, {
+      recursive: true,
+      errorOnExist: true,
+      force: false,
+    });
+    return;
+  }
+
+  await fs.copyFile(sourcePath, destinationPath, fsConstants.COPYFILE_EXCL);
+};
+
+const deleteEntryRecursive = async (targetPath: string): Promise<void> => {
+  await fs.rm(targetPath, {
+    recursive: true,
+    force: false,
+  });
+};
+
+const moveEntryRecursive = async (
+  sourcePath: string,
+  destinationPath: string,
+): Promise<void> => {
+  try {
+    await fs.rename(sourcePath, destinationPath);
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException | undefined;
+    if (failure?.code !== 'EXDEV') {
+      throw error;
+    }
+
+    await copyEntryRecursive(sourcePath, destinationPath);
+    await deleteEntryRecursive(sourcePath);
+  }
+};
+
+const resolveWorkspaceEntryPath = (
+  workspacePath: string,
+  filePath: string,
+): { absolutePath: string; relativePath: string } => {
+  const absolutePath = normalizePseudoWorkspacePath(workspacePath, filePath);
+  ensureInsideWorkspace(workspacePath, absolutePath);
+
+  return {
+    absolutePath,
+    relativePath: path.relative(workspacePath, absolutePath).split(path.sep).join('/'),
+  };
 };
 
 const collectFiles = async (
@@ -385,6 +480,36 @@ export class WorkspaceService {
     };
   }
 
+  public async writeFile(
+    request: WorkspaceWriteFileRequest,
+  ): Promise<WorkspaceWriteFileResult> {
+    const workspacePath = path.resolve(request.workspacePath);
+    const absolutePath = normalizePseudoWorkspacePath(workspacePath, request.filePath);
+
+    ensureInsideWorkspace(workspacePath, absolutePath);
+    await ensureParentDirectoryExists(absolutePath);
+
+    try {
+      const fileStat = await fs.stat(absolutePath);
+      if (!fileStat.isFile()) {
+        throw new Error('Path is not a file');
+      }
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException | undefined;
+      if (failure?.code !== 'ENOENT') {
+        throw error;
+      }
+    }
+
+    await fs.writeFile(absolutePath, request.content, 'utf8');
+
+    return {
+      absolutePath,
+      relativePath: path.relative(workspacePath, absolutePath),
+      bytesWritten: Buffer.byteLength(request.content, 'utf8'),
+    };
+  }
+
   public async diffFile(
     request: WorkspaceDiffFileRequest,
   ): Promise<WorkspaceDiffFileResult> {
@@ -442,6 +567,76 @@ export class WorkspaceService {
         hasDiff: false,
       };
     }
+  }
+
+  public async copyEntry(
+    request: WorkspaceCopyEntryRequest,
+  ): Promise<WorkspaceCopyEntryResult> {
+    const workspacePath = path.resolve(request.workspacePath);
+    const source = resolveWorkspaceEntryPath(workspacePath, request.sourcePath);
+    const destination = resolveWorkspaceEntryPath(workspacePath, request.destinationPath);
+
+    if (source.absolutePath === destination.absolutePath) {
+      throw new Error('Source and destination are the same');
+    }
+
+    const sourceStat = await fs.lstat(source.absolutePath);
+    if (sourceStat.isDirectory() && isSameOrDescendantPath(source.absolutePath, destination.absolutePath)) {
+      throw new Error('Cannot copy a folder into itself');
+    }
+
+    await ensureParentDirectoryExists(destination.absolutePath);
+    await ensureDestinationAvailable(destination.absolutePath);
+    await copyEntryRecursive(source.absolutePath, destination.absolutePath);
+
+    return {
+      absolutePath: destination.absolutePath,
+      relativePath: destination.relativePath,
+    };
+  }
+
+  public async moveEntry(
+    request: WorkspaceMoveEntryRequest,
+  ): Promise<WorkspaceMoveEntryResult> {
+    const workspacePath = path.resolve(request.workspacePath);
+    const source = resolveWorkspaceEntryPath(workspacePath, request.sourcePath);
+    const destination = resolveWorkspaceEntryPath(workspacePath, request.destinationPath);
+
+    if (source.absolutePath === destination.absolutePath) {
+      throw new Error('Source and destination are the same');
+    }
+
+    const sourceStat = await fs.lstat(source.absolutePath);
+    if (sourceStat.isDirectory() && isSameOrDescendantPath(source.absolutePath, destination.absolutePath)) {
+      throw new Error('Cannot move a folder into itself');
+    }
+
+    await ensureParentDirectoryExists(destination.absolutePath);
+    await ensureDestinationAvailable(destination.absolutePath);
+    await moveEntryRecursive(source.absolutePath, destination.absolutePath);
+
+    return {
+      absolutePath: destination.absolutePath,
+      relativePath: destination.relativePath,
+    };
+  }
+
+  public async deleteEntry(
+    request: WorkspaceDeleteEntryRequest,
+  ): Promise<WorkspaceDeleteEntryResult> {
+    const workspacePath = path.resolve(request.workspacePath);
+    const target = resolveWorkspaceEntryPath(workspacePath, request.targetPath);
+
+    if (target.relativePath.length === 0) {
+      throw new Error('Cannot delete the workspace root');
+    }
+
+    await fs.lstat(target.absolutePath);
+    await deleteEntryRecursive(target.absolutePath);
+
+    return {
+      deleted: true,
+    };
   }
 
   private async readGitStatus(workspacePath: string): Promise<WorkspaceGitStatusResult> {

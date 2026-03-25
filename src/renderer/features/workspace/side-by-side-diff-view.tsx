@@ -1,136 +1,23 @@
 import * as React from 'react';
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
-import 'monaco-editor/min/vs/editor/editor.main.css';
-import 'monaco-editor/esm/vs/basic-languages/css/css.contribution';
-import 'monaco-editor/esm/vs/basic-languages/go/go.contribution';
-import 'monaco-editor/esm/vs/basic-languages/html/html.contribution';
-import 'monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution';
-import 'monaco-editor/esm/vs/basic-languages/java/java.contribution';
-import 'monaco-editor/esm/vs/basic-languages/kotlin/kotlin.contribution';
-import 'monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution';
-import 'monaco-editor/esm/vs/basic-languages/python/python.contribution';
-import 'monaco-editor/esm/vs/basic-languages/ruby/ruby.contribution';
-import 'monaco-editor/esm/vs/basic-languages/rust/rust.contribution';
-import 'monaco-editor/esm/vs/basic-languages/shell/shell.contribution';
-import 'monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution';
-import 'monaco-editor/esm/vs/basic-languages/xml/xml.contribution';
-import 'monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution';
-import 'monaco-editor/esm/vs/language/json/monaco.contribution';
-// eslint-disable-next-line import/default
-import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-// eslint-disable-next-line import/default
-import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
-// eslint-disable-next-line import/default
-import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
-// eslint-disable-next-line import/default
-import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
-// eslint-disable-next-line import/default
-import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 import { cn } from '@renderer/lib/cn';
-
-interface MonacoEnvironmentGlobal {
-  MonacoEnvironment?: {
-    getWorker: (_moduleId: string, label: string) => Worker;
-  };
-}
-
-const monacoGlobal = globalThis as typeof globalThis & MonacoEnvironmentGlobal;
-
-monacoGlobal.MonacoEnvironment = {
-  ...(monacoGlobal.MonacoEnvironment ?? {}),
-  getWorker: (_moduleId, label) => {
-    if (label === 'json') {
-      return new jsonWorker();
-    }
-
-    if (label === 'css' || label === 'scss' || label === 'less') {
-      return new cssWorker();
-    }
-
-    if (label === 'html' || label === 'handlebars' || label === 'razor') {
-      return new htmlWorker();
-    }
-
-    if (label === 'typescript' || label === 'javascript') {
-      return new tsWorker();
-    }
-
-    return new editorWorker();
-  },
-};
+import { ensureMonacoSetup, getMonacoLanguage } from '@renderer/lib/monaco-setup';
+import { ensureMonacoThemes } from '@renderer/lib/monaco-theme';
+import {
+  readResolvedCodeFontFamily,
+  readResolvedMonacoTheme,
+} from '@renderer/store/ui-preferences';
 
 const MAX_DIFF_PREVIEW_CHARACTERS = 400_000;
 const GUTTER_OVERLAY_WIDTH = 44;
 const ORIGINAL_RIGHT_GUTTER_INSET = 0;
 
-const getMonacoTheme = (): 'vs' | 'vs-dark' =>
-  document.documentElement.dataset.zeroadeTheme === 'dark' ? 'vs-dark' : 'vs';
+const getMonacoTheme = (): string =>
+  readResolvedMonacoTheme();
 
 const getOpaqueEditorBackground = (): string =>
-  getMonacoTheme() === 'vs-dark' ? '#1e1e1e' : '#ffffff';
+  getMonacoTheme() === 'zeroade-editor-dark' ? '#1e1e1e' : '#ffffff';
 
-const getFileExtension = (filePath: string): string => {
-  const normalizedPath = filePath.replaceAll('\\', '/');
-  const fileName = normalizedPath.split('/').filter(Boolean).at(-1) ?? normalizedPath;
-  const parts = fileName.toLowerCase().split('.');
-  if (parts.length < 2) {
-    return '';
-  }
-
-  return parts.at(-1) ?? '';
-};
-
-const getMonacoLanguage = (filePath: string): string => {
-  const extension = getFileExtension(filePath);
-
-  if (extension === 'ts' || extension === 'tsx') {
-    return 'typescript';
-  }
-  if (extension === 'js' || extension === 'jsx' || extension === 'mjs' || extension === 'cjs') {
-    return 'javascript';
-  }
-  if (extension === 'json') {
-    return 'json';
-  }
-  if (extension === 'go') {
-    return 'go';
-  }
-  if (extension === 'java') {
-    return 'java';
-  }
-  if (extension === 'kt' || extension === 'kts') {
-    return 'kotlin';
-  }
-  if (extension === 'md') {
-    return 'markdown';
-  }
-  if (extension === 'py') {
-    return 'python';
-  }
-  if (extension === 'rb') {
-    return 'ruby';
-  }
-  if (extension === 'rs') {
-    return 'rust';
-  }
-  if (extension === 'css' || extension === 'scss' || extension === 'less') {
-    return 'css';
-  }
-  if (extension === 'html') {
-    return 'html';
-  }
-  if (extension === 'xml') {
-    return 'xml';
-  }
-  if (extension === 'yml' || extension === 'yaml') {
-    return 'yaml';
-  }
-  if (extension === 'sh' || extension === 'zsh' || extension === 'bash') {
-    return 'shell';
-  }
-
-  return 'plaintext';
-};
 
 const getModelUri = (
   filePath: string,
@@ -401,6 +288,8 @@ export const SideBySideDiffView = ({
     }
 
     try {
+      ensureMonacoSetup();
+      ensureMonacoThemes();
       const editor = monaco.editor.createDiffEditor(editorHost, {
         theme: getMonacoTheme(),
         automaticLayout: true,
@@ -421,7 +310,7 @@ export const SideBySideDiffView = ({
         minimap: { enabled: false },
         fontSize: 13,
         lineHeight: 21,
-        fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+        fontFamily: readResolvedCodeFontFamily(),
         scrollbar: {
           horizontalScrollbarSize: 8,
           verticalScrollbarSize: 8,
@@ -480,7 +369,12 @@ export const SideBySideDiffView = ({
 
   React.useEffect(() => {
     const applyTheme = (): void => {
+      ensureMonacoSetup();
+      ensureMonacoThemes();
       monaco.editor.setTheme(getMonacoTheme());
+      editorRef.current?.updateOptions({
+        fontFamily: readResolvedCodeFontFamily(),
+      });
     };
 
     applyTheme();

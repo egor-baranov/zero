@@ -22,6 +22,7 @@ interface UseWorkspaceReviewResult {
   activeReviewFile: ReviewFileState | null;
   activeReviewFilePath: string | null;
   openFileTree: () => Promise<void>;
+  refreshFileTree: () => Promise<void>;
   closeFileTree: () => void;
   closeReviewPanel: () => void;
   toggleReviewPanelVisibility: () => void;
@@ -32,6 +33,7 @@ interface UseWorkspaceReviewResult {
   reorderReviewFiles: (sourcePath: string, targetPath: string) => void;
   revealReviewFile: () => Promise<void>;
   refreshReviewFile: () => Promise<void>;
+  refreshReviewPath: (path: string) => Promise<void>;
 }
 
 const mapPathToWorkspace = (workspacePath: string, filePath: string): string => {
@@ -70,6 +72,11 @@ export const useWorkspaceReview = (
   const [reviewFiles, setReviewFiles] = React.useState<ReviewFileState[]>([]);
   const [isReviewPanelVisible, setIsReviewPanelVisible] = React.useState(true);
   const [activeReviewFilePath, setActiveReviewFilePath] = React.useState<string | null>(null);
+  const reviewFilesRef = React.useRef<ReviewFileState[]>([]);
+
+  React.useEffect(() => {
+    reviewFilesRef.current = reviewFiles;
+  }, [reviewFiles]);
 
   const activeReviewFile = React.useMemo(() => {
     if (!activeReviewFilePath) {
@@ -324,6 +331,37 @@ export const useWorkspaceReview = (
     }
   }, [activeReviewFile, resolveDiffReviewData, resolveReviewData]);
 
+  const refreshReviewPath = React.useCallback(
+    async (path: string): Promise<void> => {
+      const matchingTabs = reviewFilesRef.current.filter((file) => file.relativePath === path);
+
+      if (matchingTabs.length === 0) {
+        return;
+      }
+
+      const refreshedTabs = await Promise.all(
+        matchingTabs.map((tab) =>
+          tab.kind === 'diff' ? resolveDiffReviewData(path) : resolveReviewData(path),
+        ),
+      );
+
+      setReviewFiles((previous) => {
+        let next = previous;
+
+        for (const refreshed of refreshedTabs) {
+          if (!refreshed) {
+            continue;
+          }
+
+          next = upsertReviewFile(next, refreshed);
+        }
+
+        return next;
+      });
+    },
+    [resolveDiffReviewData, resolveReviewData],
+  );
+
   return {
     isFileTreeOpen,
     isReviewPanelOpen,
@@ -335,6 +373,7 @@ export const useWorkspaceReview = (
     activeReviewFile,
     activeReviewFilePath,
     openFileTree,
+    refreshFileTree: loadFileTree,
     closeFileTree,
     closeReviewPanel,
     toggleReviewPanelVisibility,
@@ -345,5 +384,6 @@ export const useWorkspaceReview = (
     reorderReviewFiles,
     revealReviewFile,
     refreshReviewFile,
+    refreshReviewPath,
   };
 };

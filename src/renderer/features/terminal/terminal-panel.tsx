@@ -13,10 +13,14 @@ const TERMINAL_PANEL_HEIGHT_MIN = 0;
 const TERMINAL_PANEL_HEIGHT_MAX = 680;
 const TERMINAL_PANEL_HEIGHT_COLLAPSE_THRESHOLD = 48;
 
+const isDarkTheme = (): boolean => document.documentElement.dataset.zeroadeTheme === 'dark';
+
+const getTerminalSurfaceColor = (): string => (isDarkTheme() ? '#101013' : '#fdfdff');
+
 const getTerminalTheme = () => {
-  if (document.documentElement.dataset.zeroadeTheme === 'dark') {
+  if (isDarkTheme()) {
     return {
-      background: '#0f0f12',
+      background: getTerminalSurfaceColor(),
       foreground: '#d4d4d8',
       cursor: '#f5f5f5',
       selectionBackground: '#2a2a30',
@@ -24,7 +28,7 @@ const getTerminalTheme = () => {
   }
 
   return {
-    background: '#fdfdff',
+    background: getTerminalSurfaceColor(),
     foreground: '#2f2d2b',
     cursor: '#2f2d2b',
     selectionBackground: '#dce3f4',
@@ -60,6 +64,7 @@ interface TerminalTabSessionProps {
   tab: TerminalTab;
   active: boolean;
   open: boolean;
+  surfaceColor: string;
   runRequest: {
     id: number;
     configurationId: string;
@@ -122,6 +127,7 @@ const TerminalTabSession = ({
   tab,
   active,
   open,
+  surfaceColor,
   runRequest,
   interruptRequest,
   onRunRequestHandled,
@@ -374,7 +380,13 @@ const TerminalTabSession = ({
     };
   }, []);
 
-  return <div ref={terminalContainerRef} className="h-full w-full overflow-auto rounded-md bg-[#fdfdff]" />;
+  return (
+    <div
+      ref={terminalContainerRef}
+      className="h-full w-full overflow-auto rounded-md"
+      style={{ backgroundColor: surfaceColor }}
+    />
+  );
 };
 
 export const TerminalPanel = ({
@@ -395,6 +407,7 @@ export const TerminalPanel = ({
   const [activeTabId, setActiveTabId] = React.useState(initialTab.current.id);
   const [draggingTabId, setDraggingTabId] = React.useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = React.useState<string | null>(null);
+  const [surfaceColor, setSurfaceColor] = React.useState(() => getTerminalSurfaceColor());
   const [panelHeight, setPanelHeight] = React.useState<number>(() => readStoredPanelHeight());
   const [isResizing, setIsResizing] = React.useState(false);
   const [pendingRunRequest, setPendingRunRequest] = React.useState<{
@@ -433,6 +446,17 @@ export const TerminalPanel = ({
       setActiveTabId(tabs[0]?.id ?? '');
     }
   }, [activeTabId, tabs]);
+
+  React.useEffect(() => {
+    const syncSurfaceColor = (): void => {
+      setSurfaceColor(getTerminalSurfaceColor());
+    };
+
+    window.addEventListener('zeroade-ui-preferences-changed', syncSurfaceColor);
+    return () => {
+      window.removeEventListener('zeroade-ui-preferences-changed', syncSurfaceColor);
+    };
+  }, []);
 
   React.useEffect(() => {
     if (!open || tabs.length > 0) {
@@ -699,9 +723,12 @@ export const TerminalPanel = ({
 
   return (
     <section
-      style={{ height: open ? panelHeight : 0 }}
+      style={{
+        height: open ? panelHeight : 0,
+        backgroundColor: surfaceColor,
+      }}
       className={cn(
-        'relative overflow-hidden border-t border-stone-200/75 bg-[#fdfdff] transition-[height] duration-200',
+        'relative overflow-hidden border-t border-stone-200/75 transition-[height] duration-200',
         isResizing && 'transition-none',
       )}
     >
@@ -716,7 +743,10 @@ export const TerminalPanel = ({
       ) : null}
 
       <div className="flex h-full min-h-0 flex-col">
-        <div className="flex h-10 shrink-0 items-center gap-1.5 bg-white/85 px-2.5">
+        <div
+          className="flex h-10 shrink-0 items-center gap-1.5 px-2.5"
+          style={{ backgroundColor: surfaceColor }}
+        >
           <div className="scrollbar-none flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
             {tabs.map((tab) => {
               const isActive = tab.id === activeTabId;
@@ -815,7 +845,10 @@ export const TerminalPanel = ({
           </button>
         </div>
 
-        <div className="relative min-h-0 flex-1 overflow-hidden bg-[#fdfdff] px-2 py-1.5">
+        <div
+          className="relative min-h-0 flex-1 overflow-hidden px-2 py-1.5"
+          style={{ backgroundColor: surfaceColor }}
+        >
           {tabs.map((tab) => {
             const isActive = tab.id === activeTabId;
 
@@ -831,6 +864,7 @@ export const TerminalPanel = ({
                   tab={tab}
                   active={open && isActive}
                   open={open}
+                  surfaceColor={surfaceColor}
                   runRequest={activeRunRequest?.tabId === tab.id ? activeRunRequest : null}
                   interruptRequest={
                     activeExecution?.tabId === tab.id ? pendingInterruptRequest : null

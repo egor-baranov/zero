@@ -16,7 +16,7 @@ import type { AcpPermissionRequestEvent, AcpPromptAttachment } from '@shared/typ
 import type { TimelineItem } from '@renderer/store/use-acp';
 import type { WorkspaceGitFileStat } from '@shared/types/workspace';
 import { cn } from '@renderer/lib/cn';
-import { toLanguagePresentation } from '@renderer/lib/code-language-icons';
+import { toFileIconComponent, toLanguagePresentation } from '@renderer/lib/code-language-icons';
 import { InlineMonacoDiffEditor } from '@renderer/features/transcript/inline-monaco-diff-editor';
 import zeroLogo from '@renderer/assets/zero-logo.png';
 import { Dialog, DialogContent } from '@renderer/components/ui/dialog';
@@ -2085,6 +2085,7 @@ const TranscriptChangedFilesPanel = ({
           const isExpanded = Boolean(expandedDiffsByPath[file.path]);
           const diffPreview = inlineDiffsByPath[file.path];
           const isLastFile = index === resolvedFiles.length - 1;
+          const FileIcon = toFileIconComponent(file.label);
 
           return (
             <div key={file.path}>
@@ -2108,7 +2109,7 @@ const TranscriptChangedFilesPanel = ({
                   }}
                   onDoubleClick={() => onOpenFile(file.path)}
                 >
-                  <FileText className="h-4 w-4 shrink-0 text-stone-500" />
+                  <FileIcon className="h-4 w-4 shrink-0 text-stone-500" />
                   <span className="min-w-0 truncate">{file.label}</span>
                   {typeof file.additions === 'number' || typeof file.deletions === 'number' ? (
                     <span className="shrink-0 whitespace-nowrap text-[12px] font-medium">
@@ -2129,11 +2130,11 @@ const TranscriptChangedFilesPanel = ({
                     type="button"
                     aria-label={isExpanded ? 'Collapse diff preview' : 'Expand diff preview'}
                     className={cn(
-                      'no-drag inline-flex items-center justify-center rounded-full bg-transparent text-stone-600 transition-all hover:bg-stone-300/85 focus-visible:bg-stone-300/85',
+                      'composer-tone-hover no-drag inline-flex items-center justify-center rounded-full text-stone-500 transition-[opacity,transform,background-color,color] hover:text-stone-700 focus-visible:ring-0',
                       'h-7 w-7',
                       isExpanded
-                        ? 'opacity-100'
-                        : 'opacity-0 group-hover/file-row:opacity-100',
+                        ? 'bg-stone-100/80 text-stone-700 opacity-100'
+                        : 'opacity-0 group-hover/file-row:opacity-100 group-focus-within/file-row:opacity-100',
                     )}
                     onClick={(event) => {
                       event.stopPropagation();

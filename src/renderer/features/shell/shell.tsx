@@ -67,6 +67,38 @@ const getFolderName = (folderPath: string): string =>
   folderPath.split(/[\\/]/).filter(Boolean).pop() ?? folderPath;
 const normalizeMessageText = (value: string): string =>
   value.replace(/\s+/g, ' ').trim();
+const TIMELINE_SNAPSHOT_STORAGE_KEY = 'zeroade.shell.timeline-snapshots.v1';
+const EXTERNAL_LINK_SCHEME_PATTERN = /^[a-z][a-z\d+\-.]*:/i;
+const WINDOWS_ABSOLUTE_PATH_PATTERN = /^[a-zA-Z]:\//;
+
+const normalizeTranscriptFileHref = (href: string): string => {
+  const trimmed = href.trim();
+  if (trimmed.toLowerCase().startsWith('file://')) {
+    try {
+      const parsed = new URL(trimmed);
+      const decodedPath = decodeURIComponent(parsed.pathname);
+      const windowsPath = /^\/[a-zA-Z]:\//.test(decodedPath) ? decodedPath.slice(1) : decodedPath;
+      return windowsPath.replace(/#L\d+(?:C\d+)?$/i, '').replace(/:\d+(?::\d+)?$/, '');
+    } catch {
+      return trimmed;
+    }
+  }
+
+  return trimmed.replace(/#L\d+(?:C\d+)?$/i, '').replace(/:\d+(?::\d+)?$/, '');
+};
+
+const looksLikeWorkspaceFileLink = (href: string): boolean => {
+  const normalized = normalizeTranscriptFileHref(href);
+
+  return (
+    normalized.startsWith('/workspace/') ||
+    normalized.startsWith('/') ||
+    WINDOWS_ABSOLUTE_PATH_PATTERN.test(normalized) ||
+    normalized.startsWith('./') ||
+    normalized.startsWith('../') ||
+    normalized.includes('/')
+  );
+};
 
 interface RunTerminalRequest {
   id: number;
@@ -116,13 +148,19 @@ const getLatestTimelineMessage = (
 const createAssistantTimelineMessage = (
   text: string,
   options?: AssistantTimelineMessageOptions,
-): TimelineItem => ({
-  kind: 'assistant-message',
-  id: `assistant-system-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-  text,
-  noticeKind: options?.noticeKind,
-  iconUrl: options?.iconUrl ?? null,
-});
+): TimelineItem => {
+  const nowMs = Date.now();
+
+  return {
+    kind: 'assistant-message',
+    id: `assistant-system-${nowMs}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAtMs: nowMs,
+    updatedAtMs: nowMs,
+    text,
+    noticeKind: options?.noticeKind,
+    iconUrl: options?.iconUrl ?? null,
+  };
+};
 
 const appendAssistantTimelineMessage = (
   timeline: TimelineItem[],
@@ -179,6 +217,124 @@ const mergeTimelineItems = (
   return changed ? next : existing;
 };
 
+const isLocalTimelineNotice = (
+  item: TimelineItem,
+): item is TimelineItem & { kind: 'assistant-message' } =>
+  item.kind === 'assistant-message' && item.noticeKind === 'agent-change';
+
+const retainLocalTimelineNotices = (timeline: TimelineItem[]): TimelineItem[] =>
+  timeline.filter(isLocalTimelineNotice);
+
+const arePromptAttachmentsEqual = (
+  left: AcpPromptAttachment[] | undefined,
+  right: AcpPromptAttachment[] | undefined,
+): boolean => {
+  const leftEntries = left ?? [];
+  const rightEntries = right ?? [];
+
+  if (leftEntries.length !== rightEntries.length) {
+    return false;
+  }
+
+  return leftEntries.every((entry, index) => {
+    const other = rightEntries[index];
+    return (
+      entry.absolutePath === other.absolutePath &&
+      (entry.relativePath ?? '') === (other.relativePath ?? '') &&
+      (entry.displayPath ?? '') === (other.displayPath ?? '') &&
+      (entry.mimeType ?? '') === (other.mimeType ?? '')
+    );
+  });
+};
+
+const areTimelineItemsEquivalent = (left: TimelineItem, right: TimelineItem): boolean => {
+  if (left.kind !== right.kind) {
+    return false;
+  }
+
+  if (left.kind === 'user-message' && right.kind === 'user-message') {
+    return (
+      normalizeMessageText(left.text) === normalizeMessageText(right.text) &&
+      arePromptAttachmentsEqual(left.attachments, right.attachments)
+    );
+  }
+
+  if (left.kind === 'assistant-message' && right.kind === 'assistant-message') {
+    return (
+      normalizeMessageText(left.text) === normalizeMessageText(right.text) &&
+      (left.noticeKind ?? null) === (right.noticeKind ?? null) &&
+      (left.iconUrl ?? null) === (right.iconUrl ?? null)
+    );
+  }
+
+  if (left.kind === 'tool-call' && right.kind === 'tool-call') {
+    return left.toolCallId === right.toolCallId;
+  }
+
+  if (left.kind === 'plan' && right.kind === 'plan') {
+    return JSON.stringify(left.entries) === JSON.stringify(right.entries);
+  }
+
+  return false;
+};
+
+const reconcileTimelineItemTimestamps = (
+  sessionTimeline: TimelineItem[],
+  persistedTimeline: TimelineItem[],
+): TimelineItem[] => {
+  const persistedComparableItems = persistedTimeline.filter((item) => !isLocalTimelineNotice(item));
+  if (sessionTimeline.length === 0 || persistedComparableItems.length === 0) {
+    return sessionTimeline;
+  }
+
+  let searchStartIndex = 0;
+  let changed = false;
+
+  const reconciledItems = sessionTimeline.map((item) => {
+    for (let index = searchStartIndex; index < persistedComparableItems.length; index += 1) {
+      const persistedItem = persistedComparableItems[index];
+      if (!areTimelineItemsEquivalent(item, persistedItem)) {
+        continue;
+      }
+
+      searchStartIndex = index + 1;
+      if (
+        item.createdAtMs === persistedItem.createdAtMs &&
+        item.updatedAtMs === persistedItem.updatedAtMs
+      ) {
+        return item;
+      }
+
+      changed = true;
+      return {
+        ...item,
+        createdAtMs: persistedItem.createdAtMs,
+        updatedAtMs: persistedItem.updatedAtMs,
+      };
+    }
+
+    return item;
+  });
+
+  return changed ? reconciledItems : sessionTimeline;
+};
+
+const buildThreadTimelineFromSession = (
+  sessionTimeline: TimelineItem[],
+  persistedTimeline: TimelineItem[],
+): TimelineItem[] => {
+  const reconciledTimeline = reconcileTimelineItemTimestamps(
+    sessionTimeline,
+    persistedTimeline,
+  );
+  const retainedLocalNotices = retainLocalTimelineNotices(persistedTimeline);
+  if (retainedLocalNotices.length === 0) {
+    return reconciledTimeline;
+  }
+
+  return mergeTimelineItems(reconciledTimeline, retainedLocalNotices);
+};
+
 const toCustomAgentConfigSignature = (
   config: AcpCustomAgentConfig | null | undefined,
 ): string | null => {
@@ -219,6 +375,159 @@ interface ShellToast {
   message: string;
   tone: 'error' | 'info';
 }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+const normalizePersistedAttachment = (value: unknown): AcpPromptAttachment | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const absolutePath =
+    typeof value.absolutePath === 'string' ? value.absolutePath.trim() : '';
+  if (!absolutePath) {
+    return null;
+  }
+
+  return {
+    absolutePath,
+    relativePath:
+      typeof value.relativePath === 'string' && value.relativePath.trim().length > 0
+        ? value.relativePath.trim()
+        : undefined,
+    displayPath:
+      typeof value.displayPath === 'string' && value.displayPath.trim().length > 0
+        ? value.displayPath.trim()
+        : undefined,
+    mimeType:
+      typeof value.mimeType === 'string' && value.mimeType.trim().length > 0
+        ? value.mimeType.trim()
+        : undefined,
+  };
+};
+
+const normalizePersistedTimelineItem = (value: unknown): TimelineItem | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = typeof value.id === 'string' ? value.id.trim() : '';
+  const kind = typeof value.kind === 'string' ? value.kind : '';
+  if (!id || !kind) {
+    return null;
+  }
+
+  const createdAtMs =
+    typeof value.createdAtMs === 'number' && Number.isFinite(value.createdAtMs)
+      ? value.createdAtMs
+      : Date.now();
+  const updatedAtMs =
+    typeof value.updatedAtMs === 'number' && Number.isFinite(value.updatedAtMs)
+      ? value.updatedAtMs
+      : createdAtMs;
+
+  const base = {
+    id,
+    createdAtMs,
+    updatedAtMs,
+  };
+
+  if (kind === 'user-message') {
+    const text = typeof value.text === 'string' ? value.text : '';
+    const attachments = Array.isArray(value.attachments)
+      ? value.attachments
+          .map((attachment) => normalizePersistedAttachment(attachment))
+          .filter((attachment): attachment is AcpPromptAttachment => attachment !== null)
+      : [];
+
+    return {
+      ...base,
+      kind,
+      text,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    };
+  }
+
+  if (kind === 'assistant-message') {
+    return {
+      ...base,
+      kind,
+      text: typeof value.text === 'string' ? value.text : '',
+      noticeKind: value.noticeKind === 'agent-change' ? 'agent-change' : undefined,
+      iconUrl:
+        typeof value.iconUrl === 'string' || value.iconUrl === null
+          ? value.iconUrl
+          : undefined,
+    };
+  }
+
+  if (kind === 'plan') {
+    return {
+      ...base,
+      kind,
+      entries: Array.isArray(value.entries) ? value.entries : [],
+    };
+  }
+
+  if (kind === 'tool-call') {
+    const toolCallId =
+      typeof value.toolCallId === 'string' ? value.toolCallId.trim() : '';
+    if (!toolCallId) {
+      return null;
+    }
+
+    return {
+      ...base,
+      kind,
+      toolCallId,
+      title: typeof value.title === 'string' ? value.title : 'Tool call',
+      status: typeof value.status === 'string' ? value.status : 'unknown',
+      toolKind: typeof value.toolKind === 'string' ? value.toolKind : 'other',
+      locations: Array.isArray(value.locations)
+        ? value.locations.filter((location): location is string => typeof location === 'string')
+        : [],
+      rawInput: typeof value.rawInput === 'string' ? value.rawInput : undefined,
+      rawOutput: typeof value.rawOutput === 'string' ? value.rawOutput : undefined,
+    };
+  }
+
+  return null;
+};
+
+const readPersistedTimelineSnapshots = (): Record<string, TimelineItem[]> => {
+  const raw = window.localStorage.getItem(TIMELINE_SNAPSHOT_STORAGE_KEY);
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) {
+      return {};
+    }
+
+    const snapshots: Record<string, TimelineItem[]> = {};
+
+    for (const [threadId, value] of Object.entries(parsed)) {
+      if (!Array.isArray(value) || threadId.trim().length === 0) {
+        continue;
+      }
+
+      const items = value
+        .map((item) => normalizePersistedTimelineItem(item))
+        .filter((item): item is TimelineItem => item !== null);
+
+      if (items.length > 0) {
+        snapshots[threadId] = items;
+      }
+    }
+
+    return snapshots;
+  } catch {
+    return {};
+  }
+};
 
 interface RegistryLauncherDistribution {
   package: string;
@@ -263,9 +572,6 @@ const REVIEW_PANEL_WIDTH_MAX = 980;
 const REVIEW_PANEL_CHAT_MIN_WIDTH = 420;
 const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'gi');
 const LOOSE_ANSI_PATTERN = /\[(?:\d{1,3}(?:;\d{1,3})*)m/gi;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null;
 
 const toStringRecord = (value: unknown): Record<string, string> | undefined => {
   if (!isRecord(value)) {
@@ -671,6 +977,7 @@ export const Shell = (): JSX.Element => {
     codexAgentConfig,
     claudeAgentConfig,
     customAgentConfig,
+    activeSessionThreadId,
     activeTimeline,
     threadPromptingById,
     threadSessionTitleById,
@@ -715,7 +1022,7 @@ export const Shell = (): JSX.Element => {
   >({});
   const [timelineSnapshotByThreadId, setTimelineSnapshotByThreadId] = React.useState<
     Record<string, TimelineItem[]>
-  >({});
+  >(() => readPersistedTimelineSnapshots());
   const [toasts, setToasts] = React.useState<ShellToast[]>([]);
   const [updaterState, setUpdaterState] = React.useState<UpdaterState | null>(null);
   const [isUpdateActionPending, setIsUpdateActionPending] = React.useState(false);
@@ -812,6 +1119,7 @@ export const Shell = (): JSX.Element => {
     activeReviewFile,
     activeReviewFilePath,
     openFileTree,
+    refreshFileTree,
     closeFileTree,
     closeReviewPanel,
     toggleReviewPanelVisibility,
@@ -820,6 +1128,7 @@ export const Shell = (): JSX.Element => {
     setActiveReviewFile,
     closeReviewFile,
     reorderReviewFiles,
+    refreshReviewPath,
   } = useWorkspaceReview(workspacePath);
   const focusedReviewRelativePath = activeReviewFile?.relativePath ?? null;
 
@@ -1477,9 +1786,32 @@ export const Shell = (): JSX.Element => {
   }, [selectedThread, threadGroups]);
 
   React.useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        TIMELINE_SNAPSHOT_STORAGE_KEY,
+        JSON.stringify(timelineSnapshotByThreadId),
+      );
+    } catch {
+      // Keep the shell usable even if transcript persistence hits storage limits.
+    }
+  }, [timelineSnapshotByThreadId]);
+
+  React.useEffect(() => {
     const availableThreadIds = new Set(threadById.keys());
 
     setQueuedPromptsByThread((previous) => {
+      const nextEntries = Object.entries(previous).filter(([threadId]) =>
+        availableThreadIds.has(threadId),
+      );
+
+      if (nextEntries.length === Object.keys(previous).length) {
+        return previous;
+      }
+
+      return Object.fromEntries(nextEntries);
+    });
+
+    setTimelineSnapshotByThreadId((previous) => {
       const nextEntries = Object.entries(previous).filter(([threadId]) =>
         availableThreadIds.has(threadId),
       );
@@ -1704,6 +2036,35 @@ export const Shell = (): JSX.Element => {
     });
   }, []);
 
+  const handleOpenTranscriptLink = React.useCallback(
+    async (href: string) => {
+      const trimmedHref = href.trim();
+      if (!trimmedHref) {
+        return;
+      }
+
+      if (looksLikeWorkspaceFileLink(trimmedHref) || trimmedHref.toLowerCase().startsWith('file://')) {
+        const normalizedPath = normalizeTranscriptFileHref(trimmedHref);
+
+        try {
+          await openFile(normalizedPath);
+          return;
+        } catch {
+          setStatusText(`Could not open ${normalizedPath}`);
+          return;
+        }
+      }
+
+      if (EXTERNAL_LINK_SCHEME_PATTERN.test(trimmedHref)) {
+        handleOpenWebLink(trimmedHref);
+        return;
+      }
+
+      handleOpenWebLink(trimmedHref);
+    },
+    [handleOpenWebLink, openFile],
+  );
+
   const handleOpenBrowserPushUrl = React.useCallback(
     (url: string) => {
       setIsBrowserPushPanelOpen(false);
@@ -1802,31 +2163,35 @@ export const Shell = (): JSX.Element => {
     selectedThread && selectedThread.workspaceId.trim().length === 0,
   );
   const fallbackTimeline = timelineSnapshotByThreadId[selectedThreadId] ?? [];
+  const activeSessionBelongsToSelectedThread =
+    selectedThreadId.trim().length > 0 && activeSessionThreadId === selectedThreadId;
   const effectiveTimeline = React.useMemo(() => {
     if (isNewThread) {
       return [];
     }
 
-    if (fallbackTimeline.length === 0) {
-      return activeTimeline.items;
+    if (!activeSessionBelongsToSelectedThread) {
+      return fallbackTimeline;
     }
 
     if (activeTimeline.items.length === 0) {
       return fallbackTimeline;
     }
 
-    return mergeTimelineItems(fallbackTimeline, activeTimeline.items);
-  }, [activeTimeline.items, fallbackTimeline, isNewThread]);
-  const effectiveIsPrompting = isNewThread ? false : activeTimeline.isPrompting;
-  const effectivePendingPermission = isNewThread ? null : pendingPermission;
-  const hasSessionForSelectedThread = React.useMemo(
-    () => Object.prototype.hasOwnProperty.call(threadPromptingById, selectedThreadId),
-    [selectedThreadId, threadPromptingById],
-  );
+    return buildThreadTimelineFromSession(activeTimeline.items, fallbackTimeline);
+  }, [
+    activeSessionBelongsToSelectedThread,
+    activeTimeline.items,
+    fallbackTimeline,
+    isNewThread,
+  ]);
+  const effectiveIsPrompting = isNewThread ? false : Boolean(threadPromptingById[selectedThreadId]);
+  const effectivePendingPermission =
+    isNewThread || !activeSessionBelongsToSelectedThread ? null : pendingPermission;
   const effectiveSessionControls =
     selectedThreadId.trim().length === 0
       ? activeSessionControls
-      : hasSessionForSelectedThread
+      : activeSessionBelongsToSelectedThread
         ? activeSessionControls
         : null;
   const queuedPrompts = React.useMemo(
@@ -1889,15 +2254,11 @@ export const Shell = (): JSX.Element => {
       setAgentAuthMessage(null);
       setAgentSelectionEpoch((previous) => previous + 1);
       if (selection.preset === 'custom' && selection.customConfig) {
-        saveAgentConfig('custom', selection.customConfig, {
-          resetThreadId: selectedThreadId || undefined,
-        });
+        saveAgentConfig('custom', selection.customConfig);
         return;
       }
 
-      setAgentPreset(selection.preset, {
-        resetThreadId: selectedThreadId || undefined,
-      });
+      setAgentPreset(selection.preset);
     },
     [
       agentPreset,
@@ -1912,13 +2273,21 @@ export const Shell = (): JSX.Element => {
   );
 
   React.useEffect(() => {
-    if (isNewThread || !selectedThreadId || activeTimeline.items.length === 0) {
+    if (
+      isNewThread ||
+      !selectedThreadId ||
+      !activeSessionBelongsToSelectedThread ||
+      activeTimeline.items.length === 0
+    ) {
       return;
     }
 
     setTimelineSnapshotByThreadId((previous) => {
       const currentSnapshot = previous[selectedThreadId] ?? [];
-      const nextTimeline = mergeTimelineItems(currentSnapshot, activeTimeline.items);
+      const nextTimeline = buildThreadTimelineFromSession(
+        activeTimeline.items,
+        currentSnapshot,
+      );
       if (nextTimeline === currentSnapshot) {
         return previous;
       }
@@ -1928,7 +2297,12 @@ export const Shell = (): JSX.Element => {
         [selectedThreadId]: nextTimeline,
       };
     });
-  }, [activeTimeline.items, isNewThread, selectedThreadId]);
+  }, [
+    activeSessionBelongsToSelectedThread,
+    activeTimeline.items,
+    isNewThread,
+    selectedThreadId,
+  ]);
 
   React.useEffect(() => {
     if (isNewThread || !selectedThreadId || effectiveIsPrompting) {
@@ -2870,6 +3244,7 @@ export const Shell = (): JSX.Element => {
                 codexAgentConfig={codexAgentConfig}
                 claudeAgentConfig={claudeAgentConfig}
                 customAgentConfig={customAgentConfig}
+                onSelectAgentPreset={handleSelectAgentPreset}
               />
             </main>
           ) : (
@@ -2939,12 +3314,15 @@ export const Shell = (): JSX.Element => {
                     side="left"
                     files={files}
                     loading={isLoadingTree}
+                    workspacePath={workspacePath}
                     workspaceName={workspaceName}
                     activeFilePath={focusedReviewRelativePath}
                     onOpenFile={(path) => {
                       void openFile(path);
                     }}
+                    onRefreshFiles={refreshFileTree}
                     onCollapse={closeFileTree}
+                    onStatusText={setStatusText}
                   />
 
                   <CommitPanel
@@ -2987,11 +3365,14 @@ export const Shell = (): JSX.Element => {
                           <ReviewPanel
                             open={isReviewPanelOpen}
                             loading={isLoadingFile}
+                            workspacePath={workspacePath}
                             tabs={reviewFiles}
                             activeFilePath={activeReviewFilePath}
                             onSelectTab={setActiveReviewFile}
                             onCloseTab={closeReviewFile}
                             onReorderTabs={reorderReviewFiles}
+                            onRefreshPath={refreshReviewPath}
+                            onStatusText={setStatusText}
                           />
                         </div>
                       ) : null}
@@ -3027,7 +3408,9 @@ export const Shell = (): JSX.Element => {
                             onOpenFile={(path) => {
                               void openFile(path);
                             }}
-                            onOpenLink={handleOpenWebLink}
+                            onOpenLink={(href) => {
+                              void handleOpenTranscriptLink(href);
+                            }}
                             onSelectSuggestion={handleSelectLandingSuggestion}
                           />
                           {connectingStatusMessage ? (

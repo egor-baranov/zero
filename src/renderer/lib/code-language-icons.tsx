@@ -1,4 +1,5 @@
 import { Code2, FileText } from 'lucide-react';
+import { FaJava } from 'react-icons/fa6';
 import {
   SiC,
   SiCplusplus,
@@ -7,7 +8,7 @@ import {
   SiGnubash,
   SiHtml5,
   SiJavascript,
-  SiOpenjdk,
+  SiKotlin,
   SiPython,
   SiRust,
   SiTypescript,
@@ -30,7 +31,8 @@ const LANGUAGE_PRESENTATION: Record<string, LanguagePresentation> = {
   yml: { label: 'YAML', Icon: SiYaml },
   html: { label: 'HTML', Icon: SiHtml5 },
   css: { label: 'CSS', Icon: SiCss },
-  java: { label: 'Java', Icon: SiOpenjdk },
+  java: { label: 'Java', Icon: FaJava },
+  kotlin: { label: 'Kotlin', Icon: SiKotlin },
   go: { label: 'Go', Icon: SiGo },
   rust: { label: 'Rust', Icon: SiRust },
   c: { label: 'C', Icon: SiC },
@@ -58,6 +60,8 @@ const FILE_EXTENSION_TO_LANGUAGE: Record<string, string> = {
   scss: 'css',
   less: 'css',
   java: 'java',
+  kt: 'kotlin',
+  kts: 'kotlin',
   go: 'go',
   rs: 'rust',
   c: 'c',

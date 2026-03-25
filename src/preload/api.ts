@@ -23,6 +23,27 @@ import type {
   AcpSessionNewResult,
 } from '@shared/types/acp';
 import type {
+  SkillsDeleteRequest,
+  SkillsDeleteResult,
+  SkillsReadRequest,
+  SkillsReadResult,
+  SkillsWriteRequest,
+  SkillsWriteResult,
+} from '@shared/types/skills';
+import type {
+  LspCompletionRequest,
+  LspCompletionResult,
+  LspDefinitionResult,
+  LspDocumentCloseRequest,
+  LspDocumentSyncRequest,
+  LspDocumentSyncResult,
+  LspHoverResult,
+  LspReferencesRequest,
+  LspReferencesResult,
+  LspRendererEvent,
+  LspTextDocumentPositionRequest,
+} from '@shared/types/lsp';
+import type {
   DesktopApi,
   OpenAttachmentFileRequest,
   OpenAttachmentFileResult,
@@ -31,12 +52,18 @@ import type {
   ReadAttachmentPreviewResult,
 } from '@shared/types/preload';
 import type {
+  WorkspaceCopyEntryRequest,
+  WorkspaceCopyEntryResult,
+  WorkspaceDeleteEntryRequest,
+  WorkspaceDeleteEntryResult,
   WorkspaceGitCommitRequest,
   WorkspaceDiffFileRequest,
   WorkspaceDiffFileResult,
   WorkspaceGitCheckoutBranchRequest,
   WorkspaceGitCreateBranchRequest,
   WorkspaceGitMutationResult,
+  WorkspaceMoveEntryRequest,
+  WorkspaceMoveEntryResult,
   WorkspaceGitPushRequest,
   WorkspaceGitStatusRequest,
   WorkspaceGitStatusResult,
@@ -44,6 +71,8 @@ import type {
   WorkspaceListFilesResult,
   WorkspaceReadFileRequest,
   WorkspaceReadFileResult,
+  WorkspaceWriteFileRequest,
+  WorkspaceWriteFileResult,
   WorkspaceRevealFileRequest,
   WorkspaceRevealFileResult,
 } from '@shared/types/workspace';
@@ -89,10 +118,26 @@ export const desktopApi: DesktopApi = {
     request: WorkspaceReadFileRequest,
   ): Promise<WorkspaceReadFileResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.workspaceReadFile, request),
+  workspaceWriteFile: (
+    request: WorkspaceWriteFileRequest,
+  ): Promise<WorkspaceWriteFileResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.workspaceWriteFile, request),
   workspaceDiffFile: (
     request: WorkspaceDiffFileRequest,
   ): Promise<WorkspaceDiffFileResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.workspaceDiffFile, request),
+  workspaceCopyEntry: (
+    request: WorkspaceCopyEntryRequest,
+  ): Promise<WorkspaceCopyEntryResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.workspaceCopyEntry, request),
+  workspaceMoveEntry: (
+    request: WorkspaceMoveEntryRequest,
+  ): Promise<WorkspaceMoveEntryResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.workspaceMoveEntry, request),
+  workspaceDeleteEntry: (
+    request: WorkspaceDeleteEntryRequest,
+  ): Promise<WorkspaceDeleteEntryResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.workspaceDeleteEntry, request),
   workspaceGitStatus: (
     request: WorkspaceGitStatusRequest,
   ): Promise<WorkspaceGitStatusResult> =>
@@ -117,6 +162,45 @@ export const desktopApi: DesktopApi = {
     request: WorkspaceRevealFileRequest,
   ): Promise<WorkspaceRevealFileResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.workspaceRevealFile, request),
+  lspDocumentSync: (
+    request: LspDocumentSyncRequest,
+  ): Promise<LspDocumentSyncResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspDocumentSync, request),
+  lspDocumentClose: (
+    request: LspDocumentCloseRequest,
+  ): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspDocumentClose, request),
+  lspHover: (
+    request: LspTextDocumentPositionRequest,
+  ): Promise<LspHoverResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspHover, request),
+  lspCompletion: (
+    request: LspCompletionRequest,
+  ): Promise<LspCompletionResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspCompletion, request),
+  lspDefinition: (
+    request: LspTextDocumentPositionRequest,
+  ): Promise<LspDefinitionResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspDefinition, request),
+  lspDeclaration: (
+    request: LspTextDocumentPositionRequest,
+  ): Promise<LspDefinitionResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspDeclaration, request),
+  lspReferences: (
+    request: LspReferencesRequest,
+  ): Promise<LspReferencesResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspReferences, request),
+  onLspEvent: (listener: (event: LspRendererEvent) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, payload: LspRendererEvent) => {
+      listener(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.lspEvent, handler);
+
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.lspEvent, handler);
+    };
+  },
   acpInitialize: (request: AcpInitializeRequest): Promise<AcpInitializeResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.acpInitialize, request),
   acpSessionNew: (request: AcpSessionNewRequest): Promise<AcpSessionNewResult> =>
@@ -156,6 +240,13 @@ export const desktopApi: DesktopApi = {
       ipcRenderer.removeListener(IPC_CHANNELS.acpEvent, handler);
     };
   },
+  skillsList: () => ipcRenderer.invoke(IPC_CHANNELS.skillsList),
+  skillsRead: (request: SkillsReadRequest): Promise<SkillsReadResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.skillsRead, request),
+  skillsWrite: (request: SkillsWriteRequest): Promise<SkillsWriteResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.skillsWrite, request),
+  skillsDelete: (request: SkillsDeleteRequest): Promise<SkillsDeleteResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.skillsDelete, request),
   terminalCreate: (request: TerminalCreateRequest): Promise<TerminalCreateResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.terminalCreate, request),
   terminalWrite: (request: TerminalWriteRequest): Promise<void> =>

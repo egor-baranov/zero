@@ -1,15 +1,27 @@
 import * as React from 'react';
 import {
   ArrowLeft,
-  CircleDashed,
+  Bot,
   ChevronDown,
   Check,
+  ExternalLink,
+  FolderSearch,
   GitBranch,
+  Loader2,
   Palette,
+  Pencil,
+  Plus,
   Plug,
+  RefreshCw,
+  Search,
   SlidersHorizontal,
+  Sparkles,
+  Trash2,
 } from 'lucide-react';
 import { cn } from '@renderer/lib/cn';
+import { Button } from '@renderer/components/ui/button';
+import { Avatar, AvatarFallback, AvatarImage } from '@renderer/components/ui/avatar';
+import { Dialog, DialogContent } from '@renderer/components/ui/dialog';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -22,17 +34,31 @@ import {
   type AppNotificationItem,
 } from '@renderer/store/browser-pushes';
 import type { AcpAgentPreset } from '@renderer/store/use-acp';
+import type { AgentPresetSelection } from '@renderer/features/composer/composer';
 import { useRunConfigurations } from '@renderer/store/use-run-configurations';
 import {
   applyUiPreferences,
+  getCodeFontFamily,
+  getEditorThemePresetDefaults,
+  parseEditorThemeFromClipboard,
   readUiPreferences,
+  serializeEditorThemeForClipboard,
   type AccentColorPreference,
+  type CodeFontPreference,
+  type EditorThemeMode,
+  type EditorThemePreset,
+  type EditorThemeSettings,
   type UiPreferences,
   writeAccentColorPreference,
+  writeEditorThemesPreference,
   writeThemePreference,
 } from '@renderer/store/ui-preferences';
 import { McpSettingsSection } from '@renderer/features/settings/mcp-settings-section';
 import type { AcpCustomAgentConfig } from '@shared/types/acp';
+import type {
+  SkillSummary,
+  SkillsListResult,
+} from '@shared/types/skills';
 import type { WorkspaceGitStatusResult } from '@shared/types/workspace';
 
 interface SettingsLayoutProps {
@@ -46,12 +72,14 @@ interface SettingsLayoutProps {
   codexAgentConfig: AcpCustomAgentConfig | null;
   claudeAgentConfig: AcpCustomAgentConfig | null;
   customAgentConfig: AcpCustomAgentConfig | null;
+  onSelectAgentPreset: (selection: AgentPresetSelection) => void;
 }
 
 const sections = [
   { id: 'general', label: 'General', icon: SlidersHorizontal },
-  { id: 'configuration', label: 'Configuration', icon: CircleDashed },
-  { id: 'personalization', label: 'Personalization', icon: Palette },
+  { id: 'appearance', label: 'Appearance', icon: Palette },
+  { id: 'agents', label: 'Agents', icon: Bot },
+  { id: 'skills', label: 'Skills', icon: Sparkles },
   { id: 'mcp', label: 'MCP servers', icon: Plug },
   { id: 'git', label: 'Git', icon: GitBranch },
 ] as const;
@@ -62,6 +90,79 @@ interface AccentOption {
   value: AccentColorPreference;
   label: string;
   swatch: string;
+}
+
+interface EditorThemePresetOption {
+  value: Exclude<EditorThemePreset, 'custom'>;
+  label: string;
+  badgeLightBackground: string;
+  badgeLightForeground: string;
+  badgeDarkBackground: string;
+  badgeDarkForeground: string;
+}
+
+interface CodeFontOption {
+  value: CodeFontPreference;
+  label: string;
+}
+
+interface StoredCustomAgentEntry {
+  id: string;
+  label: string;
+  config: AcpCustomAgentConfig;
+  registryAgentId?: string;
+}
+
+interface CustomAgentOption {
+  id: string;
+  label: string;
+  iconUrl: string | null;
+  config: AcpCustomAgentConfig;
+  registryAgentId?: string;
+}
+
+interface RegistryLauncherDistribution {
+  package: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+interface RegistryBinaryDistributionTarget {
+  archive?: string;
+  cmd?: string;
+  args?: string[];
+}
+
+interface RegistryAgent {
+  id: string;
+  name: string;
+  version?: string;
+  description?: string;
+  repository?: string;
+  icon?: string;
+  distribution?: {
+    npx?: RegistryLauncherDistribution;
+    uvx?: RegistryLauncherDistribution;
+    binary?: Record<string, RegistryBinaryDistributionTarget>;
+  };
+}
+
+interface RegistryLaunchTemplate {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  source: 'npx' | 'uvx' | 'binary' | 'manual';
+  autoConfigurable: boolean;
+  preview: string;
+}
+
+interface AgentEditorState {
+  customAgentId: string | 'new';
+  title: string;
+  command: string;
+  args: string;
+  cwd: string;
+  env: string;
 }
 
 const accentOptions: AccentOption[] = [
@@ -75,6 +176,137 @@ const accentOptions: AccentOption[] = [
   { value: 'black', label: 'Black', swatch: '#171717' },
 ];
 
+const editorThemePresetOptions: EditorThemePresetOption[] = [
+  {
+    value: 'absolutely',
+    label: 'Absolutely',
+    badgeLightBackground: '#fff0e8',
+    badgeLightForeground: '#d9825b',
+    badgeDarkBackground: '#2b1e18',
+    badgeDarkForeground: '#ffb487',
+  },
+  {
+    value: 'catppuccin',
+    label: 'Catppuccin',
+    badgeLightBackground: '#f0e6ff',
+    badgeLightForeground: '#8b5cf6',
+    badgeDarkBackground: '#302749',
+    badgeDarkForeground: '#cba6f7',
+  },
+  {
+    value: 'zero',
+    label: 'Zero',
+    badgeLightBackground: '#e7f0ff',
+    badgeLightForeground: '#0169cc',
+    badgeDarkBackground: '#101828',
+    badgeDarkForeground: '#6cc6ff',
+  },
+  {
+    value: 'everforest',
+    label: 'Everforest',
+    badgeLightBackground: '#f2f0d8',
+    badgeLightForeground: '#8aaa4a',
+    badgeDarkBackground: '#233229',
+    badgeDarkForeground: '#a7c080',
+  },
+  {
+    value: 'github',
+    label: 'GitHub',
+    badgeLightBackground: '#eef5ff',
+    badgeLightForeground: '#0969da',
+    badgeDarkBackground: '#0d1b2a',
+    badgeDarkForeground: '#58a6ff',
+  },
+  {
+    value: 'gruvbox',
+    label: 'Gruvbox',
+    badgeLightBackground: '#f8edbd',
+    badgeLightForeground: '#458588',
+    badgeDarkBackground: '#312a1c',
+    badgeDarkForeground: '#fabd2f',
+  },
+  {
+    value: 'linear',
+    label: 'Linear',
+    badgeLightBackground: '#f2f4ff',
+    badgeLightForeground: '#5e6ad2',
+    badgeDarkBackground: '#171b2d',
+    badgeDarkForeground: '#9da7ff',
+  },
+  {
+    value: 'notion',
+    label: 'Notion',
+    badgeLightBackground: '#f7f7f5',
+    badgeLightForeground: '#3b3b3b',
+    badgeDarkBackground: '#222222',
+    badgeDarkForeground: '#f5f5f5',
+  },
+  {
+    value: 'one',
+    label: 'One',
+    badgeLightBackground: '#eef2ff',
+    badgeLightForeground: '#4f6df5',
+    badgeDarkBackground: '#232834',
+    badgeDarkForeground: '#61afef',
+  },
+  {
+    value: 'paper',
+    label: 'Paper',
+    badgeLightBackground: '#eef4ff',
+    badgeLightForeground: '#1d4ed8',
+    badgeDarkBackground: '#1c2432',
+    badgeDarkForeground: '#7cc7ff',
+  },
+  {
+    value: 'graphite',
+    label: 'Graphite',
+    badgeLightBackground: '#eaf4f5',
+    badgeLightForeground: '#0f766e',
+    badgeDarkBackground: '#13262b',
+    badgeDarkForeground: '#4fd1c5',
+  },
+];
+
+const getEditorThemePresetOption = (
+  value: EditorThemePreset,
+): EditorThemePresetOption | null => {
+  if (value === 'custom') {
+    return null;
+  }
+
+  return editorThemePresetOptions.find((option) => option.value === value) ?? null;
+};
+
+const codeFontOptions: CodeFontOption[] = [
+  { value: 'system', label: 'System Mono' },
+  { value: 'sf-mono', label: 'SF Mono' },
+  { value: 'menlo', label: 'Menlo' },
+];
+
+const ACP_REGISTRY_URL =
+  'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json';
+const CUSTOM_AGENT_LIBRARY_KEY = 'zeroade.acp.custom-agent-library.v1';
+const ACTIVE_CUSTOM_AGENT_ID_KEY = 'zeroade.acp.custom-agent-active-id.v1';
+const KNOWN_CUSTOM_AGENT_LABEL_BY_COMMAND: Record<string, string> = {
+  opencode: 'OpenCode',
+};
+
+const getWindowBackgroundColor = (mode: EditorThemeMode): string =>
+  mode === 'light' ? '#fdfdff' : '#101013';
+
+const hexToRgba = (value: string, alpha: number): string => {
+  const normalized = value.replace('#', '');
+  const expanded =
+    normalized.length === 3
+      ? `${normalized[0]}${normalized[0]}${normalized[1]}${normalized[1]}${normalized[2]}${normalized[2]}`
+      : normalized;
+  const r = Number.parseInt(expanded.slice(0, 2), 16);
+  const g = Number.parseInt(expanded.slice(2, 4), 16);
+  const b = Number.parseInt(expanded.slice(4, 6), 16);
+
+  return `rgba(${r}, ${g}, ${b}, ${Math.min(Math.max(alpha, 0), 1)})`;
+};
+
 const getFolderName = (folderPath: string): string =>
   folderPath.split(/[\\/]/).filter(Boolean).pop() ?? folderPath;
 
@@ -83,6 +315,425 @@ const truncateText = (value: string, maxLength = 68): string =>
 
 const toCountLabel = (value: number, singular: string, plural = `${singular}s`): string =>
   `${value.toLocaleString()} ${value === 1 ? singular : plural}`;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+const toStringRecord = (value: unknown): Record<string, string> | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] => typeof entry[1] === 'string',
+  );
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
+};
+
+const toCustomAgentConfigFromUnknown = (value: unknown): AcpCustomAgentConfig | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const command = typeof value.command === 'string' ? value.command.trim() : '';
+  if (!command) {
+    return null;
+  }
+
+  const args = Array.isArray(value.args)
+    ? value.args.filter(
+        (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
+      )
+    : [];
+  const cwd =
+    typeof value.cwd === 'string' && value.cwd.trim().length > 0
+      ? value.cwd.trim()
+      : undefined;
+  const env = toStringRecord(value.env);
+
+  return {
+    command,
+    args,
+    cwd,
+    env,
+  };
+};
+
+const normalizeCustomAgentConfig = (
+  config: AcpCustomAgentConfig,
+): AcpCustomAgentConfig | null => toCustomAgentConfigFromUnknown(config);
+
+const toExecutableCommand = (rawCommand: string): string => {
+  const trimmed = rawCommand.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  if (/^[.][\\/]/.test(trimmed)) {
+    const withoutPrefix = trimmed.replace(/^[.][\\/]+/, '');
+    const segments = withoutPrefix.split(/[\\/]/).filter(Boolean);
+    return segments.at(-1) ?? withoutPrefix;
+  }
+
+  return trimmed;
+};
+
+const toNormalizedCommandToken = (value: string): string =>
+  toExecutableCommand(value)
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .at(-1)
+    ?.replace(/\.exe$/i, '')
+    .toLowerCase() ?? '';
+
+const toNormalizedArgsList = (args: string[]): string[] =>
+  args.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+
+const isArgsPrefixCompatible = (left: string[], right: string[]): boolean => {
+  if (left.length === 0 || right.length === 0) {
+    return true;
+  }
+
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length <= right.length ? right : left;
+  return shorter.every((entry, index) => longer[index] === entry);
+};
+
+const toKnownCustomAgentLabel = (command: string | undefined): string | null => {
+  if (!command) {
+    return null;
+  }
+
+  const token = toNormalizedCommandToken(command);
+  if (!token) {
+    return null;
+  }
+
+  return KNOWN_CUSTOM_AGENT_LABEL_BY_COMMAND[token] ?? null;
+};
+
+const toCustomAgentConfigSignature = (config: AcpCustomAgentConfig | null | undefined): string =>
+  config
+    ? JSON.stringify({
+        command: config.command.trim(),
+        args: config.args.map((entry) => entry.trim()).filter((entry) => entry.length > 0),
+        cwd: config.cwd?.trim() ?? '',
+        env: Object.entries(config.env ?? {})
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, value]) => [key, value]),
+      })
+    : '';
+
+const readStoredCustomAgents = (): StoredCustomAgentEntry[] => {
+  const raw = window.localStorage.getItem(CUSTOM_AGENT_LIBRARY_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    const entries: StoredCustomAgentEntry[] = [];
+    for (const item of parsed) {
+      if (!isRecord(item)) {
+        continue;
+      }
+
+      const id = typeof item.id === 'string' ? item.id.trim() : '';
+      const label = typeof item.label === 'string' ? item.label.trim() : '';
+      const config = toCustomAgentConfigFromUnknown(item.config);
+      if (!id || !config) {
+        continue;
+      }
+
+      entries.push({
+        id,
+        label: label || id,
+        config,
+        registryAgentId:
+          typeof item.registryAgentId === 'string' && item.registryAgentId.trim().length > 0
+            ? item.registryAgentId.trim()
+            : undefined,
+      });
+    }
+
+    return entries;
+  } catch {
+    return [];
+  }
+};
+
+const readStoredActiveCustomAgentId = (): string | null => {
+  const raw = window.localStorage.getItem(ACTIVE_CUSTOM_AGENT_ID_KEY);
+  if (!raw) {
+    return null;
+  }
+
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const nextStoredCustomAgentId = (): string =>
+  `custom-agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const toDefaultCustomAgentLabel = (config: AcpCustomAgentConfig): string => {
+  const knownLabel = toKnownCustomAgentLabel(config.command);
+  if (knownLabel) {
+    return knownLabel;
+  }
+
+  const executableCommand = toExecutableCommand(config.command);
+  const commandBaseName = executableCommand.split(/[\\/]/).filter(Boolean).at(-1);
+  return commandBaseName ?? 'Added agent';
+};
+
+const parseRegistryAgents = (payload: unknown): RegistryAgent[] => {
+  if (!isRecord(payload) || !Array.isArray(payload.agents)) {
+    return [];
+  }
+
+  const parsed: RegistryAgent[] = [];
+
+  for (const entry of payload.agents) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+
+    const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+    const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+    if (!id || !name) {
+      continue;
+    }
+
+    const distribution = isRecord(entry.distribution) ? entry.distribution : undefined;
+    const rawNpx = distribution && isRecord(distribution.npx) ? distribution.npx : undefined;
+    const rawUvx = distribution && isRecord(distribution.uvx) ? distribution.uvx : undefined;
+    const rawBinary =
+      distribution && isRecord(distribution.binary) ? distribution.binary : undefined;
+
+    const npxPackage =
+      rawNpx && typeof rawNpx.package === 'string' ? rawNpx.package.trim() : '';
+    const uvxPackage =
+      rawUvx && typeof rawUvx.package === 'string' ? rawUvx.package.trim() : '';
+
+    parsed.push({
+      id,
+      name,
+      version: typeof entry.version === 'string' ? entry.version.trim() : undefined,
+      description:
+        typeof entry.description === 'string' ? entry.description.trim() : undefined,
+      repository:
+        typeof entry.repository === 'string' ? entry.repository.trim() : undefined,
+      icon: typeof entry.icon === 'string' ? entry.icon.trim() : undefined,
+      distribution: {
+        npx: npxPackage
+          ? {
+              package: npxPackage,
+              args: Array.isArray(rawNpx?.args)
+                ? rawNpx.args.filter(
+                    (arg): arg is string => typeof arg === 'string' && arg.trim().length > 0,
+                  )
+                : [],
+              env: toStringRecord(rawNpx?.env),
+            }
+          : undefined,
+        uvx: uvxPackage
+          ? {
+              package: uvxPackage,
+              args: Array.isArray(rawUvx?.args)
+                ? rawUvx.args.filter(
+                    (arg): arg is string => typeof arg === 'string' && arg.trim().length > 0,
+                  )
+                : [],
+              env: toStringRecord(rawUvx?.env),
+            }
+          : undefined,
+        binary: rawBinary as Record<string, RegistryBinaryDistributionTarget> | undefined,
+      },
+    });
+  }
+
+  parsed.sort((left, right) => left.name.localeCompare(right.name));
+  return parsed;
+};
+
+const joinCommandPreview = (command: string, args: string[]): string =>
+  args.length === 0 ? command : `${command} ${args.join(' ')}`;
+
+const toBinaryKeyCandidates = (platform: NodeJS.Platform): string[] => {
+  if (platform === 'darwin') {
+    return ['darwin-aarch64', 'darwin-x86_64', 'darwin'];
+  }
+
+  if (platform === 'win32') {
+    return ['windows-x86_64', 'windows-aarch64', 'windows'];
+  }
+
+  if (platform === 'linux') {
+    return ['linux-x86_64', 'linux-aarch64', 'linux'];
+  }
+
+  return [];
+};
+
+const isLikelyRunnableCommand = (value: string): boolean => {
+  if (!value) {
+    return false;
+  }
+
+  if (/^[.]{1,2}[\\/]/.test(value)) {
+    return true;
+  }
+
+  const hasPathSeparator = /[\\/]/.test(value);
+  const looksAbsolute = /^([A-Za-z]:[\\/]|\/)/.test(value);
+  return !hasPathSeparator || looksAbsolute;
+};
+
+const toRegistryLaunchTemplate = (
+  agent: RegistryAgent,
+  platform: NodeJS.Platform,
+): RegistryLaunchTemplate => {
+  const npxDistribution = agent.distribution?.npx;
+  if (npxDistribution?.package) {
+    const args = ['-y', npxDistribution.package, ...(npxDistribution.args ?? [])];
+    return {
+      command: 'npx',
+      args,
+      env: npxDistribution.env,
+      source: 'npx',
+      autoConfigurable: true,
+      preview: joinCommandPreview('npx', args),
+    };
+  }
+
+  const uvxDistribution = agent.distribution?.uvx;
+  if (uvxDistribution?.package) {
+    const args = [uvxDistribution.package, ...(uvxDistribution.args ?? [])];
+    return {
+      command: 'uvx',
+      args,
+      env: uvxDistribution.env,
+      source: 'uvx',
+      autoConfigurable: true,
+      preview: joinCommandPreview('uvx', args),
+    };
+  }
+
+  const binaryDistribution = agent.distribution?.binary ?? {};
+  const binaryCandidates = toBinaryKeyCandidates(platform)
+    .map((key) => binaryDistribution[key])
+    .filter((target): target is RegistryBinaryDistributionTarget => Boolean(target));
+  const binaryFallback = Object.values(binaryDistribution).filter(
+    (target): target is RegistryBinaryDistributionTarget =>
+      typeof target?.cmd === 'string' && target.cmd.trim().length > 0,
+  );
+  const binaryTarget = [...binaryCandidates, ...binaryFallback].find(
+    (target) => typeof target.cmd === 'string' && target.cmd.trim().length > 0,
+  );
+  const binaryCommand =
+    binaryTarget && typeof binaryTarget.cmd === 'string' ? binaryTarget.cmd.trim() : '';
+  const binaryArgs = Array.isArray(binaryTarget?.args)
+    ? binaryTarget.args.filter(
+        (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
+      )
+    : [];
+
+  if (binaryCommand) {
+    return {
+      command: binaryCommand,
+      args: binaryArgs,
+      source: 'binary',
+      autoConfigurable: isLikelyRunnableCommand(binaryCommand),
+      preview: joinCommandPreview(binaryCommand, binaryArgs),
+    };
+  }
+
+  return {
+    command: '',
+    args: [],
+    source: 'manual',
+    autoConfigurable: false,
+    preview: 'Manual setup required',
+  };
+};
+
+const matchesRegistryTemplate = (
+  agent: RegistryAgent,
+  config: AcpCustomAgentConfig | null,
+  platform: NodeJS.Platform,
+): boolean => {
+  if (!config) {
+    return false;
+  }
+
+  const template = toRegistryLaunchTemplate(agent, platform);
+  if (!template.autoConfigurable || !template.command) {
+    return false;
+  }
+
+  const configCommand = config.command?.trim() ?? '';
+  if (!configCommand) {
+    return false;
+  }
+
+  const commandMatches =
+    toNormalizedCommandToken(template.command) === toNormalizedCommandToken(configCommand);
+  if (!commandMatches) {
+    return false;
+  }
+
+  const templateArgs = toNormalizedArgsList(template.args);
+  const configArgs = toNormalizedArgsList(config.args ?? []);
+  return isArgsPrefixCompatible(templateArgs, configArgs);
+};
+
+const parseArgs = (value: string): string[] => {
+  const matches = value.trim().match(/(?:[^\s"]+|"[^"]*")+/g);
+  if (!matches) {
+    return [];
+  }
+
+  return matches
+    .map((token) => token.replace(/^"(.*)"$/, '$1').trim())
+    .filter((token) => token.length > 0);
+};
+
+const parseEnv = (value: string): Record<string, string> | undefined => {
+  const lines = value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return undefined;
+  }
+
+  const entries: Array<[string, string]> = [];
+  for (const line of lines) {
+    const separatorIndex = line.indexOf('=');
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = line.slice(0, separatorIndex).trim();
+    const envValue = line.slice(separatorIndex + 1);
+    if (!key) {
+      continue;
+    }
+
+    entries.push([key, envValue]);
+  }
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+};
 
 const toCommandPreview = (config: AcpCustomAgentConfig | null): string => {
   if (!config) {
@@ -132,15 +783,23 @@ export const SettingsLayout = ({
   codexAgentConfig,
   claudeAgentConfig,
   customAgentConfig,
+  onSelectAgentPreset,
 }: SettingsLayoutProps): JSX.Element => {
   const [activeSection, setActiveSection] = React.useState<SectionId>(sections[0].id);
   const [uiPreferences, setUiPreferences] = React.useState<UiPreferences>(() => readUiPreferences());
+  const [editorThemeFeedback, setEditorThemeFeedback] = React.useState<
+    Record<EditorThemeMode, string | null>
+  >({
+    light: null,
+    dark: null,
+  });
   const [notifications, setNotifications] = React.useState<AppNotificationItem[]>(() =>
     readStoredNotifications(),
   );
   const [gitStatus, setGitStatus] = React.useState<WorkspaceGitStatusResult | null>(null);
   const [isGitStatusLoading, setIsGitStatusLoading] = React.useState(false);
   const [gitStatusError, setGitStatusError] = React.useState<string | null>(null);
+  const themeFeedbackTimeoutsRef = React.useRef<Partial<Record<EditorThemeMode, number>>>({});
 
   const hasWorkspace = workspacePath.trim().length > 1 && workspacePath !== '/';
   const workspaceName = hasWorkspace ? getFolderName(workspacePath) : 'No workspace';
@@ -153,6 +812,7 @@ export const SettingsLayout = ({
   React.useEffect(() => {
     writeThemePreference(uiPreferences.theme);
     writeAccentColorPreference(uiPreferences.accentColor);
+    writeEditorThemesPreference(uiPreferences.editorThemes);
     applyUiPreferences(uiPreferences);
 
     if (uiPreferences.theme !== 'system') {
@@ -175,6 +835,38 @@ export const SettingsLayout = ({
     return onStoredNotificationsChanged(() => {
       setNotifications(readStoredNotifications());
     });
+  }, []);
+
+  const showEditorThemeFeedback = React.useCallback(
+    (mode: EditorThemeMode, message: string): void => {
+      const existingTimeout = themeFeedbackTimeoutsRef.current[mode];
+      if (existingTimeout !== undefined) {
+        window.clearTimeout(existingTimeout);
+      }
+
+      setEditorThemeFeedback((previous) => ({
+        ...previous,
+        [mode]: message,
+      }));
+
+      themeFeedbackTimeoutsRef.current[mode] = window.setTimeout(() => {
+        setEditorThemeFeedback((previous) => ({
+          ...previous,
+          [mode]: null,
+        }));
+      }, 2400);
+    },
+    [],
+  );
+
+  React.useEffect(() => {
+    return () => {
+      for (const timeoutId of Object.values(themeFeedbackTimeoutsRef.current)) {
+        if (timeoutId !== undefined) {
+          window.clearTimeout(timeoutId);
+        }
+      }
+    };
   }, []);
 
   React.useEffect(() => {
@@ -274,38 +966,80 @@ export const SettingsLayout = ({
     </>
   );
 
-  const renderConfigurationSection = (): JSX.Element => (
-    <>
-      <SectionGroup title="Agent defaults">
-        <SettingsCard>
-          <SettingRow
-            title="Default agent"
-            description="The preset used when a new agent session starts."
-            control={<PillLabel>{toPresetLabel(agentPreset)}</PillLabel>}
-          />
-          <SettingRow
-            title="Codex adapter"
-            description={toCommandPreview(codexAgentConfig)}
-            control={<PillLabel>{codexAgentConfig ? 'Configured' : 'Not set'}</PillLabel>}
-          />
-          <SettingRow
-            title="Claude adapter"
-            description={toCommandPreview(claudeAgentConfig)}
-            control={<PillLabel>{claudeAgentConfig ? 'Configured' : 'Not set'}</PillLabel>}
-          />
-          <SettingRow
-            title="Custom adapter"
-            description={toCommandPreview(customAgentConfig)}
-            control={<PillLabel>{customAgentConfig ? 'Configured' : 'Not set'}</PillLabel>}
-          />
-        </SettingsCard>
-      </SectionGroup>
-    </>
+  const renderAgentsSection = (): JSX.Element => (
+    <AgentsSettingsSection
+      workspacePath={workspacePath}
+      agentPreset={agentPreset}
+      codexAgentConfig={codexAgentConfig}
+      claudeAgentConfig={claudeAgentConfig}
+      customAgentConfig={customAgentConfig}
+      onSelectAgentPreset={onSelectAgentPreset}
+    />
   );
 
-  const renderPersonalizationSection = (): JSX.Element => (
+  const renderSkillsSection = (): JSX.Element => <SkillsSettingsSection />;
+
+  const updateEditorTheme = React.useCallback((
+    mode: EditorThemeMode,
+    updater: (theme: EditorThemeSettings) => EditorThemeSettings,
+  ): void => {
+    setUiPreferences((previous) => ({
+      ...previous,
+      editorThemes: {
+        ...previous.editorThemes,
+        [mode]: updater(previous.editorThemes[mode]),
+      },
+    }));
+  }, []);
+
+  const copyEditorTheme = React.useCallback(
+    async (mode: EditorThemeMode): Promise<void> => {
+      const serialized = serializeEditorThemeForClipboard(mode, uiPreferences.editorThemes[mode]);
+
+      try {
+        await navigator.clipboard.writeText(serialized);
+        showEditorThemeFeedback(mode, 'Theme copied.');
+      } catch {
+        window.prompt('Copy theme', serialized);
+        showEditorThemeFeedback(mode, 'Theme ready to copy.');
+      }
+    },
+    [showEditorThemeFeedback, uiPreferences.editorThemes],
+  );
+
+  const importEditorTheme = React.useCallback(
+    async (mode: EditorThemeMode): Promise<void> => {
+      let rawTheme = '';
+
+      try {
+        rawTheme = (await navigator.clipboard.readText()).trim();
+      } catch {
+        rawTheme = '';
+      }
+
+      if (rawTheme.length === 0) {
+        const prompted = window.prompt('Paste theme', '');
+        rawTheme = prompted?.trim() ?? '';
+      }
+
+      if (rawTheme.length === 0) {
+        return;
+      }
+
+      try {
+        const importedTheme = parseEditorThemeFromClipboard(rawTheme, mode);
+        updateEditorTheme(mode, () => importedTheme);
+        showEditorThemeFeedback(mode, 'Theme imported.');
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : 'Could not import theme.');
+      }
+    },
+    [showEditorThemeFeedback, updateEditorTheme],
+  );
+
+  const renderAppearanceSection = (): JSX.Element => (
     <>
-      <SectionGroup title="Appearance">
+      <SectionGroup title="Theme">
         <SettingsCard>
           <SettingRow
             title="Theme"
@@ -348,9 +1082,137 @@ export const SettingsLayout = ({
               </div>
             }
           />
+          <div className="border-t border-stone-200/75 p-3">
+            <EditorThemePreview
+              lightTheme={uiPreferences.editorThemes.light}
+              darkTheme={uiPreferences.editorThemes.dark}
+            />
+          </div>
+        </SettingsCard>
+      </SectionGroup>
+
+      <SectionGroup title="Editor Themes">
+        <div className="space-y-4">
+          <EditorThemeCard
+            mode="light"
+            theme={uiPreferences.editorThemes.light}
+            statusMessage={editorThemeFeedback.light}
+            onImportTheme={() => {
+              void importEditorTheme('light');
+            }}
+            onCopyTheme={() => {
+              void copyEditorTheme('light');
+            }}
+            onSelectPreset={(preset) => {
+              updateEditorTheme('light', () => getEditorThemePresetDefaults('light', preset));
+            }}
+            onAccentChange={(accent) => {
+              updateEditorTheme('light', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                accent,
+              }));
+            }}
+            onBackgroundChange={(background) => {
+              updateEditorTheme('light', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                background,
+              }));
+            }}
+            onMatchWindowBackground={() => {
+              updateEditorTheme('light', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                background: getWindowBackgroundColor('light'),
+              }));
+            }}
+            onForegroundChange={(foreground) => {
+              updateEditorTheme('light', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                foreground,
+              }));
+            }}
+            onCodeFontChange={(codeFont) => {
+              updateEditorTheme('light', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                codeFont,
+              }));
+            }}
+            onContrastChange={(contrast) => {
+              updateEditorTheme('light', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                contrast,
+              }));
+            }}
+          />
+          <EditorThemeCard
+            mode="dark"
+            theme={uiPreferences.editorThemes.dark}
+            statusMessage={editorThemeFeedback.dark}
+            onImportTheme={() => {
+              void importEditorTheme('dark');
+            }}
+            onCopyTheme={() => {
+              void copyEditorTheme('dark');
+            }}
+            onSelectPreset={(preset) => {
+              updateEditorTheme('dark', () => getEditorThemePresetDefaults('dark', preset));
+            }}
+            onAccentChange={(accent) => {
+              updateEditorTheme('dark', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                accent,
+              }));
+            }}
+            onBackgroundChange={(background) => {
+              updateEditorTheme('dark', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                background,
+              }));
+            }}
+            onMatchWindowBackground={() => {
+              updateEditorTheme('dark', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                background: getWindowBackgroundColor('dark'),
+              }));
+            }}
+            onForegroundChange={(foreground) => {
+              updateEditorTheme('dark', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                foreground,
+              }));
+            }}
+            onCodeFontChange={(codeFont) => {
+              updateEditorTheme('dark', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                codeFont,
+              }));
+            }}
+            onContrastChange={(contrast) => {
+              updateEditorTheme('dark', (theme) => ({
+                ...theme,
+                preset: 'custom',
+                contrast,
+              }));
+            }}
+          />
+        </div>
+      </SectionGroup>
+
+      <SectionGroup title="Interface">
+        <SettingsCard>
           <SettingRow
             title="Accent color"
-            description="Choose the accent color for highlights and active controls."
+            description="Choose the accent color for the app chrome and active controls."
             control={
               <AccentColorSelect
                 value={uiPreferences.accentColor}
@@ -477,12 +1339,16 @@ export const SettingsLayout = ({
       return renderGeneralSection();
     }
 
-    if (activeSection === 'configuration') {
-      return renderConfigurationSection();
+    if (activeSection === 'agents') {
+      return renderAgentsSection();
     }
 
-    if (activeSection === 'personalization') {
-      return renderPersonalizationSection();
+    if (activeSection === 'skills') {
+      return renderSkillsSection();
+    }
+
+    if (activeSection === 'appearance') {
+      return renderAppearanceSection();
     }
 
     if (activeSection === 'mcp') {
@@ -563,12 +1429,16 @@ export const SettingsLayout = ({
 
 interface SectionGroupProps {
   title: string;
+  action?: React.ReactNode;
   children: React.ReactNode;
 }
 
-const SectionGroup = ({ title, children }: SectionGroupProps): JSX.Element => (
+const SectionGroup = ({ title, action, children }: SectionGroupProps): JSX.Element => (
   <section className="mt-6 first:mt-0">
-    <h3 className="text-[20px] font-semibold text-stone-900">{title}</h3>
+    <div className="flex items-center justify-between gap-4">
+      <h3 className="text-[20px] font-semibold text-stone-900">{title}</h3>
+      {action ? <div className="shrink-0">{action}</div> : null}
+    </div>
     <div className="mt-3">{children}</div>
   </section>
 );
@@ -579,7 +1449,7 @@ const SettingsCard = ({ children }: { children: React.ReactNode }): JSX.Element 
 
 interface SettingRowProps {
   title: string;
-  description: string;
+  description?: string;
   control: React.ReactNode;
 }
 
@@ -588,7 +1458,7 @@ const SettingRow = ({ title, description, control }: SettingRowProps): JSX.Eleme
     <div className="flex items-center justify-between gap-4 border-b border-stone-200/75 px-3 py-3 last:border-b-0">
       <div className="min-w-0">
         <p className="text-[14px] font-medium text-stone-800">{title}</p>
-        <p className="mt-0.5 text-[13px] text-stone-500">{description}</p>
+        {description ? <p className="mt-0.5 text-[13px] text-stone-500">{description}</p> : null}
       </div>
       <div className="shrink-0">{control}</div>
     </div>
@@ -623,6 +1493,447 @@ const SegmentChip = ({ children, active = false, onClick }: SegmentChipProps): J
   );
 };
 
+interface EditorThemePreviewProps {
+  lightTheme: EditorThemeSettings;
+  darkTheme: EditorThemeSettings;
+}
+
+const EditorThemePreview = ({
+  lightTheme,
+  darkTheme,
+}: EditorThemePreviewProps): JSX.Element => (
+  <div className="overflow-hidden rounded-[20px] border border-stone-200/80 bg-stone-50">
+    <div className="grid gap-px bg-stone-200/80 md:grid-cols-2">
+      <EditorThemePreviewPane mode="light" theme={lightTheme} />
+      <EditorThemePreviewPane mode="dark" theme={darkTheme} />
+    </div>
+  </div>
+);
+
+interface EditorThemePreviewPaneProps {
+  mode: EditorThemeMode;
+  theme: EditorThemeSettings;
+}
+
+const EditorThemePreviewPane = ({
+  mode,
+  theme,
+}: EditorThemePreviewPaneProps): JSX.Element => {
+  const lineOverlay =
+    mode === 'light' ? hexToRgba(theme.diffRemoved, 0.18) : hexToRgba(theme.diffAdded, 0.18);
+  const gutterOverlay =
+    mode === 'light' ? hexToRgba(theme.diffRemoved, 0.28) : hexToRgba(theme.diffAdded, 0.28);
+  const keywordColor = mode === 'light' ? '#7c3aed' : '#8b7dff';
+  const propertyColor = theme.skill;
+  const valueColor = theme.diffAdded;
+  const numericColor = theme.accent;
+  const fontFamily = getCodeFontFamily(theme.codeFont);
+  const rows =
+    mode === 'light'
+      ? [
+          ['1', 'const', 'themePreview', '{'],
+          ['2', 'surface', `"${theme.background}"`, ''],
+          ['3', 'accent', `"${theme.accent}"`, ''],
+          ['4', 'contrast', `${theme.contrast}`, ''],
+          ['5', '};', '', ''],
+        ]
+      : [
+          ['1', 'const', 'themePreview', '{'],
+          ['2', 'surface', `"${theme.background}"`, ''],
+          ['3', 'accent', `"${theme.accent}"`, ''],
+          ['4', 'contrast', `${theme.contrast}`, ''],
+          ['5', '};', '', ''],
+        ];
+
+  return (
+    <div
+      className="px-0 py-0"
+      style={{
+        backgroundColor: theme.background,
+        color: theme.foreground,
+      }}
+    >
+      {rows.map(([lineNumber, key, value, suffix], index) => (
+        <div
+          key={`${mode}-${lineNumber}`}
+          className="grid grid-cols-[44px_minmax(0,1fr)] text-[13px]"
+          style={{
+            backgroundColor: index > 0 && index < 4 ? lineOverlay : 'transparent',
+          }}
+        >
+          <div
+            className="border-r border-black/5 px-3 py-2 text-right"
+            style={{
+              backgroundColor: index > 0 && index < 4 ? gutterOverlay : 'transparent',
+              color: mode === 'light' ? 'rgba(17, 24, 39, 0.55)' : 'rgba(255, 255, 255, 0.52)',
+              fontFamily,
+            }}
+          >
+            {lineNumber}
+          </div>
+          <div className="overflow-hidden px-4 py-2" style={{ fontFamily }}>
+            {index === 0 ? (
+              <>
+                <span style={{ color: keywordColor }}>const</span>{' '}
+                <span style={{ color: propertyColor }}>themePreview</span>: ThemeConfig ={' '}
+                <span>{'{'}</span>
+              </>
+            ) : index === 4 ? (
+              <span>{key}</span>
+            ) : (
+              <>
+                <span className="opacity-70">  </span>
+                <span style={{ color: propertyColor }}>{key}</span>:&nbsp;
+                <span
+                  style={{
+                    color: index === 3 ? numericColor : valueColor,
+                  }}
+                >
+                  {value}
+                </span>
+                {suffix ? <span>{suffix}</span> : null}
+                <span>,</span>
+              </>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+interface EditorThemeCardProps {
+  mode: EditorThemeMode;
+  theme: EditorThemeSettings;
+  statusMessage: string | null;
+  onImportTheme: () => void;
+  onCopyTheme: () => void;
+  onSelectPreset: (preset: Exclude<EditorThemePreset, 'custom'>) => void;
+  onAccentChange: (value: string) => void;
+  onBackgroundChange: (value: string) => void;
+  onMatchWindowBackground: () => void;
+  onForegroundChange: (value: string) => void;
+  onCodeFontChange: (value: CodeFontPreference) => void;
+  onContrastChange: (value: number) => void;
+}
+
+const EditorThemeCard = ({
+  mode,
+  theme,
+  statusMessage,
+  onImportTheme,
+  onCopyTheme,
+  onSelectPreset,
+  onAccentChange,
+  onBackgroundChange,
+  onMatchWindowBackground,
+  onForegroundChange,
+  onCodeFontChange,
+  onContrastChange,
+}: EditorThemeCardProps): JSX.Element => {
+  const title = mode === 'light' ? 'Light theme' : 'Dark theme';
+
+  return (
+    <div className="rounded-2xl border border-stone-200/80 bg-white">
+      <div className="flex items-center justify-between gap-4 border-b border-stone-200/75 px-3 py-3">
+        <div>
+          <p className="text-[15px] font-medium text-stone-800">{title}</p>
+          <p
+            className={cn(
+              'mt-0.5 text-[13px]',
+              statusMessage ? 'text-[#0169cc]' : 'text-stone-500',
+            )}
+          >
+            {statusMessage ?? `Active whenever the app is in ${mode} mode.`}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-4">
+          <HeaderActionButton onClick={onImportTheme}>Import</HeaderActionButton>
+          <HeaderActionButton onClick={onCopyTheme}>Copy theme</HeaderActionButton>
+          <EditorThemePresetSelect mode={mode} value={theme.preset} onSelect={onSelectPreset} />
+        </div>
+      </div>
+      <SettingRow
+        title="Accent"
+        control={<HexColorControl value={theme.accent} onChange={onAccentChange} />}
+      />
+      <SettingRow
+        title="Background"
+        control={
+          <div className="flex items-center gap-2">
+            <HexColorControl value={theme.background} onChange={onBackgroundChange} />
+            <ActionChip onClick={onMatchWindowBackground}>Match app</ActionChip>
+          </div>
+        }
+      />
+      <SettingRow
+        title="Foreground"
+        control={<HexColorControl value={theme.foreground} onChange={onForegroundChange} />}
+      />
+      <SettingRow
+        title="Code font"
+        control={<CodeFontSelect value={theme.codeFont} onSelect={onCodeFontChange} />}
+      />
+      <SettingRow
+        title="Contrast"
+        control={<ContrastSlider value={theme.contrast} onChange={onContrastChange} />}
+      />
+    </div>
+  );
+};
+
+interface HexColorControlProps {
+  value: string;
+  onChange: (value: string) => void;
+}
+
+const HexColorControl = ({ value, onChange }: HexColorControlProps): JSX.Element => (
+  <label className="no-drag relative inline-flex h-8 cursor-pointer items-center gap-2 rounded-full border border-stone-200 bg-white pl-2 pr-2.5 text-[13px] text-stone-700 transition-colors hover:bg-stone-50">
+    <span
+      className="h-4 w-4 rounded-full border border-black/10"
+      style={{ backgroundColor: value }}
+    />
+    <span className="font-mono uppercase">{value}</span>
+    <input
+      type="color"
+      value={value}
+      onChange={(event) => {
+        onChange(event.target.value.toLowerCase());
+      }}
+      className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+      aria-label="Choose color"
+    />
+  </label>
+);
+
+const ActionChip = ({
+  children,
+  onClick,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+}): JSX.Element => (
+  <button
+    type="button"
+    className="no-drag inline-flex h-8 items-center rounded-full border border-stone-200 bg-white px-3 text-[13px] text-stone-700 transition-colors hover:bg-stone-50"
+    onClick={onClick}
+  >
+    {children}
+  </button>
+);
+
+const HeaderActionButton = ({
+  children,
+  onClick,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+}): JSX.Element => (
+  <button
+    type="button"
+    className="no-drag inline-flex h-8 items-center rounded-[10px] px-2.5 text-[13px] font-medium text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 focus-visible:bg-stone-100"
+    onClick={onClick}
+  >
+    {children}
+  </button>
+);
+
+const SettingsSelectTrigger = ({
+  children,
+  className,
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement>): JSX.Element => (
+  <button
+    type="button"
+    className={cn(
+      'no-drag inline-flex h-8 items-center gap-2 rounded-full border border-stone-200 bg-white pl-2 pr-2.5 text-[13px] text-stone-700 transition-colors hover:bg-stone-50',
+      className,
+    )}
+    {...props}
+  >
+    {children}
+  </button>
+);
+
+const SettingsSelectItem = ({
+  selected,
+  children,
+  className,
+  ...props
+}: React.ComponentProps<typeof DropdownMenuItem> & {
+  selected?: boolean;
+}): JSX.Element => (
+  <DropdownMenuItem
+    className={cn(
+      'min-h-11 rounded-[14px] px-3 text-[15px]',
+      selected && 'bg-stone-100/85',
+      className,
+    )}
+    {...props}
+  >
+    {children}
+  </DropdownMenuItem>
+);
+
+const ThemeBadge = ({
+  backgroundColor,
+  color,
+}: {
+  backgroundColor: string;
+  color: string;
+}): JSX.Element => (
+  <span
+    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] border border-black/10 text-[14px] font-semibold tracking-[-0.02em]"
+    style={{
+      backgroundColor,
+      color,
+    }}
+  >
+    Aa
+  </span>
+);
+
+interface EditorThemePresetSelectProps {
+  mode: EditorThemeMode;
+  value: EditorThemePreset;
+  onSelect: (value: Exclude<EditorThemePreset, 'custom'>) => void;
+}
+
+const EditorThemePresetSelect = ({
+  mode,
+  value,
+  onSelect,
+}: EditorThemePresetSelectProps): JSX.Element => {
+  const activeOption = getEditorThemePresetOption(value);
+  const activeLabel = activeOption?.label ?? 'Custom';
+  const activeBadgeBackground =
+    activeOption?.[mode === 'light' ? 'badgeLightBackground' : 'badgeDarkBackground'] ??
+    (mode === 'light' ? '#f5f5f4' : '#202020');
+  const activeBadgeForeground =
+    activeOption?.[mode === 'light' ? 'badgeLightForeground' : 'badgeDarkForeground'] ??
+    (mode === 'light' ? '#44403c' : '#fafaf9');
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <SettingsSelectTrigger
+          className="h-10 min-w-[176px] justify-between rounded-[14px] pl-1 pr-3"
+          aria-label={`Select ${mode} editor theme preset`}
+        >
+          <span className="flex min-w-0 items-center gap-3">
+            <ThemeBadge
+              backgroundColor={activeBadgeBackground}
+              color={activeBadgeForeground}
+            />
+            <span className="truncate">{activeLabel}</span>
+          </span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-stone-500" />
+        </SettingsSelectTrigger>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="max-h-[360px] w-[230px] overflow-y-auto rounded-[22px] p-2">
+        {editorThemePresetOptions.map((option) => {
+          const isSelected = option.value === value;
+          const badgeBackground =
+            option[mode === 'light' ? 'badgeLightBackground' : 'badgeDarkBackground'];
+          const badgeForeground =
+            option[mode === 'light' ? 'badgeLightForeground' : 'badgeDarkForeground'];
+
+          return (
+            <SettingsSelectItem
+              key={option.value}
+              selected={isSelected}
+              onSelect={() => {
+                onSelect(option.value);
+              }}
+            >
+              <span className="flex min-w-0 flex-1 items-center gap-3">
+                <ThemeBadge
+                  backgroundColor={badgeBackground}
+                  color={badgeForeground}
+                />
+                <span className="truncate">{option.label}</span>
+              </span>
+              <Check
+                className={cn(
+                  'ml-3 h-4 w-4 shrink-0 text-stone-900 transition-opacity',
+                  !isSelected && 'opacity-0',
+                )}
+              />
+            </SettingsSelectItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+};
+
+interface CodeFontSelectProps {
+  value: CodeFontPreference;
+  onSelect: (value: CodeFontPreference) => void;
+}
+
+const CodeFontSelect = ({ value, onSelect }: CodeFontSelectProps): JSX.Element => {
+  const activeOption = codeFontOptions.find((option) => option.value === value) ?? codeFontOptions[0];
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <SettingsSelectTrigger
+          aria-label="Select code font"
+          className="justify-between"
+          style={{ fontFamily: getCodeFontFamily(activeOption.value) }}
+        >
+          <span>{activeOption.label}</span>
+          <ChevronDown className="h-3.5 w-3.5 text-stone-500" />
+        </SettingsSelectTrigger>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-[220px] rounded-[22px] p-2">
+        {codeFontOptions.map((option) => {
+          const isSelected = option.value === value;
+
+          return (
+            <SettingsSelectItem
+              key={option.value}
+              selected={isSelected}
+              onSelect={() => {
+                onSelect(option.value);
+              }}
+              style={{ fontFamily: getCodeFontFamily(option.value) }}
+            >
+              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                <Check className={cn('h-4 w-4 text-stone-900', !isSelected && 'opacity-0')} />
+              </span>
+              <span>{option.label}</span>
+            </SettingsSelectItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+};
+
+interface ContrastSliderProps {
+  value: number;
+  onChange: (value: number) => void;
+}
+
+const ContrastSlider = ({ value, onChange }: ContrastSliderProps): JSX.Element => (
+  <div className="flex items-center gap-3">
+    <input
+      type="range"
+      min={0}
+      max={100}
+      value={value}
+      onChange={(event) => {
+        onChange(Number.parseInt(event.target.value, 10));
+      }}
+      className="h-1 w-40 cursor-pointer accent-stone-900"
+      aria-label="Adjust editor contrast"
+    />
+    <span className="w-8 text-right text-[13px] text-stone-600">{value}</span>
+  </div>
+);
+
 interface AccentColorSelectProps {
   value: AccentColorPreference;
   onSelect: (value: AccentColorPreference) => void;
@@ -634,10 +1945,9 @@ const AccentColorSelect = ({ value, onSelect }: AccentColorSelectProps): JSX.Ele
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="no-drag inline-flex h-8 items-center gap-2 rounded-full border border-stone-200 bg-white pl-2 pr-2.5 text-[13px] text-stone-700 transition-colors hover:bg-stone-50"
+        <SettingsSelectTrigger
           aria-label="Select accent color"
+          className="justify-between"
         >
           <span
             className="h-4 w-4 rounded-full border border-black/10"
@@ -645,19 +1955,16 @@ const AccentColorSelect = ({ value, onSelect }: AccentColorSelectProps): JSX.Ele
           />
           <span>{activeOption.label}</span>
           <ChevronDown className="h-3.5 w-3.5 text-stone-500" />
-        </button>
+        </SettingsSelectTrigger>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-[230px] rounded-[22px] p-2">
         {accentOptions.map((option) => {
           const isSelected = option.value === value;
 
           return (
-            <DropdownMenuItem
+            <SettingsSelectItem
               key={option.value}
-              className={cn(
-                'min-h-11 rounded-[14px] px-3 text-[15px]',
-                isSelected && 'bg-stone-100/85',
-              )}
+              selected={isSelected}
               onSelect={() => {
                 onSelect(option.value);
               }}
@@ -670,10 +1977,1539 @@ const AccentColorSelect = ({ value, onSelect }: AccentColorSelectProps): JSX.Ele
                 style={{ backgroundColor: option.swatch }}
               />
               <span>{option.label}</span>
-            </DropdownMenuItem>
+            </SettingsSelectItem>
           );
         })}
       </DropdownMenuContent>
     </DropdownMenu>
   );
 };
+
+interface AgentsSettingsSectionProps {
+  workspacePath: string;
+  agentPreset: AcpAgentPreset;
+  codexAgentConfig: AcpCustomAgentConfig | null;
+  claudeAgentConfig: AcpCustomAgentConfig | null;
+  customAgentConfig: AcpCustomAgentConfig | null;
+  onSelectAgentPreset: (selection: AgentPresetSelection) => void;
+}
+
+const AgentsSettingsSection = ({
+  workspacePath,
+  agentPreset,
+  codexAgentConfig,
+  claudeAgentConfig,
+  customAgentConfig,
+  onSelectAgentPreset,
+}: AgentsSettingsSectionProps): JSX.Element => {
+  const currentPlatform = window.desktop?.platform ?? 'darwin';
+  const [storedCustomAgents, setStoredCustomAgents] = React.useState<StoredCustomAgentEntry[]>(() =>
+    readStoredCustomAgents(),
+  );
+  const [activeCustomAgentId, setActiveCustomAgentId] = React.useState<string | null>(() =>
+    readStoredActiveCustomAgentId(),
+  );
+  const [registryAgents, setRegistryAgents] = React.useState<RegistryAgent[]>([]);
+  const [isRegistryLoading, setIsRegistryLoading] = React.useState(false);
+  const [registryError, setRegistryError] = React.useState<string | null>(null);
+  const [editorState, setEditorState] = React.useState<AgentEditorState | null>(null);
+  const [pendingDeleteAgentId, setPendingDeleteAgentId] = React.useState<string | null>(null);
+
+  const loadRegistryAgents = React.useCallback(async (): Promise<void> => {
+    setIsRegistryLoading(true);
+    setRegistryError(null);
+
+    try {
+      const response = await fetch(ACP_REGISTRY_URL, {
+        method: 'GET',
+        cache: 'no-store',
+      });
+
+      if (!response.ok) {
+        throw new Error(`Registry request failed with ${response.status}`);
+      }
+
+      const payload = (await response.json()) as unknown;
+      const nextAgents = parseRegistryAgents(payload);
+      if (nextAgents.length === 0) {
+        throw new Error('Registry returned no agents');
+      }
+
+      setRegistryAgents(nextAgents);
+    } catch {
+      setRegistryError('Unable to load ACP registry right now.');
+    } finally {
+      setIsRegistryLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadRegistryAgents();
+  }, [loadRegistryAgents]);
+
+  React.useEffect(() => {
+    if (storedCustomAgents.length === 0) {
+      window.localStorage.removeItem(CUSTOM_AGENT_LIBRARY_KEY);
+      return;
+    }
+
+    window.localStorage.setItem(CUSTOM_AGENT_LIBRARY_KEY, JSON.stringify(storedCustomAgents));
+  }, [storedCustomAgents]);
+
+  React.useEffect(() => {
+    if (!activeCustomAgentId) {
+      window.localStorage.removeItem(ACTIVE_CUSTOM_AGENT_ID_KEY);
+      return;
+    }
+
+    window.localStorage.setItem(ACTIVE_CUSTOM_AGENT_ID_KEY, activeCustomAgentId);
+  }, [activeCustomAgentId]);
+
+  React.useEffect(() => {
+    if (!activeCustomAgentId) {
+      if (storedCustomAgents.length > 0) {
+        setActiveCustomAgentId(storedCustomAgents[0]?.id ?? null);
+      }
+      return;
+    }
+
+    if (storedCustomAgents.some((entry) => entry.id === activeCustomAgentId)) {
+      return;
+    }
+
+    setActiveCustomAgentId(storedCustomAgents[0]?.id ?? null);
+  }, [activeCustomAgentId, storedCustomAgents]);
+
+  React.useEffect(() => {
+    if (!customAgentConfig) {
+      return;
+    }
+
+    const normalizedConfig = normalizeCustomAgentConfig(customAgentConfig);
+    if (!normalizedConfig) {
+      return;
+    }
+
+    const currentSignature = toCustomAgentConfigSignature(normalizedConfig);
+    const existing = storedCustomAgents.find(
+      (entry) => toCustomAgentConfigSignature(entry.config) === currentSignature,
+    );
+    if (existing) {
+      if (activeCustomAgentId !== existing.id) {
+        setActiveCustomAgentId(existing.id);
+      }
+      return;
+    }
+
+    const matchingRegistryAgent =
+      registryAgents.find((agent) => matchesRegistryTemplate(agent, normalizedConfig, currentPlatform)) ??
+      null;
+    const nextEntry: StoredCustomAgentEntry = {
+      id: nextStoredCustomAgentId(),
+      label: matchingRegistryAgent?.name ?? toDefaultCustomAgentLabel(normalizedConfig),
+      config: normalizedConfig,
+      registryAgentId: matchingRegistryAgent?.id,
+    };
+
+    setStoredCustomAgents((previous) => [...previous, nextEntry]);
+    setActiveCustomAgentId(nextEntry.id);
+  }, [activeCustomAgentId, currentPlatform, customAgentConfig, registryAgents, storedCustomAgents]);
+
+  const codexRegistryAgent = React.useMemo(
+    () => registryAgents.find((agent) => agent.id === 'codex-acp') ?? null,
+    [registryAgents],
+  );
+  const claudeRegistryAgent = React.useMemo(
+    () =>
+      registryAgents.find((agent) => agent.id === 'claude-acp' || agent.id === 'claude-agent-acp') ??
+      null,
+    [registryAgents],
+  );
+  const customRegistryAgent = React.useMemo(
+    () =>
+      registryAgents.find((agent) => matchesRegistryTemplate(agent, customAgentConfig, currentPlatform)) ??
+      null,
+    [currentPlatform, customAgentConfig, registryAgents],
+  );
+
+  const customAgentOptions = React.useMemo<CustomAgentOption[]>(() => {
+    return storedCustomAgents
+      .map((entry) => {
+        const normalizedConfig = normalizeCustomAgentConfig(entry.config);
+        if (!normalizedConfig) {
+          return null;
+        }
+
+        const registryMatch =
+          registryAgents.find((agent) => matchesRegistryTemplate(agent, normalizedConfig, currentPlatform)) ??
+          null;
+        const knownLabel = toKnownCustomAgentLabel(normalizedConfig.command);
+        const executableCommand = toExecutableCommand(normalizedConfig.command);
+        const commandBaseName = executableCommand.split(/[\\/]/).filter(Boolean).at(-1);
+        const fallbackLabel = knownLabel ?? commandBaseName ?? 'Added agent';
+        const storedLabel = entry.label.trim();
+
+        return {
+          id: entry.id,
+          label: registryMatch?.name ?? (storedLabel || fallbackLabel),
+          iconUrl: registryMatch?.icon ?? null,
+          config: normalizedConfig,
+          registryAgentId: registryMatch?.id ?? entry.registryAgentId,
+        };
+      })
+      .filter((entry): entry is CustomAgentOption => entry !== null);
+  }, [currentPlatform, registryAgents, storedCustomAgents]);
+
+  const customAgentById = React.useMemo(
+    () => new Map(customAgentOptions.map((entry) => [entry.id, entry])),
+    [customAgentOptions],
+  );
+  const pendingDeleteAgent = pendingDeleteAgentId
+    ? (customAgentById.get(pendingDeleteAgentId) ?? null)
+    : null;
+  const registryOptionById = React.useMemo(
+    () =>
+      new Map(
+        customAgentOptions
+          .filter((entry): entry is CustomAgentOption & { registryAgentId: string } =>
+            typeof entry.registryAgentId === 'string' && entry.registryAgentId.length > 0,
+          )
+          .map((entry) => [entry.registryAgentId, entry]),
+      ),
+    [customAgentOptions],
+  );
+  const activeCustomConfigSignature = React.useMemo(
+    () => toCustomAgentConfigSignature(customAgentConfig),
+    [customAgentConfig],
+  );
+  const activeCustomAgentOption = React.useMemo(
+    () =>
+      customAgentOptions.find(
+        (entry) => toCustomAgentConfigSignature(entry.config) === activeCustomConfigSignature,
+      ) ?? null,
+    [activeCustomConfigSignature, customAgentOptions],
+  );
+
+  const handleUseBuiltIn = React.useCallback(
+    (preset: 'codex' | 'claude') => {
+      onSelectAgentPreset({
+        preset,
+        label: preset === 'codex' ? 'Codex' : 'Claude Code',
+        iconUrl:
+          preset === 'codex'
+            ? (codexRegistryAgent?.icon ?? null)
+            : (claudeRegistryAgent?.icon ?? null),
+      });
+    },
+    [claudeRegistryAgent?.icon, codexRegistryAgent?.icon, onSelectAgentPreset],
+  );
+
+  const handleUseCustomAgent = React.useCallback(
+    (agent: CustomAgentOption) => {
+      setActiveCustomAgentId(agent.id);
+      onSelectAgentPreset({
+        preset: 'custom',
+        label: agent.label,
+        iconUrl: agent.iconUrl,
+        customConfig: agent.config,
+        customAgentId: agent.id,
+      });
+    },
+    [onSelectAgentPreset],
+  );
+
+  const openCustomEditor = React.useCallback(
+    (customAgentId: string | 'new', seedConfig?: AcpCustomAgentConfig, title = 'Custom ACP agent') => {
+      const target = customAgentId === 'new' ? null : customAgentById.get(customAgentId) ?? null;
+      const config = target?.config ?? seedConfig ?? null;
+
+      setEditorState({
+        customAgentId,
+        title: target?.label ?? title,
+        command: config?.command ?? '',
+        args: config?.args.join(' ') ?? '',
+        cwd: config?.cwd ?? '',
+        env: config?.env
+          ? Object.entries(config.env)
+              .map(([key, value]) => `${key}=${value}`)
+              .join('\n')
+          : '',
+      });
+    },
+    [customAgentById],
+  );
+
+  const handleSaveEditedAgent = React.useCallback(() => {
+    if (!editorState) {
+      return;
+    }
+
+    const parsedConfig = normalizeCustomAgentConfig({
+      command: editorState.command.trim(),
+      args: parseArgs(editorState.args),
+      cwd: editorState.cwd.trim() || undefined,
+      env: parseEnv(editorState.env),
+    });
+    if (!parsedConfig) {
+      return;
+    }
+
+    const editingEntry =
+      editorState.customAgentId !== 'new'
+        ? storedCustomAgents.find((entry) => entry.id === editorState.customAgentId) ?? null
+        : null;
+    const matchingRegistryAgent =
+      registryAgents.find((agent) => matchesRegistryTemplate(agent, parsedConfig, currentPlatform)) ??
+      null;
+    const existingByRegistry =
+      matchingRegistryAgent
+        ? storedCustomAgents.find((entry) => entry.registryAgentId === matchingRegistryAgent.id) ?? null
+        : null;
+    const existingBySignature =
+      storedCustomAgents.find(
+        (entry) =>
+          toCustomAgentConfigSignature(entry.config) === toCustomAgentConfigSignature(parsedConfig),
+      ) ?? null;
+
+    const targetId =
+      editingEntry?.id ??
+      existingByRegistry?.id ??
+      existingBySignature?.id ??
+      nextStoredCustomAgentId();
+    const nextEntry: StoredCustomAgentEntry = {
+      id: targetId,
+      label:
+        matchingRegistryAgent?.name ??
+        editingEntry?.label ??
+        toDefaultCustomAgentLabel(parsedConfig),
+      config: parsedConfig,
+      registryAgentId: matchingRegistryAgent?.id ?? editingEntry?.registryAgentId,
+    };
+
+    setStoredCustomAgents((previous) => {
+      const hasTarget = previous.some((entry) => entry.id === targetId);
+      if (!hasTarget) {
+        return [...previous, nextEntry];
+      }
+
+      return previous.map((entry) => (entry.id === targetId ? nextEntry : entry));
+    });
+    setActiveCustomAgentId(targetId);
+
+    const editingSignature = editingEntry ? toCustomAgentConfigSignature(editingEntry.config) : '';
+    const shouldApplyToCurrentAgent =
+      agentPreset === 'custom' &&
+      (activeCustomAgentId === editorState.customAgentId ||
+        (editingSignature.length > 0 && activeCustomConfigSignature === editingSignature));
+
+    if (shouldApplyToCurrentAgent) {
+      onSelectAgentPreset({
+        preset: 'custom',
+        label: nextEntry.label,
+        iconUrl: matchingRegistryAgent?.icon ?? null,
+        customConfig: parsedConfig,
+        customAgentId: targetId,
+      });
+    }
+
+    setEditorState(null);
+  }, [
+    activeCustomAgentId,
+    activeCustomConfigSignature,
+    agentPreset,
+    currentPlatform,
+    editorState,
+    onSelectAgentPreset,
+    registryAgents,
+    storedCustomAgents,
+  ]);
+
+  const handleDeleteCustomAgent = React.useCallback(
+    (agentId: string) => {
+      const targetAgent = customAgentById.get(agentId) ?? null;
+      if (!targetAgent) {
+        return;
+      }
+
+      const remainingAgents = customAgentOptions.filter((entry) => entry.id !== agentId);
+      setStoredCustomAgents((previous) => previous.filter((entry) => entry.id !== agentId));
+      setPendingDeleteAgentId(null);
+
+      if (activeCustomAgentId === agentId) {
+        setActiveCustomAgentId(remainingAgents[0]?.id ?? null);
+      }
+
+      if (
+        agentPreset === 'custom' &&
+        activeCustomConfigSignature === toCustomAgentConfigSignature(targetAgent.config)
+      ) {
+        const nextActiveAgent = remainingAgents[0] ?? null;
+        if (nextActiveAgent) {
+          handleUseCustomAgent(nextActiveAgent);
+        } else {
+          handleUseBuiltIn('codex');
+        }
+      }
+    },
+    [
+      activeCustomAgentId,
+      activeCustomConfigSignature,
+      agentPreset,
+      customAgentById,
+      customAgentOptions,
+      handleUseBuiltIn,
+      handleUseCustomAgent,
+    ],
+  );
+
+  const handleAddRegistryAgent = React.useCallback(
+    (agent: RegistryAgent) => {
+      const launchTemplate = toRegistryLaunchTemplate(agent, currentPlatform);
+      if (!launchTemplate.autoConfigurable) {
+        return;
+      }
+
+      const parsedConfig = normalizeCustomAgentConfig({
+        command: launchTemplate.command,
+        args: launchTemplate.args,
+        env: launchTemplate.env,
+      });
+      if (!parsedConfig) {
+        return;
+      }
+
+      const existingByRegistry =
+        storedCustomAgents.find((entry) => entry.registryAgentId === agent.id) ?? null;
+      const existingBySignature =
+        storedCustomAgents.find(
+          (entry) =>
+            toCustomAgentConfigSignature(entry.config) === toCustomAgentConfigSignature(parsedConfig),
+        ) ?? null;
+      const targetId =
+        existingByRegistry?.id ?? existingBySignature?.id ?? `registry-${agent.id}`;
+      const nextEntry: StoredCustomAgentEntry = {
+        id: targetId,
+        label: agent.name,
+        config: parsedConfig,
+        registryAgentId: agent.id,
+      };
+
+      setStoredCustomAgents((previous) => {
+        const hasTarget = previous.some((entry) => entry.id === targetId);
+        if (!hasTarget) {
+          return [...previous, nextEntry];
+        }
+
+        return previous.map((entry) => (entry.id === targetId ? nextEntry : entry));
+      });
+      setActiveCustomAgentId(targetId);
+    },
+    [currentPlatform, storedCustomAgents],
+  );
+
+  const currentAgentLabel =
+    agentPreset === 'custom'
+      ? activeCustomAgentOption?.label ??
+        customRegistryAgent?.name ??
+        (customAgentConfig ? toDefaultCustomAgentLabel(customAgentConfig) : 'Custom agent')
+      : agentPreset === 'codex'
+        ? 'Codex'
+        : agentPreset === 'claude'
+          ? 'Claude Code'
+          : 'Not selected';
+  const currentAgentIconUrl =
+    agentPreset === 'custom'
+      ? (activeCustomAgentOption?.iconUrl ?? customRegistryAgent?.icon ?? null)
+      : agentPreset === 'codex'
+        ? (codexRegistryAgent?.icon ?? null)
+        : agentPreset === 'claude'
+          ? (claudeRegistryAgent?.icon ?? null)
+          : null;
+  const currentAgentPreview =
+    agentPreset === 'custom'
+      ? toCommandPreview(customAgentConfig)
+      : agentPreset === 'codex'
+        ? codexAgentConfig
+          ? toCommandPreview(codexAgentConfig)
+          : 'Uses the bundled Codex ACP adapter.'
+        : agentPreset === 'claude'
+          ? claudeAgentConfig
+            ? toCommandPreview(claudeAgentConfig)
+            : 'Uses the bundled Claude Code ACP adapter.'
+          : 'Select an ACP agent to start new sessions with.';
+
+  return (
+    <>
+      <SectionGroup title="Default">
+        <SettingsCard>
+          <SettingRow
+            title="Default agent"
+            description="Choose which ACP agent new sessions should start with."
+            control={
+              <AgentPresetSelect
+                currentLabel={currentAgentLabel}
+                currentIconUrl={currentAgentIconUrl}
+                agentPreset={agentPreset}
+                activeCustomConfigSignature={activeCustomConfigSignature}
+                codexIconUrl={codexRegistryAgent?.icon ?? null}
+                claudeIconUrl={claudeRegistryAgent?.icon ?? null}
+                customAgentOptions={customAgentOptions}
+                onSelectBuiltIn={handleUseBuiltIn}
+                onSelectCustom={handleUseCustomAgent}
+              />
+            }
+          />
+          <SettingRow
+            title="Current launch command"
+            description={currentAgentPreview}
+            control={<PillLabel>{agentPreset === 'custom' ? 'Custom' : toPresetLabel(agentPreset)}</PillLabel>}
+          />
+          <SettingRow
+            title="Installed agents"
+            description="Registry-installed and manual ACP agents saved in your local library."
+            control={<PillLabel>{toCountLabel(customAgentOptions.length, 'agent')}</PillLabel>}
+          />
+        </SettingsCard>
+      </SectionGroup>
+
+      <SectionGroup
+        title="Installed"
+        action={
+          <Button
+            size="sm"
+            variant="secondary"
+            className="rounded-[10px]"
+            onClick={() => {
+              openCustomEditor('new', undefined, 'Custom ACP agent');
+            }}
+          >
+            <Plus className="mr-1.5 h-3.5 w-3.5" />
+            New custom agent
+          </Button>
+        }
+      >
+        <SettingsCard>
+          {customAgentOptions.length === 0 ? (
+            <SettingRow
+              title="No installed agents"
+              description="Install an ACP agent from the registry or create a manual command below."
+              control={<PillLabel>Empty</PillLabel>}
+            />
+          ) : (
+            customAgentOptions.map((agent) => (
+              <AgentSettingsRow
+                key={agent.id}
+                iconUrl={agent.iconUrl}
+                title={agent.label}
+                description={toCommandPreview(agent.config)}
+                meta={agent.registryAgentId ? 'From registry' : 'Manual command'}
+                actions={
+                  <>
+                    <Button
+                      size="sm"
+                      variant={
+                        agentPreset === 'custom' &&
+                        activeCustomConfigSignature === toCustomAgentConfigSignature(agent.config)
+                          ? 'secondary'
+                          : 'outline'
+                      }
+                      className="rounded-[10px]"
+                      onClick={() => {
+                        handleUseCustomAgent(agent);
+                      }}
+                    >
+                      {agentPreset === 'custom' &&
+                      activeCustomConfigSignature === toCustomAgentConfigSignature(agent.config)
+                        ? 'Active'
+                        : 'Use'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="rounded-[10px]"
+                      onClick={() => {
+                        openCustomEditor(agent.id, agent.config, agent.label);
+                      }}
+                    >
+                      <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                      Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="rounded-[10px] text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                      onClick={() => {
+                        setPendingDeleteAgentId(agent.id);
+                      }}
+                    >
+                      <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                      Delete
+                    </Button>
+                  </>
+                }
+              />
+            ))
+          )}
+        </SettingsCard>
+      </SectionGroup>
+
+      <SectionGroup
+        title="ACP Registry"
+        action={
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 rounded-[10px]"
+            onClick={() => {
+              void loadRegistryAgents();
+            }}
+            disabled={isRegistryLoading}
+            aria-label="Reload ACP registry"
+            title="Reload ACP registry"
+          >
+            {isRegistryLoading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+          </Button>
+        }
+      >
+        <SettingsCard>
+          {isRegistryLoading && registryAgents.length === 0 ? (
+            <SettingRow
+              title="Loading registry"
+              description="Fetching available ACP agents from the public registry."
+              control={<PillLabel>Loading…</PillLabel>}
+            />
+          ) : registryError ? (
+            <SettingRow
+              title="Registry unavailable"
+              description={registryError}
+              control={<PillLabel>Error</PillLabel>}
+            />
+          ) : (
+            registryAgents.map((agent) => {
+              const installedOption = registryOptionById.get(agent.id) ?? null;
+              const launchTemplate = toRegistryLaunchTemplate(agent, currentPlatform);
+              const canAutoConfigure = launchTemplate.autoConfigurable;
+
+              return (
+                <AgentSettingsRow
+                  key={agent.id}
+                  iconUrl={agent.icon ?? null}
+                  title={agent.name}
+                  description={
+                    agent.description?.trim().length
+                      ? agent.description
+                      : canAutoConfigure
+                        ? launchTemplate.preview
+                        : 'Manual setup required for this registry entry.'
+                  }
+                  meta={[
+                    agent.id,
+                    agent.version ? `v${agent.version}` : null,
+                    installedOption ? 'Installed' : canAutoConfigure ? 'Ready to install' : 'Manual setup',
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                  actions={
+                    <>
+                      {installedOption ? (
+                        <Button
+                          size="sm"
+                          variant={
+                            agentPreset === 'custom' &&
+                            activeCustomConfigSignature ===
+                              toCustomAgentConfigSignature(installedOption.config)
+                              ? 'secondary'
+                              : 'outline'
+                          }
+                          className="rounded-[10px]"
+                          onClick={() => {
+                            handleUseCustomAgent(installedOption);
+                          }}
+                        >
+                          {agentPreset === 'custom' &&
+                          activeCustomConfigSignature ===
+                            toCustomAgentConfigSignature(installedOption.config)
+                            ? 'Active'
+                            : 'Use'}
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="rounded-[10px]"
+                          disabled={!canAutoConfigure}
+                          onClick={() => {
+                            handleAddRegistryAgent(agent);
+                          }}
+                        >
+                          Install
+                        </Button>
+                      )}
+                      {agent.repository ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="rounded-[10px]"
+                          onClick={() => {
+                            window.open(agent.repository, '_blank', 'noopener,noreferrer');
+                          }}
+                        >
+                          <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                          Repo
+                        </Button>
+                      ) : null}
+                    </>
+                  }
+                />
+              );
+            })
+          )}
+        </SettingsCard>
+      </SectionGroup>
+
+      <Dialog open={editorState !== null} onOpenChange={(open) => !open && setEditorState(null)}>
+        <DialogContent className="max-w-[680px] rounded-[28px] p-0">
+          <div className="px-5 pb-5 pt-5">
+            <h2 className="text-[24px] font-semibold leading-none tracking-[-0.015em] text-stone-900">
+              {editorState?.title ?? 'ACP agent'}
+            </h2>
+            <p className="mt-2 text-[13px] leading-[1.35] text-stone-500">
+              Update the launch command used for this ACP agent.
+            </p>
+
+            <div className="mt-4 space-y-3">
+              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+                Command
+                <input
+                  value={editorState?.command ?? ''}
+                  onChange={(event) => {
+                    setEditorState((previous) =>
+                      previous
+                        ? {
+                            ...previous,
+                            command: event.target.value,
+                          }
+                        : previous,
+                    );
+                  }}
+                  placeholder="npx"
+                  className="no-drag mt-1.5 h-9 w-full rounded-[10px] border border-stone-300 bg-white px-3 text-[13px] text-stone-800 placeholder:text-stone-400 focus:outline-none"
+                />
+              </label>
+
+              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+                Arguments
+                <input
+                  value={editorState?.args ?? ''}
+                  onChange={(event) => {
+                    setEditorState((previous) =>
+                      previous
+                        ? {
+                            ...previous,
+                            args: event.target.value,
+                          }
+                        : previous,
+                    );
+                  }}
+                  placeholder="-y your-agent --transport stdio"
+                  className="no-drag mt-1.5 h-9 w-full rounded-[10px] border border-stone-300 bg-white px-3 text-[13px] text-stone-800 placeholder:text-stone-400 focus:outline-none"
+                />
+              </label>
+
+              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+                Working directory (optional)
+                <input
+                  value={editorState?.cwd ?? ''}
+                  onChange={(event) => {
+                    setEditorState((previous) =>
+                      previous
+                        ? {
+                            ...previous,
+                            cwd: event.target.value,
+                          }
+                        : previous,
+                    );
+                  }}
+                  placeholder={workspacePath}
+                  className="no-drag mt-1.5 h-9 w-full rounded-[10px] border border-stone-300 bg-white px-3 text-[13px] text-stone-800 placeholder:text-stone-400 focus:outline-none"
+                />
+              </label>
+
+              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+                Environment (optional)
+                <textarea
+                  value={editorState?.env ?? ''}
+                  onChange={(event) => {
+                    setEditorState((previous) =>
+                      previous
+                        ? {
+                            ...previous,
+                            env: event.target.value,
+                          }
+                        : previous,
+                    );
+                  }}
+                  placeholder={'API_KEY=...\nDEBUG=1'}
+                  spellCheck={false}
+                  className="no-drag mt-1.5 h-[96px] w-full resize-none rounded-[10px] border border-stone-300 bg-white px-3 py-2 font-mono text-[12px] leading-[1.45] text-stone-800 placeholder:text-stone-400 focus:outline-none"
+                />
+              </label>
+            </div>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button
+                variant="ghost"
+                className="h-9 rounded-[11px] px-3 text-[13px]"
+                onClick={() => {
+                  setEditorState(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                className="h-9 rounded-[11px] px-4 text-[13px] font-semibold"
+                disabled={(editorState?.command.trim().length ?? 0) === 0}
+                onClick={handleSaveEditedAgent}
+              >
+                Save
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingDeleteAgent !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingDeleteAgentId(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-[480px] rounded-[28px] p-0">
+          <div className="px-5 pb-5 pt-5">
+            <h2 className="text-[24px] font-semibold leading-none tracking-[-0.015em] text-stone-900">
+              Delete agent
+            </h2>
+            <p className="mt-2 text-[13px] leading-[1.45] text-stone-500">
+              {pendingDeleteAgent
+                ? `Remove ${pendingDeleteAgent.label} from your installed agents library. This does not delete anything outside the app.`
+                : 'Remove this agent from your installed agents library.'}
+            </p>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button
+                variant="ghost"
+                className="h-9 rounded-[11px] px-3 text-[13px]"
+                onClick={() => {
+                  setPendingDeleteAgentId(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                className="h-9 rounded-[11px] bg-rose-600 px-4 text-[13px] font-semibold text-white hover:bg-rose-700"
+                onClick={() => {
+                  if (pendingDeleteAgentId) {
+                    handleDeleteCustomAgent(pendingDeleteAgentId);
+                  }
+                }}
+              >
+                Delete
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+};
+
+const AgentSettingsRow = ({
+  iconUrl,
+  title,
+  description,
+  meta,
+  actions,
+}: {
+  iconUrl: string | null;
+  title: string;
+  description: string;
+  meta?: string;
+  actions: React.ReactNode;
+}): JSX.Element => (
+  <div className="flex items-center justify-between gap-4 border-b border-stone-200/75 px-3 py-3 last:border-b-0">
+    <div className="min-w-0 flex items-start gap-3">
+      <AgentAvatar iconUrl={iconUrl} label={title} className="mt-0.5 h-10 w-10 rounded-[12px]" />
+      <div className="min-w-0">
+        <p className="truncate text-[14px] font-medium text-stone-800">{title}</p>
+        {meta ? <p className="mt-0.5 text-[12px] text-stone-500">{meta}</p> : null}
+        <p className="mt-1 break-all text-[13px] text-stone-500">{description}</p>
+      </div>
+    </div>
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">{actions}</div>
+  </div>
+);
+
+const AgentAvatar = ({
+  iconUrl,
+  label,
+  className,
+}: {
+  iconUrl: string | null;
+  label: string;
+  className?: string;
+}): JSX.Element => {
+  const fallbackLabel = label.trim().charAt(0).toUpperCase() || '?';
+
+  return (
+    <Avatar className={cn('rounded-[10px] bg-stone-100', className)}>
+      {iconUrl ? (
+        <AvatarImage
+          src={iconUrl}
+          alt={`${label} icon`}
+          className="zeroade-agent-icon-image h-full w-full object-cover"
+        />
+      ) : null}
+      <AvatarFallback className="rounded-[10px] bg-stone-200 text-[10px] font-semibold uppercase text-stone-600">
+        {fallbackLabel}
+      </AvatarFallback>
+    </Avatar>
+  );
+};
+
+const AgentPresetSelect = ({
+  currentLabel,
+  currentIconUrl,
+  agentPreset,
+  activeCustomConfigSignature,
+  codexIconUrl,
+  claudeIconUrl,
+  customAgentOptions,
+  onSelectBuiltIn,
+  onSelectCustom,
+}: {
+  currentLabel: string;
+  currentIconUrl: string | null;
+  agentPreset: AcpAgentPreset;
+  activeCustomConfigSignature: string;
+  codexIconUrl: string | null;
+  claudeIconUrl: string | null;
+  customAgentOptions: CustomAgentOption[];
+  onSelectBuiltIn: (preset: 'codex' | 'claude') => void;
+  onSelectCustom: (agent: CustomAgentOption) => void;
+}): JSX.Element => (
+  <DropdownMenu>
+    <DropdownMenuTrigger asChild>
+      <SettingsSelectTrigger
+        className="h-10 min-w-[220px] justify-between rounded-[14px] pl-1 pr-3"
+        aria-label="Select default ACP agent"
+      >
+        <span className="flex min-w-0 items-center gap-3">
+          <AgentAvatar
+            iconUrl={currentIconUrl}
+            label={currentLabel}
+            className="h-[26px] w-[26px] rounded-[8px]"
+          />
+          <span className="truncate">{currentLabel}</span>
+        </span>
+        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-stone-500" />
+      </SettingsSelectTrigger>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent align="end" className="max-h-[360px] w-[260px] overflow-y-auto rounded-[22px] p-2">
+      <SettingsSelectItem selected={agentPreset === 'codex'} onSelect={() => onSelectBuiltIn('codex')}>
+        <span className="flex min-w-0 flex-1 items-center gap-3">
+          <AgentAvatar
+            iconUrl={codexIconUrl}
+            label="Codex"
+            className="h-[26px] w-[26px] rounded-[8px]"
+          />
+          <span className="truncate">Codex</span>
+        </span>
+      </SettingsSelectItem>
+      <SettingsSelectItem selected={agentPreset === 'claude'} onSelect={() => onSelectBuiltIn('claude')}>
+        <span className="flex min-w-0 flex-1 items-center gap-3">
+          <AgentAvatar
+            iconUrl={claudeIconUrl}
+            label="Claude Code"
+            className="h-[26px] w-[26px] rounded-[8px]"
+          />
+          <span className="truncate">Claude Code</span>
+        </span>
+      </SettingsSelectItem>
+      {customAgentOptions.map((agent) => (
+        <SettingsSelectItem
+          key={agent.id}
+          selected={
+            agentPreset === 'custom' &&
+            toCustomAgentConfigSignature(agent.config) === activeCustomConfigSignature
+          }
+          onSelect={() => {
+            onSelectCustom(agent);
+          }}
+        >
+          <span className="flex min-w-0 flex-1 items-center gap-3">
+            <AgentAvatar
+              iconUrl={agent.iconUrl}
+              label={agent.label}
+              className="h-[26px] w-[26px] rounded-[8px]"
+            />
+            <span className="truncate">{agent.label}</span>
+          </span>
+        </SettingsSelectItem>
+      ))}
+    </DropdownMenuContent>
+  </DropdownMenu>
+);
+
+interface SkillEditorState {
+  mode: 'create' | 'edit';
+  absolutePath?: string;
+  slug: string;
+  content: string;
+  slugTouched: boolean;
+}
+
+const DEFAULT_NEW_SKILL_NAME = 'New Skill';
+
+const buildSkillTemplate = (name: string): string => `# ${name}
+
+Describe when this skill should be used.
+
+## Instructions
+- Add the workflow or rules the agent should follow.
+`;
+
+const extractSkillTitleFromContent = (content: string, fallback = DEFAULT_NEW_SKILL_NAME): string => {
+  for (const line of content.replace(/\r\n?/g, '\n').split('\n')) {
+    const match = line.trim().match(/^#\s+(.+)$/);
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+
+  return fallback;
+};
+
+const toSkillSlug = (value: string): string =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[\\/]+/g, '-')
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+const toSkillsErrorMessage = (error: unknown, fallback: string): string => {
+  const restartMessage =
+    'Restart the app once to enable Skills. The renderer updated, but the Electron main process has not reloaded the new skills handlers yet.';
+
+  if (error instanceof Error && error.message.trim().length > 0) {
+    if (
+      error.message.includes("No handler registered for 'skills:") ||
+      error.message.includes('skillsList is not a function') ||
+      error.message.includes('skillsRead is not a function') ||
+      error.message.includes('skillsWrite is not a function') ||
+      error.message.includes('skillsDelete is not a function')
+    ) {
+      return restartMessage;
+    }
+
+    return error.message.trim();
+  }
+
+  if (typeof error === 'string' && error.trim().length > 0) {
+    if (
+      error.includes("No handler registered for 'skills:") ||
+      error.includes('skillsList is not a function') ||
+      error.includes('skillsRead is not a function') ||
+      error.includes('skillsWrite is not a function') ||
+      error.includes('skillsDelete is not a function')
+    ) {
+      return restartMessage;
+    }
+
+    return error.trim();
+  }
+
+  return fallback;
+};
+
+const SkillsSettingsSection = (): JSX.Element => {
+  const [skillsResult, setSkillsResult] = React.useState<SkillsListResult | null>(null);
+  const [isSkillsLoading, setIsSkillsLoading] = React.useState(false);
+  const [skillsError, setSkillsError] = React.useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = React.useState('');
+  const [editorState, setEditorState] = React.useState<SkillEditorState | null>(null);
+  const [pendingDeleteSkill, setPendingDeleteSkill] = React.useState<SkillSummary | null>(null);
+  const [isSkillActionPending, setIsSkillActionPending] = React.useState(false);
+
+  const loadSkills = React.useCallback(async (): Promise<void> => {
+    setIsSkillsLoading(true);
+    setSkillsError(null);
+
+    try {
+      const result = await window.desktop.skillsList();
+      setSkillsResult(result);
+    } catch (error) {
+      setSkillsError(toSkillsErrorMessage(error, 'Could not load skills.'));
+    } finally {
+      setIsSkillsLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadSkills();
+  }, [loadSkills]);
+
+  const skills = skillsResult?.skills ?? [];
+  const installedSkillCount = skills.length;
+  const customSkillCount = skills.filter((skill) => skill.scope === 'custom').length;
+  const builtInSkillCount = skills.filter((skill) => skill.scope === 'system').length;
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const filteredSkills = React.useMemo(
+    () =>
+      skills.filter((skill) => {
+        if (!normalizedSearchQuery) {
+          return true;
+        }
+
+        const haystack = `${skill.name} ${skill.description} ${skill.slug}`.toLowerCase();
+        return haystack.includes(normalizedSearchQuery);
+      }),
+    [normalizedSearchQuery, skills],
+  );
+
+  const openNewSkillDialog = React.useCallback(() => {
+    setEditorState({
+      mode: 'create',
+      slug: toSkillSlug(DEFAULT_NEW_SKILL_NAME),
+      content: buildSkillTemplate(DEFAULT_NEW_SKILL_NAME),
+      slugTouched: false,
+    });
+  }, []);
+
+  const openEditSkillDialog = React.useCallback(async (skill: SkillSummary) => {
+    try {
+      const result = await window.desktop.skillsRead({
+        absolutePath: skill.absolutePath,
+      });
+
+      setEditorState({
+        mode: 'edit',
+        absolutePath: skill.absolutePath,
+        slug: skill.slug,
+        content: result.content,
+        slugTouched: true,
+      });
+    } catch (error) {
+      window.alert(toSkillsErrorMessage(error, 'Could not open skill.'));
+    }
+  }, []);
+
+  const handleRevealSkill = React.useCallback(async (skill: SkillSummary) => {
+    try {
+      await window.desktop.workspaceRevealFile({
+        absolutePath: skill.absolutePath,
+      });
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Could not reveal skill.');
+    }
+  }, []);
+
+  const handleSaveSkill = React.useCallback(async (): Promise<void> => {
+    if (!editorState) {
+      return;
+    }
+
+    setIsSkillActionPending(true);
+
+    try {
+      await window.desktop.skillsWrite({
+        absolutePath: editorState.mode === 'edit' ? editorState.absolutePath : undefined,
+        slug: editorState.mode === 'create' ? editorState.slug : undefined,
+        content: editorState.content,
+      });
+      setEditorState(null);
+      setSearchQuery('');
+      await loadSkills();
+    } catch (error) {
+      window.alert(toSkillsErrorMessage(error, 'Could not save skill.'));
+    } finally {
+      setIsSkillActionPending(false);
+    }
+  }, [editorState, loadSkills]);
+
+  const handleDeleteSkill = React.useCallback(async (): Promise<void> => {
+    if (!pendingDeleteSkill) {
+      return;
+    }
+
+    setIsSkillActionPending(true);
+
+    try {
+      await window.desktop.skillsDelete({
+        absolutePath: pendingDeleteSkill.absolutePath,
+      });
+      setPendingDeleteSkill(null);
+      await loadSkills();
+    } catch (error) {
+      window.alert(toSkillsErrorMessage(error, 'Could not delete skill.'));
+    } finally {
+      setIsSkillActionPending(false);
+    }
+  }, [loadSkills, pendingDeleteSkill]);
+
+  const skillsToolbar = (
+    <div className="flex items-center gap-2">
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 rounded-[10px]"
+        onClick={() => {
+          void loadSkills();
+        }}
+        disabled={isSkillsLoading}
+        aria-label="Reload skills"
+        title="Reload skills"
+      >
+        {isSkillsLoading ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <RefreshCw className="h-3.5 w-3.5" />
+        )}
+      </Button>
+      <label className="inline-flex h-8 items-center gap-2 rounded-full border border-stone-200 bg-white pl-3 pr-3 text-[13px] text-stone-500">
+        <Search className="h-3.5 w-3.5 shrink-0" />
+        <input
+          value={searchQuery}
+          onChange={(event) => {
+            setSearchQuery(event.target.value);
+          }}
+          placeholder="Search skills"
+          className="w-[180px] bg-transparent text-stone-700 outline-none placeholder:text-stone-400"
+          aria-label="Search skills"
+        />
+      </label>
+      <Button
+        size="sm"
+        className="h-8 rounded-[10px] px-3 text-[13px] font-semibold"
+        onClick={openNewSkillDialog}
+      >
+        <Plus className="mr-1.5 h-3.5 w-3.5" />
+        New skill
+      </Button>
+    </div>
+  );
+
+  return (
+    <>
+      <SectionGroup title="Library">
+        <SettingsCard>
+          <SettingRow
+            title="Skills folder"
+            description={skillsResult?.skillsRoot ?? 'Loading local skills directory.'}
+            control={
+              <PillLabel>
+                {skillsResult?.skillsRoot ? getFolderName(skillsResult.skillsRoot) : 'Loading…'}
+              </PillLabel>
+            }
+          />
+          <SettingRow
+            title="Installed skills"
+            description="Skills loaded from your local Codex skills library."
+            control={<PillLabel>{toCountLabel(installedSkillCount, 'skill')}</PillLabel>}
+          />
+          <SettingRow
+            title="Custom skills"
+            description="User-created skills you can edit and remove from settings."
+            control={<PillLabel>{toCountLabel(customSkillCount, 'skill')}</PillLabel>}
+          />
+          <SettingRow
+            title="Built-in skills"
+            description="Bundled skills available in the shared system skills directory."
+            control={<PillLabel>{toCountLabel(builtInSkillCount, 'skill')}</PillLabel>}
+          />
+        </SettingsCard>
+      </SectionGroup>
+
+      <SectionGroup title="Installed" action={skillsToolbar}>
+        <SettingsCard>
+          {isSkillsLoading && skills.length === 0 ? (
+            <SettingRow
+              title="Loading skills"
+              description="Reading installed skills from the local library."
+              control={<PillLabel>Loading…</PillLabel>}
+            />
+          ) : skillsError ? (
+            <SettingRow
+              title="Skills unavailable"
+              description={skillsError}
+              control={<PillLabel>Error</PillLabel>}
+            />
+          ) : filteredSkills.length === 0 ? (
+            <SettingRow
+              title={normalizedSearchQuery ? 'No matching skills' : 'No installed skills'}
+              description={
+                normalizedSearchQuery
+                  ? 'Try a different search query.'
+                  : 'Create a custom skill to start building reusable agent workflows.'
+              }
+              control={<PillLabel>Empty</PillLabel>}
+            />
+          ) : (
+            filteredSkills.map((skill) => (
+              <SkillSettingsRow
+                key={skill.absolutePath}
+                skill={skill}
+                onReveal={() => {
+                  void handleRevealSkill(skill);
+                }}
+                onEdit={
+                  skill.readOnly
+                    ? undefined
+                    : () => {
+                        void openEditSkillDialog(skill);
+                      }
+                }
+                onDelete={
+                  skill.readOnly
+                    ? undefined
+                    : () => {
+                        setPendingDeleteSkill(skill);
+                      }
+                }
+              />
+            ))
+          )}
+        </SettingsCard>
+      </SectionGroup>
+
+      <Dialog open={editorState !== null} onOpenChange={(open) => !open && setEditorState(null)}>
+        <DialogContent className="max-w-[760px] rounded-[28px] p-0">
+          <div className="px-5 pb-5 pt-5">
+            <h2 className="text-[24px] font-semibold leading-none tracking-[-0.015em] text-stone-900">
+              {editorState?.mode === 'edit' ? 'Edit skill' : 'New skill'}
+            </h2>
+            <p className="mt-2 text-[13px] leading-[1.45] text-stone-500">
+              Skills are stored as `SKILL.md` files inside your local Codex skills directory.
+            </p>
+
+            {editorState?.mode === 'create' ? (
+              <label className="mt-4 block text-[13px] font-medium text-stone-700">
+                Folder name
+                <input
+                  value={editorState.slug}
+                  onChange={(event) => {
+                    const nextSlug = toSkillSlug(event.target.value);
+                    setEditorState((previous) =>
+                      previous
+                        ? {
+                            ...previous,
+                            slug: nextSlug,
+                            slugTouched: true,
+                          }
+                        : previous,
+                    );
+                  }}
+                  placeholder="my-skill"
+                  className="no-drag mt-2 h-9 w-full rounded-[10px] border border-stone-300 bg-white px-3 text-[13px] text-stone-800 placeholder:text-stone-400 focus:outline-none"
+                />
+              </label>
+            ) : null}
+
+            <label className="mt-4 block text-[13px] font-medium text-stone-700">
+              SKILL.md
+              <textarea
+                value={editorState?.content ?? ''}
+                onChange={(event) => {
+                  const nextContent = event.target.value;
+                  setEditorState((previous) => {
+                    if (!previous) {
+                      return previous;
+                    }
+
+                    const nextTitle = extractSkillTitleFromContent(nextContent);
+                    const nextSlug =
+                      previous.mode === 'create' && !previous.slugTouched
+                        ? toSkillSlug(nextTitle)
+                        : previous.slug;
+
+                    return {
+                      ...previous,
+                      content: nextContent,
+                      slug: nextSlug,
+                    };
+                  });
+                }}
+                spellCheck={false}
+                className="no-drag mt-2 h-[320px] w-full resize-none rounded-[12px] border border-stone-300 bg-white px-3 py-2 font-mono text-[12px] leading-[1.55] text-stone-800 placeholder:text-stone-400 focus:outline-none"
+              />
+            </label>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button
+                variant="ghost"
+                className="h-9 rounded-[11px] px-3 text-[13px]"
+                onClick={() => {
+                  setEditorState(null);
+                }}
+                disabled={isSkillActionPending}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                className="h-9 rounded-[11px] bg-[var(--zeroade-accent-strong)] px-4 text-[13px] font-semibold text-white hover:bg-[var(--zeroade-accent-strong)] hover:opacity-95"
+                onClick={() => {
+                  void handleSaveSkill();
+                }}
+                disabled={
+                  isSkillActionPending ||
+                  (editorState?.mode === 'create' && (editorState.slug?.trim().length ?? 0) === 0) ||
+                  (editorState?.content.trim().length ?? 0) === 0
+                }
+              >
+                {isSkillActionPending ? 'Saving…' : editorState?.mode === 'edit' ? 'Save changes' : 'Create'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingDeleteSkill !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingDeleteSkill(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-[480px] rounded-[28px] p-0">
+          <div className="px-5 pb-5 pt-5">
+            <h2 className="text-[24px] font-semibold leading-none tracking-[-0.015em] text-stone-900">
+              Delete skill
+            </h2>
+            <p className="mt-2 text-[13px] leading-[1.45] text-stone-500">
+              {pendingDeleteSkill
+                ? `Remove ${pendingDeleteSkill.name} from your local skills library. This deletes the skill directory and any files inside it.`
+                : 'Remove this skill from your local skills library.'}
+            </p>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button
+                variant="ghost"
+                className="h-9 rounded-[11px] px-3 text-[13px]"
+                onClick={() => {
+                  setPendingDeleteSkill(null);
+                }}
+                disabled={isSkillActionPending}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                className="h-9 rounded-[11px] bg-rose-600 px-4 text-[13px] font-semibold text-white hover:bg-rose-700"
+                onClick={() => {
+                  void handleDeleteSkill();
+                }}
+                disabled={isSkillActionPending}
+              >
+                {isSkillActionPending ? 'Deleting…' : 'Delete'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+};
+
+const SkillSettingsRow = ({
+  skill,
+  onReveal,
+  onEdit,
+  onDelete,
+}: {
+  skill: SkillSummary;
+  onReveal: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
+}): JSX.Element => (
+  <div className="flex items-center justify-between gap-4 border-b border-stone-200/75 px-3 py-3 last:border-b-0">
+    <div className="min-w-0 flex items-start gap-3">
+      <SkillAvatar scope={skill.scope} className="mt-0.5 h-10 w-10 rounded-[12px]" />
+      <div className="min-w-0">
+        <p className="truncate text-[14px] font-medium text-stone-800">{skill.name}</p>
+        <p className="mt-0.5 text-[12px] text-stone-500">
+          {skill.scope === 'custom' ? 'Custom skill' : 'Built-in skill'}
+          {' · '}
+          {skill.slug}
+        </p>
+        <p className="mt-1 text-[13px] text-stone-500">{skill.description}</p>
+      </div>
+    </div>
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+      <Button
+        size="sm"
+        variant="ghost"
+        className="rounded-[10px]"
+        onClick={onReveal}
+      >
+        <FolderSearch className="mr-1.5 h-3.5 w-3.5" />
+        Reveal
+      </Button>
+      {onEdit ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="rounded-[10px]"
+          onClick={onEdit}
+        >
+          <Pencil className="mr-1.5 h-3.5 w-3.5" />
+          Edit
+        </Button>
+      ) : null}
+      {onDelete ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="rounded-[10px] text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+          onClick={onDelete}
+        >
+          <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+          Delete
+        </Button>
+      ) : null}
+    </div>
+  </div>
+);
+
+const SkillAvatar = ({
+  scope,
+  className,
+}: {
+  scope: SkillSummary['scope'];
+  className?: string;
+}): JSX.Element => (
+  <div
+    className={cn(
+      'inline-flex items-center justify-center border border-black/5',
+      scope === 'custom'
+        ? 'bg-amber-50 text-amber-700'
+        : 'bg-stone-100 text-stone-600',
+      className,
+    )}
+  >
+    {scope === 'custom' ? (
+      <Sparkles className="h-[18px] w-[18px]" />
+    ) : (
+      <Bot className="h-[18px] w-[18px]" />
+    )}
+  </div>
+);

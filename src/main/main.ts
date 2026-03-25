@@ -4,11 +4,15 @@ import path from 'node:path';
 import started from 'electron-squirrel-startup';
 import { IPC_CHANNELS } from '@shared/contracts/ipc';
 import { registerAcpIpc } from './ipc/acp-ipc';
+import { registerLspIpc } from './ipc/lsp-ipc';
 import { registerShellIpc } from './ipc/shell-ipc';
+import { registerSkillsIpc } from './ipc/skills-ipc';
 import { registerTerminalIpc } from './ipc/terminal-ipc';
 import { registerUpdaterIpc } from './ipc/updater-ipc';
 import { registerWorkspaceIpc } from './ipc/workspace-ipc';
 import { AcpService } from './services/acp/acp-service';
+import { LspService } from './services/lsp/lsp-service';
+import { SkillsService } from './services/skills/skills-service';
 import { SettingsStore } from './services/settings/settings-store';
 import { TerminalService } from './services/terminal/terminal-service';
 import { UpdaterService } from './services/updater/updater-service';
@@ -54,6 +58,8 @@ const applyMacAppIcon = (): void => {
 
 const settingsStore = new SettingsStore();
 const acpService = new AcpService();
+const lspService = new LspService();
+const skillsService = new SkillsService();
 const workspaceService = new WorkspaceService();
 const terminalService = new TerminalService();
 const updaterService = new UpdaterService();
@@ -78,6 +84,16 @@ terminalService.onEvent((event) => {
   }
 });
 
+lspService.onEvent((event) => {
+  const windows = BrowserWindow.getAllWindows();
+
+  for (const window of windows) {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.lspEvent, event);
+    }
+  }
+});
+
 updaterService.onEvent((event) => {
   const windows = BrowserWindow.getAllWindows();
 
@@ -91,7 +107,9 @@ updaterService.onEvent((event) => {
 const bootstrap = async (): Promise<void> => {
   registerShellIpc();
   registerWorkspaceIpc(workspaceService);
+  registerLspIpc(lspService);
   registerAcpIpc(acpService);
+  registerSkillsIpc(skillsService);
   registerTerminalIpc(terminalService);
   registerUpdaterIpc(updaterService);
   await createMainWindow(settingsStore);
@@ -109,6 +127,7 @@ app.on('ready', () => {
 
 app.on('window-all-closed', () => {
   terminalService.disposeAll();
+  lspService.disposeAll();
 
   if (process.platform !== 'darwin') {
     app.quit();
@@ -117,6 +136,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   terminalService.disposeAll();
+  lspService.disposeAll();
   updaterService.dispose();
 });
 

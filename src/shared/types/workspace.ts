@@ -17,6 +17,18 @@ export interface WorkspaceReadFileResult {
   content: string;
 }
 
+export interface WorkspaceWriteFileRequest {
+  workspacePath: string;
+  filePath: string;
+  content: string;
+}
+
+export interface WorkspaceWriteFileResult {
+  absolutePath: string;
+  relativePath: string;
+  bytesWritten: number;
+}
+
 export interface WorkspaceDiffFileRequest {
   workspacePath: string;
   filePath: string;
@@ -37,6 +49,37 @@ export interface WorkspaceRevealFileRequest {
 
 export interface WorkspaceRevealFileResult {
   opened: boolean;
+}
+
+export interface WorkspaceCopyEntryRequest {
+  workspacePath: string;
+  sourcePath: string;
+  destinationPath: string;
+}
+
+export interface WorkspaceCopyEntryResult {
+  absolutePath: string;
+  relativePath: string;
+}
+
+export interface WorkspaceMoveEntryRequest {
+  workspacePath: string;
+  sourcePath: string;
+  destinationPath: string;
+}
+
+export interface WorkspaceMoveEntryResult {
+  absolutePath: string;
+  relativePath: string;
+}
+
+export interface WorkspaceDeleteEntryRequest {
+  workspacePath: string;
+  targetPath: string;
+}
+
+export interface WorkspaceDeleteEntryResult {
+  deleted: boolean;
 }
 
 export interface WorkspaceGitStatusRequest {
