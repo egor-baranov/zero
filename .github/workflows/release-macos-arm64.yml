@@ -2,7 +2,8 @@ name: Release macOS Apple Silicon
 
 on:
   push:
-    - main
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
