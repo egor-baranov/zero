@@ -5,10 +5,12 @@ import started from 'electron-squirrel-startup';
 import { IPC_CHANNELS } from '@shared/contracts/ipc';
 import { registerAcpIpc } from './ipc/acp-ipc';
 import { registerLspIpc } from './ipc/lsp-ipc';
+import { registerSettingsIpc } from './ipc/settings-ipc';
 import { registerShellIpc } from './ipc/shell-ipc';
 import { registerSkillsIpc } from './ipc/skills-ipc';
 import { registerTerminalIpc } from './ipc/terminal-ipc';
 import { registerUpdaterIpc } from './ipc/updater-ipc';
+import { registerVoiceIpc } from './ipc/voice-ipc';
 import { registerWorkspaceIpc } from './ipc/workspace-ipc';
 import { AcpService } from './services/acp/acp-service';
 import { LspService } from './services/lsp/lsp-service';
@@ -16,6 +18,7 @@ import { SkillsService } from './services/skills/skills-service';
 import { SettingsStore } from './services/settings/settings-store';
 import { TerminalService } from './services/terminal/terminal-service';
 import { UpdaterService } from './services/updater/updater-service';
+import { VoiceService } from './services/voice/voice-service';
 import { WorkspaceService } from './services/workspace/workspace-service';
 import { createMainWindow } from './window';
 
@@ -63,6 +66,7 @@ const skillsService = new SkillsService();
 const workspaceService = new WorkspaceService();
 const terminalService = new TerminalService();
 const updaterService = new UpdaterService();
+const voiceService = new VoiceService(settingsStore);
 
 acpService.onEvent((event) => {
   const windows = BrowserWindow.getAllWindows();
@@ -107,6 +111,8 @@ updaterService.onEvent((event) => {
 const bootstrap = async (): Promise<void> => {
   registerShellIpc();
   registerWorkspaceIpc(workspaceService);
+  registerSettingsIpc(settingsStore);
+  registerVoiceIpc(voiceService);
   registerLspIpc(lspService);
   registerAcpIpc(acpService);
   registerSkillsIpc(skillsService);

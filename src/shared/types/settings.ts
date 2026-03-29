@@ -6,6 +6,13 @@ export interface WindowBoundsState {
   isMaximized: boolean;
 }
 
+export interface VoiceSettings {
+  openAiApiKey: string;
+}
+
 export interface AppSettings {
   windowBounds?: WindowBoundsState;
+  voice?: {
+    openAiApiKey?: string;
+  };
 }

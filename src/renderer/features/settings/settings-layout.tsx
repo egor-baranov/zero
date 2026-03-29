@@ -940,6 +940,8 @@ export const SettingsLayout = ({
         </SettingsCard>
       </SectionGroup>
 
+      <VoiceSettingsSection />
+
       <SectionGroup title="Notifications">
         <SettingsCard>
           <SettingRow
@@ -1424,6 +1426,175 @@ export const SettingsLayout = ({
         </div>
       </div>
     </section>
+  );
+};
+
+const toSettingsErrorMessage = (error: unknown, fallback: string): string => {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+
+  if (typeof error === 'string' && error.trim().length > 0) {
+    return error.trim();
+  }
+
+  return fallback;
+};
+
+const VoiceSettingsSection = (): JSX.Element => {
+  const [draftOpenAiApiKey, setDraftOpenAiApiKey] = React.useState('');
+  const [savedOpenAiApiKey, setSavedOpenAiApiKey] = React.useState('');
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [isSaving, setIsSaving] = React.useState(false);
+  const [isKeyVisible, setIsKeyVisible] = React.useState(false);
+  const [statusMessage, setStatusMessage] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    const loadVoiceSettings = async (): Promise<void> => {
+      setIsLoading(true);
+      setStatusMessage(null);
+
+      try {
+        const result = await window.desktop.settingsGetVoiceSettings();
+        if (cancelled) {
+          return;
+        }
+
+        setDraftOpenAiApiKey(result.openAiApiKey);
+        setSavedOpenAiApiKey(result.openAiApiKey);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        setStatusMessage(toSettingsErrorMessage(error, 'Could not load voice settings.'));
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void loadVoiceSettings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const normalizedDraftKey = draftOpenAiApiKey.trim();
+  const normalizedSavedKey = savedOpenAiApiKey.trim();
+  const hasSavedKey = normalizedSavedKey.length > 0;
+  const canSave = !isLoading && !isSaving && normalizedDraftKey !== normalizedSavedKey;
+  const canClear =
+    !isLoading && !isSaving && (normalizedDraftKey.length > 0 || normalizedSavedKey.length > 0);
+
+  const handleSave = React.useCallback(async (): Promise<void> => {
+    setIsSaving(true);
+
+    try {
+      const nextSettings = await window.desktop.settingsSetVoiceSettings({
+        openAiApiKey: draftOpenAiApiKey,
+      });
+      setDraftOpenAiApiKey(nextSettings.openAiApiKey);
+      setSavedOpenAiApiKey(nextSettings.openAiApiKey);
+      setStatusMessage(
+        nextSettings.openAiApiKey.trim().length > 0
+          ? 'Voice API key saved.'
+          : 'Voice API key cleared.',
+      );
+    } catch (error) {
+      setStatusMessage(toSettingsErrorMessage(error, 'Could not save voice settings.'));
+    } finally {
+      setIsSaving(false);
+    }
+  }, [draftOpenAiApiKey]);
+
+  const handleClear = React.useCallback(() => {
+    setDraftOpenAiApiKey('');
+    setStatusMessage(null);
+  }, []);
+
+  const inputPlaceholder = hasSavedKey ? 'OpenAI API key saved' : 'sk-...';
+  const description = statusMessage
+    ? statusMessage
+    : hasSavedKey
+      ? 'Stored locally in Zero settings on this machine. Used for voice transcription fallback when ACP audio is unavailable.'
+      : 'Stored locally in Zero settings on this machine. Leave empty to keep using OPENAI_API_KEY or CODEX_API_KEY from the environment.';
+
+  return (
+    <SectionGroup title="Voice">
+      <SettingsCard>
+        <SettingRow
+          title="OpenAI API key"
+          description={description}
+          control={
+            <div className="flex max-w-[440px] flex-wrap items-center justify-end gap-2">
+              <input
+                type={isKeyVisible ? 'text' : 'password'}
+                value={draftOpenAiApiKey}
+                onChange={(event) => {
+                  setDraftOpenAiApiKey(event.target.value);
+                  setStatusMessage(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && canSave) {
+                    event.preventDefault();
+                    void handleSave();
+                  }
+                }}
+                placeholder={isLoading ? 'Loading…' : inputPlaceholder}
+                disabled={isLoading || isSaving}
+                autoCapitalize="off"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                className="no-drag h-8 w-[260px] rounded-full border border-stone-200 bg-white px-3 text-[13px] text-stone-700 placeholder:text-stone-400 focus:outline-none disabled:cursor-default disabled:bg-stone-50"
+                aria-label="OpenAI API key for voice input"
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-8 rounded-[10px] px-3 text-[13px]"
+                disabled={isLoading}
+                onClick={() => {
+                  setIsKeyVisible((previous) => !previous);
+                }}
+              >
+                {isKeyVisible ? 'Hide' : 'Show'}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-8 rounded-[10px] px-3 text-[13px]"
+                disabled={!canSave}
+                onClick={() => {
+                  void handleSave();
+                }}
+              >
+                {isSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Save'}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-8 rounded-[10px] px-3 text-[13px]"
+                disabled={!canClear}
+                onClick={handleClear}
+              >
+                Clear
+              </Button>
+            </div>
+          }
+        />
+        <SettingRow
+          title="Current source"
+          description="This key is used only for local voice transcription fallback."
+          control={<PillLabel>{hasSavedKey ? 'Settings' : 'Environment'}</PillLabel>}
+        />
+      </SettingsCard>
+    </SectionGroup>
   );
 };
 

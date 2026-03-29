@@ -199,12 +199,12 @@ export const Sidebar = ({
               aria-label="New project"
               title="New project"
               className={cn(
-              'zeroade-sidebar-hover-shadow no-drag inline-flex h-7 w-7 items-center justify-center rounded-md',
+              'zeroade-sidebar-hover-shadow no-drag inline-flex h-6 w-6 items-center justify-center rounded-md',
               'text-stone-600 transition-colors hover:bg-white/55',
             )}
             onClick={onOpenFolder}
           >
-            <FolderPlus className="h-4 w-4" />
+            <FolderPlus className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>

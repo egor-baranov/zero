@@ -43,7 +43,9 @@ import { Avatar, AvatarFallback, AvatarImage } from '@renderer/components/ui/ava
 import { cn } from '@renderer/lib/cn';
 import type {
   AcpCustomAgentConfig,
+  AcpPromptAudioContent,
   AcpPromptAttachment,
+  AcpPromptCapabilities,
   AcpSessionConfigControl,
   AcpSessionControls,
   AcpSetSessionConfigOptionRequest,
@@ -73,7 +75,12 @@ interface ComposerProps {
     preset: 'codex' | 'claude' | 'custom',
     config: AcpCustomAgentConfig,
   ) => void;
-  onSubmit: (value: string, attachments: AcpPromptAttachment[]) => Promise<void>;
+  onSubmit: (
+    value: string,
+    attachments: AcpPromptAttachment[],
+    audio?: AcpPromptAudioContent | null,
+  ) => Promise<void>;
+  promptCapabilities: AcpPromptCapabilities;
   sessionControls: AcpSessionControls | null;
   onSetSessionMode: (modeId: string) => Promise<void>;
   onSetSessionModel: (modelId: string) => Promise<void>;
@@ -149,50 +156,6 @@ export interface AgentPresetSelection {
   customConfig?: AcpCustomAgentConfig;
   customAgentId?: string;
 }
-
-interface SpeechRecognitionAlternativeLike {
-  transcript: string;
-}
-
-interface SpeechRecognitionResultLike {
-  isFinal: boolean;
-  length: number;
-  [index: number]: SpeechRecognitionAlternativeLike;
-}
-
-interface SpeechRecognitionResultListLike {
-  length: number;
-  [index: number]: SpeechRecognitionResultLike;
-}
-
-interface SpeechRecognitionEventLike extends Event {
-  resultIndex: number;
-  results: SpeechRecognitionResultListLike;
-}
-
-interface SpeechRecognitionErrorEventLike extends Event {
-  error: string;
-}
-
-interface SpeechRecognitionLike {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onstart: ((event: Event) => void) | null;
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
-  onend: ((event: Event) => void) | null;
-  start: () => void;
-  stop: () => void;
-  abort: () => void;
-}
-
-type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
-
-type SpeechRecognitionWindow = Window & {
-  SpeechRecognition?: SpeechRecognitionConstructor;
-  webkitSpeechRecognition?: SpeechRecognitionConstructor;
-};
 
 interface RegistryLauncherDistribution {
   package: string;
@@ -328,9 +291,131 @@ const getLikelyModeControl = (
   return bestControl;
 };
 
-const getSpeechRecognitionConstructor = (): SpeechRecognitionConstructor | null => {
-  const speechWindow = window as SpeechRecognitionWindow;
-  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+const hasVoiceCaptureSupport = (): boolean =>
+  typeof MediaRecorder !== 'undefined' &&
+  typeof window.navigator.mediaDevices?.getUserMedia === 'function';
+
+const VOICE_VISUALIZER_DEFAULT_BAR_COUNT = 96;
+const VOICE_VISUALIZER_MIN_BAR_COUNT = 40;
+const VOICE_VISUALIZER_MAX_BAR_COUNT = 240;
+const VOICE_VISUALIZER_BAR_WIDTH_PX = 3;
+const VOICE_VISUALIZER_BAR_GAP_PX = 2;
+const VOICE_VISUALIZER_IDLE_LEVEL = 0.02;
+const createIdleVoiceVisualizerBars = (count: number): number[] =>
+  Array.from(
+    { length: Math.max(1, count) },
+    () => VOICE_VISUALIZER_IDLE_LEVEL,
+);
+
+const clamp = (value: number, min: number, max: number): number =>
+  Math.min(max, Math.max(min, value));
+
+const calculateVoiceVisualizerBarCount = (width: number): number => {
+  if (!Number.isFinite(width) || width <= 0) {
+    return VOICE_VISUALIZER_DEFAULT_BAR_COUNT;
+  }
+
+  const pitch = VOICE_VISUALIZER_BAR_WIDTH_PX + VOICE_VISUALIZER_BAR_GAP_PX;
+  return clamp(
+    Math.floor((width + VOICE_VISUALIZER_BAR_GAP_PX) / pitch),
+    VOICE_VISUALIZER_MIN_BAR_COUNT,
+    VOICE_VISUALIZER_MAX_BAR_COUNT,
+  );
+};
+
+const formatVoiceRecordingDuration = (durationMs: number): string => {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+};
+
+const sampleVoiceVisualizerLevel = (frequencyData: Uint8Array): number => {
+  if (frequencyData.length === 0) {
+    return VOICE_VISUALIZER_IDLE_LEVEL;
+  }
+
+  const focusStart = Math.floor(frequencyData.length * 0.08);
+  const focusEnd = Math.max(focusStart + 1, Math.floor(frequencyData.length * 0.7));
+
+  let peak = 0;
+  let total = 0;
+  let count = 0;
+  for (let index = focusStart; index < focusEnd; index += 1) {
+    const value = frequencyData[index] ?? 0;
+    peak = Math.max(peak, value);
+    total += value;
+    count += 1;
+  }
+
+  const average = total / Math.max(1, count);
+  const combined = average * 0.55 + peak * 0.45;
+  return Math.max(
+    VOICE_VISUALIZER_IDLE_LEVEL,
+    Math.min(1, Math.pow(combined / 255, 0.85)),
+  );
+};
+
+const getAudioContextConstructor = (): typeof AudioContext | null => {
+  const audioContextConstructor =
+    window.AudioContext ??
+    (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+
+  return audioContextConstructor ?? null;
+};
+
+const getPreferredVoiceMimeType = (): string => {
+  if (typeof MediaRecorder === 'undefined') {
+    return '';
+  }
+
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus',
+  ];
+
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? '';
+};
+
+const blobToBase64 = async (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onerror = () => {
+      reject(new Error('Unable to read recorded audio.'));
+    };
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error('Unable to read recorded audio.'));
+        return;
+      }
+
+      const separatorIndex = reader.result.indexOf(',');
+      resolve(separatorIndex >= 0 ? reader.result.slice(separatorIndex + 1) : reader.result);
+    };
+
+    reader.readAsDataURL(blob);
+  });
+
+const normalizePromptAudioContent = (
+  audio: AcpPromptAudioContent | null | undefined,
+): AcpPromptAudioContent | null => {
+  if (!audio) {
+    return null;
+  }
+
+  const data = audio.data.trim();
+  const mimeType = audio.mimeType.trim();
+  if (!data || !mimeType) {
+    return null;
+  }
+
+  return {
+    data,
+    mimeType,
+  };
 };
 
 const mergeDictationText = (seed: string, dictated: string): string => {
@@ -347,23 +432,6 @@ const mergeDictationText = (seed: string, dictated: string): string => {
   return `${trimmedSeed} ${normalizedDictated}`;
 };
 
-const toVoiceErrorMessage = (error: string): string => {
-  if (error === 'audio-capture') {
-    return 'No microphone was found.';
-  }
-
-  if (error === 'not-allowed' || error === 'service-not-allowed') {
-    return 'Microphone access is blocked.';
-  }
-
-  if (error === 'network') {
-    return 'Speech recognition needs a network connection.';
-  }
-
-  return 'Voice input failed. Try again.';
-};
-
-const FATAL_VOICE_ERRORS = new Set(['audio-capture', 'not-allowed', 'service-not-allowed']);
 const FATAL_VOICE_START_ERROR_NAMES = new Set([
   'NotAllowedError',
   'PermissionDeniedError',
@@ -398,7 +466,19 @@ const toVoiceStartErrorMessage = (error: unknown): string => {
     return 'No microphone was found.';
   }
 
+  if (maybeName === 'NotReadableError' || maybeName === 'TrackStartError') {
+    return 'Microphone is unavailable right now.';
+  }
+
   return 'Unable to start voice input.';
+};
+
+const getVoiceInputUnavailableMessage = (): string => {
+  if (!hasVoiceCaptureSupport()) {
+    return 'Microphone capture is unavailable in this environment.';
+  }
+
+  return 'Voice input is unavailable in this environment.';
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -838,6 +918,7 @@ export const Composer = ({
   onSelectAgentPreset,
   onSaveAgentConfig,
   onSubmit,
+  promptCapabilities,
   sessionControls,
   onSetSessionMode,
   onSetSessionModel,
@@ -889,34 +970,37 @@ export const Composer = ({
       : '',
   );
   const [isDictating, setIsDictating] = React.useState(false);
+  const [isVoiceProcessing, setIsVoiceProcessing] = React.useState(false);
   const [isDictationModeEnabled, setIsDictationModeEnabled] = React.useState(false);
   const [voiceError, setVoiceError] = React.useState<string | null>(null);
+  const [pendingVoicePrompt, setPendingVoicePrompt] =
+    React.useState<AcpPromptAudioContent | null>(null);
+  const [recordingDurationMs, setRecordingDurationMs] = React.useState(0);
+  const [voiceVisualizerBars, setVoiceVisualizerBars] = React.useState<number[]>(
+    () => createIdleVoiceVisualizerBars(VOICE_VISUALIZER_DEFAULT_BAR_COUNT),
+  );
   const [draggingQueuedPromptId, setDraggingQueuedPromptId] = React.useState<string | null>(null);
   const [dragOverQueuedPromptId, setDragOverQueuedPromptId] = React.useState<string | null>(null);
   const messageInputRef = React.useRef<HTMLTextAreaElement | null>(null);
-  const recognitionRef = React.useRef<SpeechRecognitionLike | null>(null);
-  const dictationSeedRef = React.useRef('');
-  const dictationFinalRef = React.useRef('');
+  const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = React.useRef<MediaStream | null>(null);
+  const recordedVoiceChunksRef = React.useRef<Blob[]>([]);
+  const shouldTranscribeOnStopRef = React.useRef(true);
+  const submitAfterDictationRef = React.useRef(false);
   const dictationModeEnabledRef = React.useRef(false);
   const shortcutDictationActiveRef = React.useRef(false);
   const toggleDictationActiveRef = React.useRef(false);
-  const dictationStopRequestedRef = React.useRef(false);
-  const dictationRestartBlockedRef = React.useRef(false);
-  const dictationRestartTimeoutRef = React.useRef<number | null>(null);
   const lastAppliedPrefillRequestIdRef = React.useRef<number | null>(null);
+  const audioContextRef = React.useRef<AudioContext | null>(null);
+  const analyserRef = React.useRef<AnalyserNode | null>(null);
+  const analyserSourceRef = React.useRef<MediaStreamAudioSourceNode | null>(null);
+  const analyserDataRef = React.useRef<Uint8Array | null>(null);
+  const voiceMeterIntervalRef = React.useRef<number | null>(null);
+  const recordingStartedAtRef = React.useRef<number | null>(null);
+  const voiceVisualizerTrackRef = React.useRef<HTMLDivElement | null>(null);
+  const voiceVisualizerBarCountRef = React.useRef(VOICE_VISUALIZER_DEFAULT_BAR_COUNT);
 
-  const canSend = !disabled && message.trim().length > 0;
-  const isVoiceInputComingSoon = true;
-
-  const clearPendingDictationRestart = React.useCallback(() => {
-    const timeoutId = dictationRestartTimeoutRef.current;
-    if (timeoutId === null) {
-      return;
-    }
-
-    window.clearTimeout(timeoutId);
-    dictationRestartTimeoutRef.current = null;
-  }, []);
+  const canSend = !disabled && (message.trim().length > 0 || pendingVoicePrompt !== null);
 
   const setDictationModeEnabled = React.useCallback((enabled: boolean): void => {
     dictationModeEnabledRef.current = enabled;
@@ -949,7 +1033,13 @@ export const Composer = ({
 
   const hasWorkspace = workspacePath.trim().length > 0 && workspacePath !== '/';
   const isVoiceInputSupported = React.useMemo(
-    () => getSpeechRecognitionConstructor() !== null,
+    () => hasVoiceCaptureSupport(),
+    [],
+  );
+  const supportsAcpAudioPrompt = promptCapabilities.audio === true;
+  const isVoiceRecordingSurfaceVisible = isDictationModeEnabled || isVoiceProcessing;
+  const voiceInputUnavailableMessage = React.useMemo(
+    () => getVoiceInputUnavailableMessage(),
     [],
   );
   const codexRegistryAgent = React.useMemo(
@@ -1206,154 +1296,248 @@ export const Composer = ({
     }
   }, []);
 
-  const stopDictation = React.useCallback(() => {
-    clearPendingDictationRestart();
-    setDictationModeEnabled(false);
-    dictationStopRequestedRef.current = true;
-    const recognition = recognitionRef.current;
-    if (!recognition) {
-      setIsDictating(false);
+  React.useEffect(() => {
+    if (supportsAcpAudioPrompt || pendingVoicePrompt === null) {
+      return;
+    }
+
+    setPendingVoicePrompt(null);
+    setVoiceError('Voice prompt cleared because the active agent does not accept audio input.');
+  }, [pendingVoicePrompt, supportsAcpAudioPrompt]);
+
+  React.useEffect(() => {
+    if (!isVoiceRecordingSurfaceVisible) {
+      return;
+    }
+
+    const track = voiceVisualizerTrackRef.current;
+    if (!track) {
+      return;
+    }
+
+    const syncVoiceVisualizerWidth = (): void => {
+      const nextCount = calculateVoiceVisualizerBarCount(track.clientWidth);
+      voiceVisualizerBarCountRef.current = nextCount;
+      setVoiceVisualizerBars((current) => {
+        if (current.length === nextCount) {
+          return current;
+        }
+
+        const recent = current.slice(-nextCount);
+        if (recent.length === nextCount) {
+          return recent;
+        }
+
+        return createIdleVoiceVisualizerBars(nextCount - recent.length).concat(recent);
+      });
+    };
+
+    syncVoiceVisualizerWidth();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', syncVoiceVisualizerWidth);
+      return () => {
+        window.removeEventListener('resize', syncVoiceVisualizerWidth);
+      };
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      syncVoiceVisualizerWidth();
+    });
+    resizeObserver.observe(track);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [isVoiceRecordingSurfaceVisible]);
+
+  const releaseVoiceMeter = React.useCallback(() => {
+    if (voiceMeterIntervalRef.current !== null) {
+      window.clearInterval(voiceMeterIntervalRef.current);
+      voiceMeterIntervalRef.current = null;
+    }
+
+    analyserSourceRef.current?.disconnect();
+    analyserSourceRef.current = null;
+
+    analyserRef.current?.disconnect();
+    analyserRef.current = null;
+    analyserDataRef.current = null;
+
+    const audioContext = audioContextRef.current;
+    audioContextRef.current = null;
+    if (audioContext) {
+      void audioContext.close().catch(() => undefined);
+    }
+
+    recordingStartedAtRef.current = null;
+    setRecordingDurationMs(0);
+    setVoiceVisualizerBars(createIdleVoiceVisualizerBars(voiceVisualizerBarCountRef.current));
+  }, []);
+
+  const startVoiceMeter = React.useCallback((stream: MediaStream): void => {
+    releaseVoiceMeter();
+
+    recordingStartedAtRef.current = window.performance.now();
+    setRecordingDurationMs(0);
+    setVoiceVisualizerBars(createIdleVoiceVisualizerBars(voiceVisualizerBarCountRef.current));
+
+    const AudioContextConstructor = getAudioContextConstructor();
+    if (!AudioContextConstructor) {
+      voiceMeterIntervalRef.current = window.setInterval(() => {
+        if (recordingStartedAtRef.current === null) {
+          return;
+        }
+
+        setRecordingDurationMs(window.performance.now() - recordingStartedAtRef.current);
+      }, 100);
       return;
     }
 
     try {
-      recognition.stop();
+      const audioContext = new AudioContextConstructor();
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0.84;
+
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      audioContextRef.current = audioContext;
+      analyserRef.current = analyser;
+      analyserSourceRef.current = source;
+      analyserDataRef.current = new Uint8Array(analyser.frequencyBinCount);
+
+      if (audioContext.state === 'suspended') {
+        void audioContext.resume().catch(() => undefined);
+      }
+
+      voiceMeterIntervalRef.current = window.setInterval(() => {
+        if (recordingStartedAtRef.current !== null) {
+          setRecordingDurationMs(window.performance.now() - recordingStartedAtRef.current);
+        }
+
+        const currentAnalyser = analyserRef.current;
+        const currentData = analyserDataRef.current;
+        if (!currentAnalyser || !currentData) {
+          return;
+        }
+
+        currentAnalyser.getByteFrequencyData(currentData);
+        const nextLevel = sampleVoiceVisualizerLevel(currentData);
+        setVoiceVisualizerBars((current) =>
+          current.slice(1).concat(
+            Math.max(
+              nextLevel,
+              (current[current.length - 1] ?? VOICE_VISUALIZER_IDLE_LEVEL) * 0.72,
+            ),
+          ),
+        );
+      }, 60);
     } catch {
-      recognitionRef.current = null;
-      dictationFinalRef.current = '';
-      setIsDictating(false);
-    }
-  }, [clearPendingDictationRestart, setDictationModeEnabled]);
-
-  const startDictation = React.useCallback((): boolean => {
-    if (isVoiceInputComingSoon || disabled || isPrompting || !isVoiceInputSupported) {
-      return false;
-    }
-
-    const RecognitionCtor = getSpeechRecognitionConstructor();
-    if (!RecognitionCtor) {
-      setVoiceError('Voice input is unavailable in this environment.');
-      return false;
-    }
-
-    if (recognitionRef.current) {
-      return true;
-    }
-
-    clearPendingDictationRestart();
-    const recognition = new RecognitionCtor();
-    dictationSeedRef.current = message;
-    dictationFinalRef.current = '';
-    dictationStopRequestedRef.current = false;
-    dictationRestartBlockedRef.current = false;
-    setVoiceError(null);
-
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = window.navigator.language || 'en-US';
-    recognition.onstart = () => {
-      setIsDictating(true);
-    };
-    recognition.onresult = (event) => {
-      let nextFinalTranscript = dictationFinalRef.current;
-      let nextInterimTranscript = '';
-
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        if (!result || result.length === 0) {
-          continue;
+      voiceMeterIntervalRef.current = window.setInterval(() => {
+        if (recordingStartedAtRef.current === null) {
+          return;
         }
 
-        const transcript = result[0].transcript.trim();
-        if (!transcript) {
-          continue;
+        setRecordingDurationMs(window.performance.now() - recordingStartedAtRef.current);
+      }, 100);
+    }
+  }, [releaseVoiceMeter]);
+
+  const releaseVoiceCapture = React.useCallback(() => {
+    releaseVoiceMeter();
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+    mediaRecorderRef.current = null;
+  }, [releaseVoiceMeter]);
+
+  const processRecordedAudio = React.useCallback(
+    async (audioBlob: Blob): Promise<void> => {
+      try {
+        const audioBase64 = await blobToBase64(audioBlob);
+        const audioContent = normalizePromptAudioContent({
+          data: audioBase64,
+          mimeType: audioBlob.type || 'audio/webm',
+        });
+
+        if (!audioContent) {
+          setVoiceError('Voice input failed. Try again.');
+          return;
         }
 
-        if (result.isFinal) {
-          nextFinalTranscript = `${nextFinalTranscript} ${transcript}`.trim();
-        } else {
-          nextInterimTranscript = `${nextInterimTranscript} ${transcript}`.trim();
+        if (supportsAcpAudioPrompt) {
+          setPendingVoicePrompt(audioContent);
+          setVoiceError(null);
+          return;
         }
+
+        const result = await window.desktop.voiceTranscribe({
+          audioBase64: audioContent.data,
+          mimeType: audioContent.mimeType,
+        });
+
+        if (!result.ok) {
+          setVoiceError(result.error ?? 'Voice input failed. Try again.');
+          return;
+        }
+
+        setVoiceError(null);
+        setMessage((current) => mergeDictationText(current, result.text));
+      } catch {
+        setVoiceError('Voice input failed. Try again.');
+      } finally {
+        setIsVoiceProcessing(false);
       }
+    },
+    [supportsAcpAudioPrompt],
+  );
 
-      dictationFinalRef.current = nextFinalTranscript;
-      const combinedTranscript = `${nextFinalTranscript} ${nextInterimTranscript}`.trim();
-      setMessage(mergeDictationText(dictationSeedRef.current, combinedTranscript));
-    };
-    recognition.onerror = (event) => {
-      if (event.error === 'aborted') {
-        return;
-      }
-
-      const isFatalError = FATAL_VOICE_ERRORS.has(event.error);
-      dictationRestartBlockedRef.current = isFatalError;
-      if (isFatalError) {
-        toggleDictationActiveRef.current = false;
-        shortcutDictationActiveRef.current = false;
-        setDictationModeEnabled(false);
-      }
-      setVoiceError(toVoiceErrorMessage(event.error));
-    };
-    recognition.onend = () => {
-      recognitionRef.current = null;
-      dictationFinalRef.current = '';
-      setIsDictating(false);
-
-      const shouldRestart =
-        dictationModeEnabledRef.current &&
-        !dictationRestartBlockedRef.current &&
-        !disabled &&
-        !isPrompting &&
-        isVoiceInputSupported;
-
-      dictationRestartBlockedRef.current = false;
-
-      if (shouldRestart) {
-        const retryStart = (attempt: number): void => {
-          if (!dictationModeEnabledRef.current) {
-            dictationRestartTimeoutRef.current = null;
-            return;
-          }
-
-          const started = startDictation();
-          if (started) {
-            dictationRestartTimeoutRef.current = null;
-            return;
-          }
-
-          if (!dictationModeEnabledRef.current || dictationRestartBlockedRef.current) {
-            dictationRestartTimeoutRef.current = null;
-            return;
-          }
-
-          const nextDelay = Math.min(180 + attempt * 120, 900);
-          dictationRestartTimeoutRef.current = window.setTimeout(() => {
-            retryStart(attempt + 1);
-          }, nextDelay);
-        };
-
-        clearPendingDictationRestart();
-        dictationRestartTimeoutRef.current = window.setTimeout(() => {
-          retryStart(0);
-        }, 120);
-        return;
-      }
-
-      toggleDictationActiveRef.current = false;
-      shortcutDictationActiveRef.current = false;
+  const stopDictation = React.useCallback(
+    ({ discard = false }: { discard?: boolean } = {}) => {
+      shouldTranscribeOnStopRef.current = !discard;
       setDictationModeEnabled(false);
-    };
 
-    recognitionRef.current = recognition;
+      const recorder = mediaRecorderRef.current;
+      if (!recorder) {
+        setIsDictating(false);
+        releaseVoiceCapture();
+        return;
+      }
 
-    try {
-      recognition.start();
+      if (recorder.state === 'inactive') {
+        setIsDictating(false);
+        releaseVoiceCapture();
+        return;
+      }
+
+      try {
+        recorder.stop();
+      } catch {
+        setIsDictating(false);
+        releaseVoiceCapture();
+      }
+    },
+    [releaseVoiceCapture, setDictationModeEnabled],
+  );
+
+  const startDictation = React.useCallback(async (): Promise<boolean> => {
+    if (disabled || isPrompting || !isVoiceInputSupported || isVoiceProcessing) {
+      return false;
+    }
+
+    if (mediaRecorderRef.current) {
       return true;
+    }
+
+    setVoiceError(null);
+    shouldTranscribeOnStopRef.current = true;
+
+    let stream: MediaStream;
+    try {
+      stream = await window.navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (error: unknown) {
-      recognitionRef.current = null;
-      setIsDictating(false);
       if (isFatalVoiceStartError(error)) {
-        dictationRestartBlockedRef.current = true;
         toggleDictationActiveRef.current = false;
         shortcutDictationActiveRef.current = false;
         setDictationModeEnabled(false);
@@ -1361,93 +1545,162 @@ export const Composer = ({
       setVoiceError(toVoiceStartErrorMessage(error));
       return false;
     }
+
+    try {
+      const preferredMimeType = getPreferredVoiceMimeType();
+      const recorder = preferredMimeType
+        ? new MediaRecorder(stream, { mimeType: preferredMimeType })
+        : new MediaRecorder(stream);
+
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      recordedVoiceChunksRef.current = [];
+      startVoiceMeter(stream);
+
+      recorder.onstart = () => {
+        setIsDictating(true);
+      };
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordedVoiceChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onerror = () => {
+        recordedVoiceChunksRef.current = [];
+        setIsDictating(false);
+        setDictationModeEnabled(false);
+        setVoiceError('Voice recording failed. Try again.');
+        releaseVoiceCapture();
+      };
+      recorder.onstop = () => {
+        const shouldTranscribe = shouldTranscribeOnStopRef.current;
+        shouldTranscribeOnStopRef.current = true;
+
+        const recordedChunks = recordedVoiceChunksRef.current;
+        recordedVoiceChunksRef.current = [];
+        const mimeType = recorder.mimeType || preferredMimeType || 'audio/webm';
+
+        setIsDictating(false);
+        releaseVoiceCapture();
+
+        if (!shouldTranscribe) {
+          return;
+        }
+
+        if (recordedChunks.length === 0) {
+          setVoiceError('No audio was captured.');
+          return;
+        }
+
+        setIsVoiceProcessing(true);
+        void processRecordedAudio(new Blob(recordedChunks, { type: mimeType }));
+      };
+
+      recorder.start(250);
+      return true;
+    } catch {
+      stream.getTracks().forEach((track) => track.stop());
+      releaseVoiceCapture();
+      setVoiceError(voiceInputUnavailableMessage);
+      return false;
+    }
   }, [
-    clearPendingDictationRestart,
     disabled,
-    isVoiceInputComingSoon,
     isPrompting,
     isVoiceInputSupported,
-    message,
+    isVoiceProcessing,
+    processRecordedAudio,
+    releaseVoiceCapture,
+    startVoiceMeter,
     setDictationModeEnabled,
+    voiceInputUnavailableMessage,
   ]);
+
+  const beginDictation = React.useCallback(
+    (source: 'toggle' | 'shortcut') => {
+      submitAfterDictationRef.current = false;
+      toggleDictationActiveRef.current = source === 'toggle';
+      shortcutDictationActiveRef.current = source === 'shortcut';
+      setDictationModeEnabled(true);
+      void startDictation().then((started) => {
+        if (started) {
+          return;
+        }
+
+        toggleDictationActiveRef.current = false;
+        shortcutDictationActiveRef.current = false;
+        setDictationModeEnabled(false);
+      });
+    },
+    [setDictationModeEnabled, startDictation],
+  );
+
+  const endDictation = React.useCallback(
+    ({ discard = false }: { discard?: boolean } = {}) => {
+      submitAfterDictationRef.current = false;
+      toggleDictationActiveRef.current = false;
+      shortcutDictationActiveRef.current = false;
+      setDictationModeEnabled(false);
+      stopDictation({ discard });
+    },
+    [setDictationModeEnabled, stopDictation],
+  );
 
   React.useEffect(() => {
     return () => {
-      clearPendingDictationRestart();
-      setDictationModeEnabled(false);
-      toggleDictationActiveRef.current = false;
-      shortcutDictationActiveRef.current = false;
-      dictationStopRequestedRef.current = true;
-      const recognition = recognitionRef.current;
-      if (!recognition) {
-        return;
-      }
-
-      try {
-        recognition.abort();
-      } catch {
-        // Ignore teardown errors from speech recognition engines.
-      }
+      endDictation({ discard: true });
     };
-  }, [clearPendingDictationRestart, setDictationModeEnabled]);
+  }, [endDictation]);
 
   React.useEffect(() => {
     if (!disabled && !isPrompting) {
       return;
     }
 
-    toggleDictationActiveRef.current = false;
-    shortcutDictationActiveRef.current = false;
-    setDictationModeEnabled(false);
-    stopDictation();
-  }, [disabled, isPrompting, setDictationModeEnabled, stopDictation]);
+    endDictation({ discard: true });
+  }, [disabled, endDictation, isPrompting]);
 
   React.useEffect(() => {
-    if (isVoiceInputComingSoon || !isVoiceInputSupported) {
+    if (!isVoiceInputSupported) {
       return;
     }
 
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.repeat || event.key.toLowerCase() !== 'm' || !event.ctrlKey) {
+      if (
+        event.repeat ||
+        event.key.toLowerCase() !== 'm' ||
+        !event.ctrlKey ||
+        event.metaKey ||
+        event.altKey
+      ) {
         return;
       }
 
       event.preventDefault();
-      toggleDictationActiveRef.current = false;
-      shortcutDictationActiveRef.current = true;
-      setDictationModeEnabled(true);
-      const started = startDictation();
-      if (!started) {
-        shortcutDictationActiveRef.current = false;
-        setDictationModeEnabled(false);
-      }
-    };
-
-    const handleKeyUp = (event: KeyboardEvent): void => {
-      const isShortcutKey = event.key.toLowerCase() === 'm' || event.key === 'Control';
-      if (!isShortcutKey || !shortcutDictationActiveRef.current) {
+      if (isDictationModeEnabled) {
+        endDictation();
         return;
       }
 
-      toggleDictationActiveRef.current = false;
-      shortcutDictationActiveRef.current = false;
-      setDictationModeEnabled(false);
-      stopDictation();
+      if (disabled || isVoiceProcessing) {
+        return;
+      }
+
+      beginDictation('shortcut');
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
     };
   }, [
-    isVoiceInputComingSoon,
+    beginDictation,
+    disabled,
+    endDictation,
+    isDictationModeEnabled,
     isVoiceInputSupported,
-    setDictationModeEnabled,
-    startDictation,
-    stopDictation,
+    isVoiceProcessing,
   ]);
 
   React.useEffect(() => {
@@ -1712,7 +1965,8 @@ export const Composer = ({
 
   const handleSubmit = React.useCallback(async () => {
     const trimmed = message.trim();
-    if (!trimmed || disabled) {
+    const normalizedAudio = normalizePromptAudioContent(pendingVoicePrompt);
+    if ((!trimmed && !normalizedAudio) || disabled) {
       return;
     }
 
@@ -1724,8 +1978,30 @@ export const Composer = ({
 
     setMessage('');
     setAttachments([]);
-    await onSubmit(trimmed, promptAttachments);
-  }, [attachments, disabled, message, onSubmit]);
+    setPendingVoicePrompt(null);
+    await onSubmit(trimmed, promptAttachments, normalizedAudio);
+  }, [attachments, disabled, message, onSubmit, pendingVoicePrompt]);
+
+  React.useEffect(() => {
+    if (!submitAfterDictationRef.current || isDictationModeEnabled || isVoiceProcessing) {
+      return;
+    }
+
+    const normalizedAudio = normalizePromptAudioContent(pendingVoicePrompt);
+    if (!message.trim() && !normalizedAudio) {
+      submitAfterDictationRef.current = false;
+      return;
+    }
+
+    submitAfterDictationRef.current = false;
+    void handleSubmit();
+  }, [
+    handleSubmit,
+    isDictationModeEnabled,
+    isVoiceProcessing,
+    message,
+    pendingVoicePrompt,
+  ]);
 
   const customAgentById = React.useMemo(
     () => new Map(customAgentOptions.map((entry) => [entry.id, entry])),
@@ -2228,17 +2504,29 @@ export const Composer = ({
       (sessionModeControl.valueLabel.toLowerCase().includes('full') ||
         sessionModeControl.currentId.toLowerCase().includes('full')),
   );
-  const voiceInputTooltipText = isVoiceInputComingSoon
-    ? 'Soon'
-    : !isVoiceInputSupported
-      ? 'Voice input is unavailable in this environment.'
+  const clearPendingVoicePrompt = React.useCallback(() => {
+    setPendingVoicePrompt(null);
+  }, []);
+  const composerPlaceholder = disabled
+    ? disabledMessage ?? 'ACP is unavailable. Reconnect to start chatting…'
+    : 'Ask anything';
+  const voiceInputTooltipText = !isVoiceInputSupported
+    ? voiceInputUnavailableMessage
+    : isVoiceProcessing
+      ? supportsAcpAudioPrompt
+        ? 'Preparing voice prompt...'
+        : 'Transcribing voice input...'
       : voiceError ??
-        (isDictationModeEnabled
-          ? isDictating
-            ? 'Listening... click to stop'
-            : 'Starting voice input... click to stop'
-          : 'Click to toggle dictation or hold ^M');
-  const isVoiceInputDisabled = isVoiceInputComingSoon || disabled || !isVoiceInputSupported;
+        (pendingVoicePrompt
+          ? 'Voice prompt ready. Send it or remove it.'
+          : isDictationModeEnabled
+            ? isDictating
+              ? 'Recording... click to stop'
+              : 'Starting voice input... click to stop'
+            : supportsAcpAudioPrompt
+              ? 'Click to record a voice prompt or toggle with Ctrl+M'
+              : 'Click to toggle dictation or toggle with Ctrl+M');
+  const isVoiceInputDisabled = disabled || !isVoiceInputSupported || isVoiceProcessing;
 
   const clearQueuedPromptDragState = React.useCallback(() => {
     setDraggingQueuedPromptId(null);
@@ -2351,8 +2639,20 @@ export const Composer = ({
           handleDropDataTransfer(event.dataTransfer);
         }}
       >
-        {attachments.length > 0 ? (
+        {attachments.length > 0 || pendingVoicePrompt ? (
           <div className="flex flex-wrap gap-2 px-3 pb-0.5 pt-2.5">
+            {pendingVoicePrompt ? (
+              <button
+                type="button"
+                className="no-drag inline-flex h-8 max-w-full items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2.5 text-[12px] font-medium text-stone-800 transition-colors hover:bg-stone-50"
+                onClick={clearPendingVoicePrompt}
+                title="Remove voice prompt"
+              >
+                <Mic className="h-3.5 w-3.5 shrink-0 text-stone-500" />
+                <span className="truncate">Voice prompt ready</span>
+                <X className="h-3 w-3 shrink-0 text-stone-500" />
+              </button>
+            ) : null}
             {attachments.map((attachment) => (
               <button
                 key={attachment.absolutePath}
@@ -2450,11 +2750,7 @@ export const Composer = ({
             ref={messageInputRef}
             minRows={1}
             maxRows={8}
-            placeholder={
-              disabled
-                ? disabledMessage ?? 'ACP is unavailable. Reconnect to start chatting…'
-                : 'Ask anything'
-            }
+            placeholder={composerPlaceholder}
             value={message}
             disabled={disabled}
             className="text-[15px] leading-6 text-stone-700 placeholder:text-stone-400"
@@ -2487,110 +2783,200 @@ export const Composer = ({
           />
         </div>
 
-        <div className="flex items-center gap-1.5 px-2 pb-1 pt-0">
-          <Button
-            size="icon"
-            variant="ghost"
-            className="composer-tone-hover h-8 w-8 rounded-full text-stone-500 focus-visible:ring-0"
-            aria-label="Add attachment"
-            disabled={!hasWorkspace}
-            onClick={() => {
-              void handlePickAttachment();
-            }}
-          >
-            <Plus className="h-4 w-4" />
-          </Button>
+        {voiceError ? (
+          <div className="px-3 pb-1 pt-1">
+            <p className="text-[12px] font-medium text-amber-700">{voiceError}</p>
+          </div>
+        ) : null}
 
-          {controlSelects.map((controlSelect) => (
-            <ComposerSelect
-              key={controlSelect.key}
-              label={controlSelect.valueLabel}
-              options={controlSelect.options}
-              onSelect={controlSelect.onSelect}
-              ariaLabel={`Select ${controlSelect.label}`}
-            />
-          ))}
+        {isVoiceRecordingSurfaceVisible ? (
+          <div className="flex h-10 items-center gap-1.5 px-2 pb-1 pt-0">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="composer-tone-hover h-8 w-8 shrink-0 rounded-full text-stone-500 focus-visible:ring-0"
+              aria-label="Add attachment"
+              disabled={!hasWorkspace}
+              onClick={() => {
+                void handlePickAttachment();
+              }}
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
 
-          <div className="ml-auto flex items-center gap-1.5">
-            <TooltipProvider delayDuration={180}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="inline-flex">
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className={cn(
-                        'composer-tone-hover h-8 w-8 rounded-full text-stone-500 focus-visible:ring-0',
-                        isVoiceInputDisabled && 'pointer-events-none',
-                        isDictationModeEnabled &&
-                          'composer-tone-active bg-stone-200/80 text-stone-800',
-                      )}
-                      aria-label={
-                        isVoiceInputComingSoon
-                          ? 'Voice input coming soon'
-                          : isDictationModeEnabled
-                            ? 'Stop voice input'
-                            : 'Voice input'
-                      }
-                      disabled={isVoiceInputDisabled}
-                      onClick={() => {
-                        if (isDictationModeEnabled) {
-                          toggleDictationActiveRef.current = false;
-                          shortcutDictationActiveRef.current = false;
-                          setDictationModeEnabled(false);
-                          stopDictation();
-                          return;
-                        }
+            <div className="relative flex h-10 flex-1 items-center overflow-hidden px-1">
+              <div className="absolute inset-x-1 top-1/2 border-t border-dashed border-stone-400/70" />
+              <div
+                ref={voiceVisualizerTrackRef}
+                className="relative z-10 flex h-full w-full items-center overflow-hidden"
+                style={{ gap: `${VOICE_VISUALIZER_BAR_GAP_PX}px` }}
+              >
+                {voiceVisualizerBars.map((bar, index) => (
+                  <span
+                    key={index}
+                    className={cn(
+                      'shrink-0 rounded-full bg-stone-900 transition-[height,opacity] duration-75 ease-out',
+                      !isDictating && 'bg-stone-500/80',
+                    )}
+                    style={{
+                      width: `${VOICE_VISUALIZER_BAR_WIDTH_PX}px`,
+                      height: `${Math.round(2 + bar * 24)}px`,
+                      opacity: isDictating ? 0.96 : 0.62,
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
 
-                        toggleDictationActiveRef.current = true;
-                        shortcutDictationActiveRef.current = false;
-                        setDictationModeEnabled(true);
-                        const started = startDictation();
-                        if (!started) {
-                          toggleDictationActiveRef.current = false;
-                          setDictationModeEnabled(false);
-                        }
-                      }}
-                    >
-                      <Mic className="h-4 w-4" />
-                    </Button>
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>{voiceInputTooltipText}</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <span className="w-10 shrink-0 text-right text-[13px] font-medium tabular-nums text-stone-600">
+              {formatVoiceRecordingDuration(recordingDurationMs)}
+            </span>
 
-            {isPrompting ? (
+            {isDictationModeEnabled ? (
               <Button
                 size="icon"
-                variant="primary"
-                className="h-[26px] w-[26px] rounded-full bg-stone-900 text-white hover:bg-stone-800 focus-visible:ring-0"
-                aria-label="Cancel"
+                variant="ghost"
+                className="h-[26px] w-[26px] shrink-0 rounded-full bg-stone-200/90 text-stone-900 hover:bg-stone-300 focus-visible:ring-0"
+                aria-label="Stop voice input"
                 onClick={() => {
-                  void onCancel();
+                  endDictation();
                 }}
               >
-                <Square className="h-3.5 w-3.5 fill-current" />
+                <Square className="h-3 w-3 fill-current" />
               </Button>
             ) : (
-              <Button
-                size="icon"
-                variant="primary"
-                className={cn(
-                  'h-[26px] w-[26px] rounded-full bg-stone-900 text-white hover:bg-stone-800 focus-visible:ring-0',
-                  !canSend && 'opacity-75',
-                )}
-                aria-label="Send"
-                disabled={!canSend}
-                onClick={() => {
-                  void handleSubmit();
-                }}
-              >
-                <ArrowUp className="h-3.5 w-3.5" />
-              </Button>
+              <span className="inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-stone-200/60 text-stone-500">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              </span>
             )}
+
+            <Button
+              size="icon"
+              variant="primary"
+              className={cn(
+                'h-[26px] w-[26px] shrink-0 rounded-full bg-stone-900 text-white hover:bg-stone-800 focus-visible:ring-0',
+                (isVoiceProcessing || (!isDictationModeEnabled && !canSend)) && 'opacity-75',
+              )}
+              aria-label={isDictationModeEnabled ? 'Stop and send' : 'Send'}
+              disabled={isVoiceProcessing || (!isDictationModeEnabled && !canSend)}
+              onClick={() => {
+                if (isDictationModeEnabled) {
+                  submitAfterDictationRef.current = true;
+                  toggleDictationActiveRef.current = false;
+                  shortcutDictationActiveRef.current = false;
+                  setDictationModeEnabled(false);
+                  stopDictation();
+                  return;
+                }
+
+                void handleSubmit();
+              }}
+            >
+              <ArrowUp className="h-3.5 w-3.5" />
+            </Button>
           </div>
-        </div>
+        ) : (
+          <div className="flex h-10 items-center gap-1.5 px-2 pb-1 pt-0">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="composer-tone-hover h-8 w-8 rounded-full text-stone-500 focus-visible:ring-0"
+              aria-label="Add attachment"
+              disabled={!hasWorkspace}
+              onClick={() => {
+                void handlePickAttachment();
+              }}
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
+
+            {controlSelects.map((controlSelect) => (
+              <ComposerSelect
+                key={controlSelect.key}
+                label={controlSelect.valueLabel}
+                options={controlSelect.options}
+                onSelect={controlSelect.onSelect}
+                ariaLabel={`Select ${controlSelect.label}`}
+              />
+            ))}
+
+            <div className="ml-auto flex items-center gap-1.5">
+              <TooltipProvider delayDuration={180}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className={cn(
+                          'composer-tone-hover h-8 w-8 rounded-full text-stone-500 focus-visible:ring-0',
+                          isVoiceInputDisabled && 'pointer-events-none',
+                          isDictationModeEnabled &&
+                            'composer-tone-active bg-stone-200/80 text-stone-800',
+                        )}
+                        aria-label={
+                          isVoiceProcessing
+                            ? supportsAcpAudioPrompt
+                              ? 'Preparing voice prompt'
+                              : 'Transcribing voice input'
+                            : isDictationModeEnabled
+                              ? 'Stop voice input'
+                              : 'Voice input'
+                        }
+                        disabled={isVoiceInputDisabled}
+                        onClick={() => {
+                          if (isDictationModeEnabled) {
+                            endDictation();
+                            return;
+                          }
+
+                          beginDictation('toggle');
+                        }}
+                      >
+                        {isVoiceProcessing ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Mic className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>{voiceInputTooltipText}</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+
+              {isPrompting ? (
+                <Button
+                  size="icon"
+                  variant="primary"
+                  className="h-[26px] w-[26px] rounded-full bg-stone-900 text-white hover:bg-stone-800 focus-visible:ring-0"
+                  aria-label="Cancel"
+                  onClick={() => {
+                    void onCancel();
+                  }}
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  variant="primary"
+                  className={cn(
+                    'h-[26px] w-[26px] rounded-full bg-stone-900 text-white hover:bg-stone-800 focus-visible:ring-0',
+                    !canSend && 'opacity-75',
+                  )}
+                  aria-label="Send"
+                  disabled={!canSend}
+                  onClick={() => {
+                    void handleSubmit();
+                  }}
+                >
+                  <ArrowUp className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="mt-1 flex items-center justify-between px-3 text-[13px]">

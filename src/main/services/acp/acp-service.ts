@@ -120,6 +120,10 @@ const COMMON_POSIX_PATH_SEGMENTS = [
   '/sbin',
 ];
 
+const DEFAULT_PROMPT_CAPABILITIES = {
+  audio: false,
+} as const;
+
 const isResourceNotFoundError = (error: unknown): boolean => {
   const containsEmptySessionFile = (value: string): boolean =>
     value.toLowerCase().includes('empty session file');
@@ -538,6 +542,10 @@ export class AcpService {
           this.initializeResponse.agentInfo?.title ??
           this.initializeResponse.agentInfo?.name ??
           'ACP Agent',
+        promptCapabilities: {
+          audio:
+            this.initializeResponse.agentCapabilities?.promptCapabilities?.audio === true,
+        },
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'ACP initialize failed';
@@ -548,6 +556,7 @@ export class AcpService {
         protocolVersion: PROTOCOL_VERSION,
         loadSessionSupported: false,
         agentName: 'ACP Agent',
+        promptCapabilities: DEFAULT_PROMPT_CAPABILITIES,
       };
     }
   }
@@ -745,12 +754,24 @@ export class AcpService {
       throw new Error('ACP connection is not initialized');
     }
 
-    const promptBlocks: ContentBlock[] = [
-      {
+    const promptBlocks: ContentBlock[] = [];
+    const trimmedText = request.text.trim();
+    if (trimmedText.length > 0) {
+      promptBlocks.push({
         type: 'text',
-        text: request.text,
-      },
-    ];
+        text: trimmedText,
+      });
+    }
+
+    const audioData = request.audio?.data.trim() ?? '';
+    const audioMimeType = request.audio?.mimeType.trim() ?? '';
+    if (audioData && audioMimeType) {
+      promptBlocks.push({
+        type: 'audio',
+        data: audioData,
+        mimeType: audioMimeType,
+      });
+    }
 
     for (const attachment of request.attachments ?? []) {
       const absolutePath = attachment.absolutePath.trim();
@@ -771,6 +792,10 @@ export class AcpService {
         uri,
         mimeType: attachment.mimeType,
       });
+    }
+
+    if (promptBlocks.length === 0) {
+      throw new Error('ACP prompt requires text, audio, or attachments.');
     }
 
     let result: Awaited<ReturnType<ClientSideConnection['prompt']>>;

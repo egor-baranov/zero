@@ -31,6 +31,13 @@ interface ReviewPanelProps {
   workspacePath: string;
   tabs: ReviewFileState[];
   activeFilePath: string | null;
+  revealLocation?: {
+    requestId: number;
+    relativePath: string;
+    lineNumber: number;
+    column: number;
+    focusEditor?: boolean;
+  } | null;
   onSelectTab: (path: string) => void;
   onCloseTab: (path: string) => void;
   onReorderTabs: (sourcePath: string, targetPath: string) => void;
@@ -87,6 +94,7 @@ export const ReviewPanel = ({
   workspacePath,
   tabs,
   activeFilePath,
+  revealLocation = null,
   onSelectTab,
   onCloseTab,
   onReorderTabs,
@@ -99,6 +107,7 @@ export const ReviewPanel = ({
   const modelsRef = React.useRef<Map<string, monaco.editor.ITextModel>>(new Map());
   const editedContentByPathRef = React.useRef<Map<string, string>>(new Map());
   const lspSyncTimeoutByPathRef = React.useRef<Map<string, number>>(new Map());
+  const lastHandledRevealRequestIdRef = React.useRef<number | null>(null);
   const splitResizeActiveRef = React.useRef(false);
   const [draggingTabPath, setDraggingTabPath] = React.useState<string | null>(null);
   const [dragOverTabPath, setDragOverTabPath] = React.useState<string | null>(null);
@@ -601,6 +610,44 @@ export const ReviewPanel = ({
       editor.setModel(model);
     }
   }, [activeFilePath, activeFileTab, getModelForPath]);
+
+  React.useEffect(() => {
+    const editor = primaryEditorRef.current;
+    if (
+      !editor ||
+      !revealLocation ||
+      lastHandledRevealRequestIdRef.current === revealLocation.requestId ||
+      activeFileTab?.relativePath !== revealLocation.relativePath
+    ) {
+      return;
+    }
+
+    const model = editor.getModel();
+    if (!model) {
+      return;
+    }
+
+    const safeLineNumber = Math.min(
+      Math.max(revealLocation.lineNumber, 1),
+      Math.max(model.getLineCount(), 1),
+    );
+    const safeColumn = Math.min(
+      Math.max(revealLocation.column, 1),
+      model.getLineMaxColumn(safeLineNumber),
+    );
+    const position = {
+      lineNumber: safeLineNumber,
+      column: safeColumn,
+    };
+
+    editor.setPosition(position);
+    editor.setSelection(new monaco.Selection(safeLineNumber, safeColumn, safeLineNumber, safeColumn));
+    editor.revealPositionInCenter(position, monaco.editor.ScrollType.Smooth);
+    if (revealLocation.focusEditor !== false) {
+      editor.focus();
+    }
+    lastHandledRevealRequestIdRef.current = revealLocation.requestId;
+  }, [activeFileTab?.relativePath, revealLocation]);
 
   React.useEffect(() => {
     if (!isSplitView || !effectiveSecondaryPath) {

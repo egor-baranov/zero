@@ -18,13 +18,16 @@ import type {
   WorkspaceMoveEntryRequest,
   WorkspaceMoveEntryResult,
   WorkspaceGitPushRequest,
-  WorkspaceGitStatusRequest,
-  WorkspaceGitStatusResult,
-  WorkspaceListFilesRequest,
-  WorkspaceListFilesResult,
-  WorkspaceReadFileRequest,
-  WorkspaceReadFileResult,
-  WorkspaceWriteFileRequest,
+    WorkspaceGitStatusRequest,
+    WorkspaceGitStatusResult,
+    WorkspaceListFilesRequest,
+    WorkspaceListFilesResult,
+    WorkspaceSearchTextMatch,
+    WorkspaceSearchTextRequest,
+    WorkspaceSearchTextResult,
+    WorkspaceReadFileRequest,
+    WorkspaceReadFileResult,
+    WorkspaceWriteFileRequest,
   WorkspaceWriteFileResult,
   WorkspaceRevealFileRequest,
   WorkspaceRevealFileResult,
@@ -34,8 +37,12 @@ const execFileAsync = promisify(execFile);
 const MAX_FILE_COUNT = 400;
 const MAX_FILE_SIZE_BYTES = 1_000_000;
 const MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_SEARCH_OUTPUT_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_SEARCH_RESULTS = 80;
+const MAX_SEARCH_RESULTS = 200;
 
 const IGNORED_DIRS = new Set(['.git', 'node_modules', 'dist', '.vite', 'out']);
+const SEARCH_IGNORED_GLOBS = ['!.git', '!node_modules', '!dist', '!.vite', '!out'];
 
 const toAbsolutePath = (workspacePath: string, filePath: string): string => {
   if (path.isAbsolute(filePath)) {
@@ -209,8 +216,14 @@ const collectFiles = async (
 };
 
 type ExecFileFailure = Error & {
+  code?: number | string;
   stderr?: string;
   stdout?: string;
+};
+
+type RipgrepSearchResult = {
+  available: boolean;
+  matches: WorkspaceSearchTextMatch[];
 };
 
 const runGit = async (workspacePath: string, args: string[]): Promise<string> => {
@@ -231,6 +244,229 @@ const readFileIfExists = async (absolutePath: string): Promise<string> => {
     }
 
     throw error;
+  }
+};
+
+const clampSearchResultLimit = (value: number | undefined): number => {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_MAX_SEARCH_RESULTS;
+  }
+
+  return Math.min(MAX_SEARCH_RESULTS, Math.max(1, Math.floor(value ?? DEFAULT_MAX_SEARCH_RESULTS)));
+};
+
+const buildSearchPreview = (lineText: string, matchStart: number, matchLength: number): string => {
+  const normalizedLine = lineText.replace(/\r?\n$/, '').replace(/\t/g, '  ');
+  if (normalizedLine.length <= 120) {
+    return normalizedLine.trim();
+  }
+
+  const contextStart = Math.max(0, matchStart - 36);
+  const contextEnd = Math.min(normalizedLine.length, matchStart + matchLength + 60);
+  const snippet = normalizedLine.slice(contextStart, contextEnd).trim();
+  const prefix = contextStart > 0 ? '…' : '';
+  const suffix = contextEnd < normalizedLine.length ? '…' : '';
+  return `${prefix}${snippet}${suffix}`;
+};
+
+const parseRipgrepJsonMatches = (
+  stdout: string,
+  workspacePath: string,
+  maxResults: number,
+): WorkspaceSearchTextMatch[] => {
+  const matches: WorkspaceSearchTextMatch[] = [];
+
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    let parsed:
+      | {
+          type?: string;
+          data?: {
+            path?: { text?: string };
+            lines?: { text?: string };
+            line_number?: number;
+            submatches?: Array<{ start?: number; end?: number }>;
+          };
+        }
+      | undefined;
+    try {
+      parsed = JSON.parse(line) as typeof parsed;
+    } catch {
+      continue;
+    }
+
+    if (parsed?.type !== 'match') {
+      continue;
+    }
+
+    const relativePath = parsed.data?.path?.text as string | undefined;
+    const lineNumber = parsed.data?.line_number as number | undefined;
+    const firstSubmatch = parsed.data?.submatches?.[0] as
+      | { start?: number; end?: number }
+      | undefined;
+    const rawLine = (parsed.data?.lines?.text as string | undefined) ?? '';
+
+    if (!relativePath || !Number.isFinite(lineNumber)) {
+      continue;
+    }
+
+    const matchStart = firstSubmatch?.start ?? 0;
+    const matchLength = Math.max(1, (firstSubmatch?.end ?? matchStart + 1) - matchStart);
+
+    matches.push({
+      absolutePath: path.resolve(workspacePath, relativePath),
+      relativePath,
+      lineNumber,
+      column: matchStart + 1,
+      preview: buildSearchPreview(rawLine, matchStart, matchLength),
+    });
+
+    if (matches.length >= maxResults) {
+      break;
+    }
+  }
+
+  return matches;
+};
+
+const searchTextWithRipgrep = async (
+  workspacePath: string,
+  query: string,
+  maxResults: number,
+): Promise<RipgrepSearchResult> => {
+  const args = [
+    '--json',
+    '--fixed-strings',
+    '--smart-case',
+    '--hidden',
+    ...SEARCH_IGNORED_GLOBS.flatMap((glob) => ['--glob', glob]),
+    '--',
+    query,
+    '.',
+  ];
+
+  try {
+    const { stdout } = await execFileAsync('rg', args, {
+      cwd: workspacePath,
+      maxBuffer: MAX_SEARCH_OUTPUT_BYTES,
+    });
+
+    return {
+      available: true,
+      matches: parseRipgrepJsonMatches(stdout, workspacePath, maxResults),
+    };
+  } catch (error) {
+    const failure = error as ExecFileFailure | undefined;
+    if (failure?.code === 1) {
+      return {
+        available: true,
+        matches: [],
+      };
+    }
+
+    if (failure?.code === 'ENOENT') {
+      return {
+        available: false,
+        matches: [],
+      };
+    }
+
+    throw new Error(toExecErrorMessage(error, 'Failed to search workspace'));
+  }
+};
+
+const searchTextFallback = async (
+  workspacePath: string,
+  currentPath: string,
+  query: string,
+  caseSensitive: boolean,
+  matches: WorkspaceSearchTextMatch[],
+  maxResults: number,
+): Promise<void> => {
+  if (matches.length >= maxResults) {
+    return;
+  }
+
+  const entries = await fs.readdir(currentPath, { withFileTypes: true });
+  const normalizedNeedle = caseSensitive ? query : query.toLowerCase();
+
+  for (const entry of entries) {
+    if (matches.length >= maxResults) {
+      return;
+    }
+
+    if (entry.name.startsWith('.') && entry.name !== '.env') {
+      if (entry.name !== '.github') {
+        continue;
+      }
+    }
+
+    if (entry.isDirectory() && IGNORED_DIRS.has(entry.name)) {
+      continue;
+    }
+
+    const absoluteEntry = path.join(currentPath, entry.name);
+
+    if (entry.isDirectory()) {
+      await searchTextFallback(
+        workspacePath,
+        absoluteEntry,
+        query,
+        caseSensitive,
+        matches,
+        maxResults,
+      );
+      continue;
+    }
+
+    let fileStat;
+    try {
+      fileStat = await fs.stat(absoluteEntry);
+    } catch {
+      continue;
+    }
+
+    if (!fileStat.isFile() || fileStat.size > MAX_FILE_SIZE_BYTES) {
+      continue;
+    }
+
+    let content: string;
+    try {
+      content = await fs.readFile(absoluteEntry, 'utf8');
+    } catch {
+      continue;
+    }
+
+    if (content.includes('\u0000')) {
+      continue;
+    }
+
+    const lines = toNormalizedTextLines(content);
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      const line = lines[lineIndex];
+      const haystack = caseSensitive ? line : line.toLowerCase();
+      const matchIndex = haystack.indexOf(normalizedNeedle);
+
+      if (matchIndex < 0) {
+        continue;
+      }
+
+      const relativePath = path.relative(workspacePath, absoluteEntry).split(path.sep).join('/');
+      matches.push({
+        absolutePath: absoluteEntry,
+        relativePath,
+        lineNumber: lineIndex + 1,
+        column: matchIndex + 1,
+        preview: buildSearchPreview(line, matchIndex, query.length),
+      });
+
+      if (matches.length >= maxResults) {
+        return;
+      }
+    }
   }
 };
 
@@ -450,6 +686,41 @@ export class WorkspaceService {
 
     return {
       files: files.sort((a, b) => a.localeCompare(b)),
+    };
+  }
+
+  public async searchText(
+    request: WorkspaceSearchTextRequest,
+  ): Promise<WorkspaceSearchTextResult> {
+    const workspacePath = path.resolve(request.workspacePath);
+    const query = request.query.trim();
+
+    if (!query) {
+      return {
+        matches: [],
+      };
+    }
+
+    const maxResults = clampSearchResultLimit(request.maxResults);
+    const ripgrepResult = await searchTextWithRipgrep(workspacePath, query, maxResults);
+    if (ripgrepResult.available) {
+      return {
+        matches: ripgrepResult.matches,
+      };
+    }
+
+    const matches: WorkspaceSearchTextMatch[] = [];
+    await searchTextFallback(
+      workspacePath,
+      workspacePath,
+      query,
+      /[A-Z]/.test(query),
+      matches,
+      maxResults,
+    );
+
+    return {
+      matches,
     };
   }
 

@@ -9,6 +9,7 @@ import {
   Lightbulb,
   ListChecks,
   MessageSquare,
+  Mic,
 } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { coldarkCold, coldarkDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -2546,6 +2547,7 @@ export const Transcript = ({
                     (attachment) => !isImageAttachment(attachment),
                   );
                   const hasText = item.text.trim().length > 0;
+                  const hasAudio = item.hasAudio === true;
 
                   return (
                     <div key={item.id} className="flex justify-end">
@@ -2565,6 +2567,13 @@ export const Transcript = ({
                               keyPrefix={`user-inline-${item.id}`}
                               onOpenLink={onOpenLink}
                             />
+                          </div>
+                        ) : null}
+
+                        {hasAudio ? (
+                          <div className="inline-flex items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[12px] font-medium text-stone-700">
+                            <Mic className="h-3.5 w-3.5 text-stone-500" />
+                            <span>Voice prompt</span>
                           </div>
                         ) : null}
 

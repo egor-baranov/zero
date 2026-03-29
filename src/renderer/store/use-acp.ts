@@ -11,9 +11,11 @@ import type {
   AcpConnectionState,
   AcpCustomAgentConfig,
   AcpAuthenticateResult,
+  AcpPromptAudioContent,
   AcpSessionConfigControl,
   AcpSessionConfigSelectValue,
   AcpSessionControls,
+  AcpPromptCapabilities,
   AcpPromptAttachment,
   AcpPermissionDecision,
   AcpPermissionRequestEvent,
@@ -30,6 +32,9 @@ const CODEX_AGENT_CONFIG_KEY = 'zeroade.acp.codex-agent-config.v1';
 const CLAUDE_AGENT_CONFIG_KEY = 'zeroade.acp.claude-agent-config.v1';
 const MAX_ATTACHMENT_HISTORY_PER_THREAD = 200;
 const SUPPRESS_UPDATED_AT_AFTER_LOAD_MS = 5_000;
+const DEFAULT_PROMPT_CAPABILITIES: AcpPromptCapabilities = {
+  audio: false,
+};
 
 export type AcpAgentPreset = 'mock' | 'codex' | 'claude' | 'custom';
 
@@ -51,6 +56,7 @@ export type TimelineItem =
       kind: 'user-message';
       text: string;
       attachments?: AcpPromptAttachment[];
+      hasAudio?: boolean;
     })
   | (TimelineItemBase & {
       kind: 'assistant-message';
@@ -83,6 +89,7 @@ interface UseAcpResult {
   connectionState: AcpConnectionState;
   connectionMessage: string | null;
   agentName: string;
+  promptCapabilities: AcpPromptCapabilities;
   agentPreset: AcpAgentPreset;
   codexAgentConfig: AcpCustomAgentConfig | null;
   claudeAgentConfig: AcpCustomAgentConfig | null;
@@ -102,7 +109,11 @@ interface UseAcpResult {
     config: AcpCustomAgentConfig,
   ) => void;
   ensureSessionForThread: (threadId: string, cwd: string) => Promise<void>;
-  sendPrompt: (text: string, attachments?: AcpPromptAttachment[]) => Promise<void>;
+  sendPrompt: (
+    text: string,
+    attachments?: AcpPromptAttachment[],
+    audio?: AcpPromptAudioContent | null,
+  ) => Promise<void>;
   setSessionMode: (modeId: string) => Promise<void>;
   setSessionModel: (modelId: string) => Promise<void>;
   setSessionConfigOption: (
@@ -540,6 +551,25 @@ const normalizePromptAttachments = (
         .filter((attachment): attachment is AcpPromptAttachment => attachment !== null)
     : [];
 
+const normalizePromptAudio = (
+  audio: AcpPromptAudioContent | null | undefined,
+): AcpPromptAudioContent | null => {
+  if (!audio) {
+    return null;
+  }
+
+  const data = audio.data.trim();
+  const mimeType = audio.mimeType.trim();
+  if (!data || !mimeType) {
+    return null;
+  }
+
+  return {
+    data,
+    mimeType,
+  };
+};
+
 const mergePromptAttachments = (
   current: AcpPromptAttachment[] | undefined,
   incoming: AcpPromptAttachment[] | undefined,
@@ -730,12 +760,13 @@ const withMessageChunk = (
   role: 'user-message' | 'assistant-message',
   text: string,
   attachments?: AcpPromptAttachment[],
+  hasAudio = false,
 ): TimelineItem[] => {
   const nowMs = Date.now();
   const normalizedAttachments =
     role === 'user-message' ? normalizePromptAttachments(attachments) : [];
 
-  if (text.length === 0 && normalizedAttachments.length === 0) {
+  if (text.length === 0 && normalizedAttachments.length === 0 && !hasAudio) {
     return items;
   }
 
@@ -746,6 +777,7 @@ const withMessageChunk = (
         last.attachments,
         normalizedAttachments,
       );
+      const mergedHasAudio = Boolean(last.hasAudio || hasAudio);
       const mergedText = stripInlineAttachmentMentions(
         `${last.text}${text}`,
         mergedAttachments,
@@ -755,6 +787,7 @@ const withMessageChunk = (
         ...last,
         text: mergedText,
         attachments: mergedAttachments,
+        hasAudio: mergedHasAudio || undefined,
         updatedAtMs: nowMs,
       };
       return [...items.slice(0, -1), mergedUserMessage];
@@ -768,7 +801,7 @@ const withMessageChunk = (
     return [...items.slice(0, -1), mergedAssistantMessage];
   }
 
-  if (text.trim().length === 0 && normalizedAttachments.length === 0) {
+  if (text.trim().length === 0 && normalizedAttachments.length === 0 && !hasAudio) {
     return items;
   }
 
@@ -785,6 +818,7 @@ const withMessageChunk = (
         updatedAtMs: nowMs,
         text: normalizedText,
         attachments: mergedAttachments,
+        hasAudio: hasAudio || undefined,
       },
     ];
   }
@@ -947,6 +981,9 @@ export const useAcp = (): UseAcpResult => {
     React.useState<AcpConnectionState>('disconnected');
   const [connectionMessage, setConnectionMessage] = React.useState<string | null>(null);
   const [agentName, setAgentName] = React.useState('ACP Agent');
+  const [promptCapabilities, setPromptCapabilities] = React.useState<AcpPromptCapabilities>(
+    DEFAULT_PROMPT_CAPABILITIES,
+  );
   const [agentPreset, setAgentPresetState] = React.useState<AcpAgentPreset>(() =>
     initialAgentPreset,
   );
@@ -1190,6 +1227,7 @@ export const useAcp = (): UseAcpResult => {
     setConnectionMessage(null);
     setLoadSessionSupported(false);
     setAgentName('ACP Agent');
+    setPromptCapabilities(DEFAULT_PROMPT_CAPABILITIES);
     setActiveSessionIdSafely(null);
     setPendingPermissions([]);
     setSessionTitleBySessionId({});
@@ -1297,6 +1335,7 @@ export const useAcp = (): UseAcpResult => {
           const agent = getCurrentAgentConfig();
           if (!agent) {
             setConnectionState('error');
+            setPromptCapabilities(DEFAULT_PROMPT_CAPABILITIES);
             setLoadSessionSupported(false);
             loadSessionSupportedRef.current = false;
             isInitializedRef.current = false;
@@ -1308,6 +1347,7 @@ export const useAcp = (): UseAcpResult => {
           const result = await window.desktop.acpInitialize({ cwd, agent });
 
           setAgentName(result.agentName);
+          setPromptCapabilities(result.promptCapabilities);
           setLoadSessionSupported(result.loadSessionSupported);
           loadSessionSupportedRef.current = result.loadSessionSupported;
           setConnectionState(result.connected ? 'ready' : 'error');
@@ -1331,6 +1371,7 @@ export const useAcp = (): UseAcpResult => {
               previous ??
               'ACP initialize failed. Check adapter auth/configuration.',
           );
+          setPromptCapabilities(DEFAULT_PROMPT_CAPABILITIES);
           setLoadSessionSupported(false);
           loadSessionSupportedRef.current = false;
           isInitializedRef.current = false;
@@ -1652,17 +1693,25 @@ export const useAcp = (): UseAcpResult => {
   );
 
   const sendPrompt = React.useCallback(
-    async (text: string, attachments: AcpPromptAttachment[] = []): Promise<void> => {
+    async (
+      text: string,
+      attachments: AcpPromptAttachment[] = [],
+      audio?: AcpPromptAudioContent | null,
+    ): Promise<void> => {
       const sessionId = activeSessionIdRef.current;
       const trimmed = text.trim();
       const normalizedAttachments = normalizePromptAttachments(attachments);
+      const normalizedAudio = normalizePromptAudio(audio);
+      const hasAudio = normalizedAudio !== null;
 
-      if (!sessionId || trimmed.length === 0) {
+      if (!sessionId || (trimmed.length === 0 && !hasAudio)) {
         return;
       }
 
       recencyEligibleSessionIdsRef.current.add(sessionId);
-      rememberThreadAttachmentHistory(sessionId, trimmed, normalizedAttachments);
+      if (trimmed.length > 0) {
+        rememberThreadAttachmentHistory(sessionId, trimmed, normalizedAttachments);
+      }
 
       setSessionTimelines((previous) => {
         const current = previous[sessionId] ?? defaultTimeline();
@@ -1676,6 +1725,7 @@ export const useAcp = (): UseAcpResult => {
               'user-message',
               trimmed,
               normalizedAttachments,
+              hasAudio,
             ),
           },
         };
@@ -1686,6 +1736,7 @@ export const useAcp = (): UseAcpResult => {
           sessionId,
           text: trimmed,
           attachments: normalizedAttachments,
+          audio: normalizedAudio,
         });
 
         setSessionTimelines((previous) => {
@@ -2018,6 +2069,7 @@ export const useAcp = (): UseAcpResult => {
     connectionState,
     connectionMessage,
     agentName,
+    promptCapabilities,
     agentPreset,
     codexAgentConfig,
     claudeAgentConfig,

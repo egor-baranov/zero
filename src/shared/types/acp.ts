@@ -41,6 +41,7 @@ export interface AcpInitializeResult {
   protocolVersion: number;
   loadSessionSupported: boolean;
   agentName: string;
+  promptCapabilities: AcpPromptCapabilities;
 }
 
 export interface AcpSessionNewRequest {
@@ -119,10 +120,20 @@ export interface AcpSessionLoadResult {
   controls?: AcpSessionControls;
 }
 
+export interface AcpPromptCapabilities {
+  audio: boolean;
+}
+
+export interface AcpPromptAudioContent {
+  data: string;
+  mimeType: string;
+}
+
 export interface AcpPromptRequest {
   sessionId: string;
   text: string;
   attachments?: AcpPromptAttachment[];
+  audio?: AcpPromptAudioContent | null;
 }
 
 export interface AcpPromptResult {

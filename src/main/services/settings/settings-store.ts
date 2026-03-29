@@ -1,7 +1,11 @@
 import { app } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { AppSettings, WindowBoundsState } from '@shared/types/settings';
+import type {
+  AppSettings,
+  VoiceSettings,
+  WindowBoundsState,
+} from '@shared/types/settings';
 
 const SETTINGS_FILE = 'settings.json';
 
@@ -18,6 +22,36 @@ export class SettingsStore {
     const settings = await this.read();
     settings.windowBounds = bounds;
     await this.write(settings);
+  }
+
+  public async getVoiceSettings(): Promise<VoiceSettings> {
+    const settings = await this.read();
+    return {
+      openAiApiKey: settings.voice?.openAiApiKey?.trim() ?? '',
+    };
+  }
+
+  public async setVoiceSettings(nextVoiceSettings: VoiceSettings): Promise<VoiceSettings> {
+    const settings = await this.read();
+    const openAiApiKey = nextVoiceSettings.openAiApiKey.trim();
+
+    if (openAiApiKey.length > 0) {
+      settings.voice = {
+        ...settings.voice,
+        openAiApiKey,
+      };
+    } else if (settings.voice) {
+      delete settings.voice.openAiApiKey;
+      if (Object.keys(settings.voice).length === 0) {
+        delete settings.voice;
+      }
+    }
+
+    await this.write(settings);
+
+    return {
+      openAiApiKey,
+    };
   }
 
   private async read(): Promise<AppSettings> {
@@ -73,24 +107,47 @@ export class SettingsStore {
       return false;
     }
 
-    if (!('windowBounds' in value)) {
-      return true;
+    const typedValue = value as {
+      windowBounds?: unknown;
+      voice?: unknown;
+    };
+
+    if ('windowBounds' in typedValue) {
+      const windowBounds = typedValue.windowBounds;
+      if (windowBounds !== undefined) {
+        if (typeof windowBounds !== 'object' || windowBounds === null) {
+          return false;
+        }
+
+        const parsed = windowBounds as Partial<WindowBoundsState>;
+        if (
+          typeof parsed.width !== 'number' ||
+          typeof parsed.height !== 'number' ||
+          typeof parsed.isMaximized !== 'boolean'
+        ) {
+          return false;
+        }
+      }
     }
 
-    const windowBounds = (value as { windowBounds?: unknown }).windowBounds;
-    if (windowBounds === undefined) {
-      return true;
+    if ('voice' in typedValue) {
+      const voice = typedValue.voice;
+      if (voice !== undefined) {
+        if (typeof voice !== 'object' || voice === null) {
+          return false;
+        }
+
+        const parsedVoice = voice as { openAiApiKey?: unknown };
+        if (
+          'openAiApiKey' in parsedVoice &&
+          parsedVoice.openAiApiKey !== undefined &&
+          typeof parsedVoice.openAiApiKey !== 'string'
+        ) {
+          return false;
+        }
+      }
     }
 
-    if (typeof windowBounds !== 'object' || windowBounds === null) {
-      return false;
-    }
-
-    const parsed = windowBounds as Partial<WindowBoundsState>;
-    return (
-      typeof parsed.width === 'number' &&
-      typeof parsed.height === 'number' &&
-      typeof parsed.isMaximized === 'boolean'
-    );
+    return true;
   }
 }
