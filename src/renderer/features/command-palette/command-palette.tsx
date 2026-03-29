@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { FolderOpen, Hash, Search } from 'lucide-react';
+import { FileText, FolderOpen, Hash, Search } from 'lucide-react';
 import { Dialog, DialogContent } from '@renderer/components/ui/dialog';
 import { cn } from '@renderer/lib/cn';
 
@@ -9,7 +9,8 @@ export interface CommandPaletteItem {
   title: string;
   subtitle?: string;
   keywords?: string;
-  icon?: 'folder' | 'thread';
+  icon?: 'file' | 'folder' | 'thread';
+  onPreview?: () => void;
   onSelect: () => void;
 }
 
@@ -17,24 +18,58 @@ interface CommandPaletteProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   items: CommandPaletteItem[];
+  placeholder?: string;
+  emptyMessage?: string;
+  filterItems?: boolean;
+  loading?: boolean;
+  onQueryChange?: (query: string) => void;
+  query?: string;
+  sectionOrder?: string[];
 }
 
-const sectionOrder = ['Workspace', 'Threads', 'Actions'];
+const defaultSectionOrder = ['Workspace', 'Threads', 'Files', 'Actions'];
 
 export const CommandPalette = ({
   open,
   onOpenChange,
   items,
+  placeholder = 'Type a command or search threads',
+  emptyMessage = 'No results',
+  filterItems = true,
+  loading = false,
+  onQueryChange,
+  query: controlledQuery,
+  sectionOrder = defaultSectionOrder,
 }: CommandPaletteProps): JSX.Element => {
-  const [query, setQuery] = React.useState('');
+  const [uncontrolledQuery, setUncontrolledQuery] = React.useState('');
+  const [activeItemId, setActiveItemId] = React.useState<string | null>(null);
+  const itemButtonByIdRef = React.useRef(new Map<string, HTMLButtonElement>());
+  const query = controlledQuery ?? uncontrolledQuery;
 
   React.useEffect(() => {
     if (!open) {
-      setQuery('');
+      setUncontrolledQuery('');
+      setActiveItemId(null);
+      onQueryChange?.('');
     }
-  }, [open]);
+  }, [onQueryChange, open]);
+
+  const handleQueryChange = React.useCallback(
+    (nextQuery: string): void => {
+      if (controlledQuery === undefined) {
+        setUncontrolledQuery(nextQuery);
+      }
+
+      onQueryChange?.(nextQuery);
+    },
+    [controlledQuery, onQueryChange],
+  );
 
   const filteredItems = React.useMemo(() => {
+    if (!filterItems) {
+      return items;
+    }
+
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) {
       return items;
@@ -44,7 +79,7 @@ export const CommandPalette = ({
       const haystack = `${item.title} ${item.subtitle ?? ''} ${item.keywords ?? ''}`.toLowerCase();
       return haystack.includes(normalizedQuery);
     });
-  }, [items, query]);
+  }, [filterItems, items, query]);
 
   const groupedItems = React.useMemo(() => {
     const groups = new Map<string, CommandPaletteItem[]>();
@@ -55,13 +90,112 @@ export const CommandPalette = ({
       groups.set(item.section, existing);
     }
 
-    return sectionOrder
+    const orderedSections = [
+      ...sectionOrder,
+      ...Array.from(groups.keys()).filter((section) => !sectionOrder.includes(section)),
+    ];
+
+    return orderedSections
       .map((section) => ({
         section,
         items: groups.get(section) ?? [],
       }))
       .filter((group) => group.items.length > 0);
-  }, [filteredItems]);
+  }, [filteredItems, sectionOrder]);
+
+  const orderedItems = React.useMemo(
+    () => groupedItems.flatMap((group) => group.items),
+    [groupedItems],
+  );
+
+  React.useEffect(() => {
+    if (orderedItems.length === 0) {
+      setActiveItemId(null);
+      return;
+    }
+
+    setActiveItemId((previous) =>
+      previous && orderedItems.some((item) => item.id === previous) ? previous : orderedItems[0].id,
+    );
+  }, [orderedItems]);
+
+  React.useEffect(() => {
+    if (!activeItemId) {
+      return;
+    }
+
+    itemButtonByIdRef.current.get(activeItemId)?.scrollIntoView({
+      block: 'nearest',
+    });
+  }, [activeItemId]);
+
+  React.useEffect(() => {
+    if (!activeItemId) {
+      return;
+    }
+
+    orderedItems.find((item) => item.id === activeItemId)?.onPreview?.();
+  }, [activeItemId, orderedItems]);
+
+  const selectItem = React.useCallback(
+    (item: CommandPaletteItem): void => {
+      item.onSelect();
+      onOpenChange(false);
+    },
+    [onOpenChange],
+  );
+
+  const moveActiveItem = React.useCallback(
+    (direction: -1 | 1): void => {
+      if (orderedItems.length === 0) {
+        return;
+      }
+
+      setActiveItemId((previous) => {
+        const currentIndex = previous
+          ? orderedItems.findIndex((item) => item.id === previous)
+          : -1;
+
+        if (currentIndex < 0) {
+          return direction > 0
+            ? orderedItems[0]?.id ?? null
+            : orderedItems[orderedItems.length - 1]?.id ?? null;
+        }
+
+        const nextIndex =
+          (currentIndex + direction + orderedItems.length) % orderedItems.length;
+        return orderedItems[nextIndex]?.id ?? previous;
+      });
+    },
+    [orderedItems],
+  );
+
+  const handleInputKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>): void => {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        moveActiveItem(1);
+        return;
+      }
+
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        moveActiveItem(-1);
+        return;
+      }
+
+      if (event.key === 'Enter' && activeItemId) {
+        const activeItem = orderedItems.find((item) => item.id === activeItemId);
+        if (!activeItem) {
+          return;
+        }
+
+        event.preventDefault();
+        selectItem(activeItem);
+      }
+    },
+    [activeItemId, moveActiveItem, orderedItems, selectItem],
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -75,8 +209,9 @@ export const CommandPalette = ({
             <input
               autoFocus
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Type a command or search threads"
+              onChange={(event) => handleQueryChange(event.target.value)}
+              onKeyDown={handleInputKeyDown}
+              placeholder={placeholder}
               className="w-full bg-transparent text-sm text-stone-700 placeholder:text-stone-400 focus:outline-none"
             />
           </label>
@@ -86,7 +221,7 @@ export const CommandPalette = ({
           <div className="space-y-5 pb-2">
             {groupedItems.length === 0 && (
               <div className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-500">
-                No results
+                {loading ? 'Searching…' : emptyMessage}
               </div>
             )}
 
@@ -101,17 +236,28 @@ export const CommandPalette = ({
                     <button
                       type="button"
                       key={item.id}
+                      ref={(element) => {
+                        if (element) {
+                          itemButtonByIdRef.current.set(item.id, element);
+                          return;
+                        }
+
+                        itemButtonByIdRef.current.delete(item.id);
+                      }}
+                      aria-selected={activeItemId === item.id}
                       className={cn(
                         'no-drag flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-stone-100',
+                        activeItemId === item.id && 'bg-stone-100',
                       )}
-                      onClick={() => {
-                        item.onSelect();
-                        onOpenChange(false);
-                      }}
+                      onMouseEnter={() => setActiveItemId(item.id)}
+                      onFocus={() => setActiveItemId(item.id)}
+                      onClick={() => selectItem(item)}
                     >
                       <span className="mt-0.5 rounded-md bg-stone-100 p-1 text-stone-500">
                         {item.icon === 'folder' ? (
                           <FolderOpen className="h-3.5 w-3.5" />
+                        ) : item.icon === 'file' ? (
+                          <FileText className="h-3.5 w-3.5" />
                         ) : (
                           <Hash className="h-3.5 w-3.5" />
                         )}

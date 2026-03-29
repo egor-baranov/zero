@@ -53,15 +53,17 @@ import type {
   WorkspaceGitCheckoutBranchRequest,
   WorkspaceGitCreateBranchRequest,
   WorkspaceGitMutationResult,
-  WorkspaceMoveEntryRequest,
-  WorkspaceMoveEntryResult,
-  WorkspaceGitPushRequest,
-  WorkspaceGitStatusRequest,
-  WorkspaceGitStatusResult,
-  WorkspaceListFilesRequest,
-  WorkspaceListFilesResult,
-  WorkspaceReadFileRequest,
-  WorkspaceReadFileResult,
+    WorkspaceMoveEntryRequest,
+    WorkspaceMoveEntryResult,
+    WorkspaceGitPushRequest,
+    WorkspaceGitStatusRequest,
+    WorkspaceGitStatusResult,
+    WorkspaceListFilesRequest,
+    WorkspaceListFilesResult,
+    WorkspaceSearchTextRequest,
+    WorkspaceSearchTextResult,
+    WorkspaceReadFileRequest,
+    WorkspaceReadFileResult,
   WorkspaceWriteFileRequest,
   WorkspaceWriteFileResult,
   WorkspaceRevealFileRequest,
@@ -80,6 +82,11 @@ import type {
   UpdaterRendererEvent,
   UpdaterState,
 } from './updater';
+import type {
+  VoiceTranscriptionRequest,
+  VoiceTranscriptionResult,
+} from './voice';
+import type { VoiceSettings } from './settings';
 
 export interface OpenFolderResult {
   canceled: boolean;
@@ -118,6 +125,9 @@ export interface DesktopApi {
   workspaceListFiles: (
     request: WorkspaceListFilesRequest,
   ) => Promise<WorkspaceListFilesResult>;
+  workspaceSearchText: (
+    request: WorkspaceSearchTextRequest,
+  ) => Promise<WorkspaceSearchTextResult>;
   workspaceReadFile: (
     request: WorkspaceReadFileRequest,
   ) => Promise<WorkspaceReadFileResult>;
@@ -151,6 +161,11 @@ export interface DesktopApi {
   workspaceGitPush: (
     request: WorkspaceGitPushRequest,
   ) => Promise<WorkspaceGitMutationResult>;
+  settingsGetVoiceSettings: () => Promise<VoiceSettings>;
+  settingsSetVoiceSettings: (request: VoiceSettings) => Promise<VoiceSettings>;
+  voiceTranscribe: (
+    request: VoiceTranscriptionRequest,
+  ) => Promise<VoiceTranscriptionResult>;
   workspaceRevealFile: (
     request: WorkspaceRevealFileRequest,
   ) => Promise<WorkspaceRevealFileResult>;

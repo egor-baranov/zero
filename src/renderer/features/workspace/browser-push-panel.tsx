@@ -48,7 +48,10 @@ const formatPushTimestamp = (createdAtMs: number): string => {
       day: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-    }).format(createdAtMs);
+    })
+      .format(createdAtMs)
+      .replace(/,\s*/g, ' ')
+      .trim();
   } catch {
     return '';
   }
@@ -159,7 +162,7 @@ export const BrowserPushPanel = ({
     <aside
       style={{ width: open ? panelWidth : 0 }}
       className={cn(
-        'relative h-full shrink-0 overflow-hidden border-l border-stone-200 bg-[#fdfdfff2] backdrop-blur-xl transition-[width] duration-200 ease-out',
+        'zeroade-notifications-panel relative h-full shrink-0 overflow-hidden border-l border-stone-200 bg-[#fdfdfff2] backdrop-blur-xl transition-[width] duration-200 ease-out',
         !open && 'border-l-transparent',
       )}
     >
@@ -184,11 +187,13 @@ export const BrowserPushPanel = ({
       >
         {items.length === 0 ? (
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 text-center">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-stone-100 text-stone-500">
+            <div className="zeroade-notifications-empty-icon flex h-11 w-11 items-center justify-center rounded-2xl bg-stone-100 text-stone-500">
               <Bell className="h-5 w-5" />
             </div>
-            <p className="mt-4 text-[13px] font-medium text-stone-700">No notifications yet</p>
-            <p className="mt-1 text-[11px] leading-5 text-stone-500">
+            <p className="zeroade-notifications-empty-title mt-4 text-[13px] font-medium text-stone-700">
+              No notifications yet
+            </p>
+            <p className="zeroade-notifications-empty-body mt-1 text-[11px] leading-5 text-stone-500">
               App and browser notifications will be saved here and kept after reload.
             </p>
           </div>
@@ -197,54 +202,34 @@ export const BrowserPushPanel = ({
             <div className="space-y-2 px-3 py-3">
               {items.map((item) => {
                 const cardClass = cn(
-                  'w-full min-w-0 rounded-2xl border px-3 py-3 text-left transition-colors',
+                  'zeroade-notification-card w-full min-w-0 rounded-2xl border px-3 py-3 text-left transition-colors',
                   item.url
                     ? 'no-drag hover:border-stone-300 hover:bg-white'
                     : 'cursor-default',
-                  item.severity === 'error'
-                    ? 'border-rose-200/80 bg-rose-50/70'
-                    : 'border-stone-200/80 bg-white/80',
-                  !item.read &&
-                    (item.severity === 'error'
-                      ? 'border-rose-300/80 bg-rose-50'
-                      : 'border-stone-300/80 bg-stone-100/70'),
+                  'border-stone-200/80 bg-white/80',
+                  !item.read && 'zeroade-notification-card-unread border-stone-300/80 bg-stone-100/70',
                 );
 
                 const content = (
                   <div className="flex min-w-0 items-start gap-3">
                     <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <p className="truncate text-[12px] font-medium text-stone-800">
+                      <div className="min-w-0">
+                        <p className="zeroade-notification-title truncate text-[12px] font-medium text-stone-800">
                           {item.title}
                         </p>
-                        <span
-                          className={cn(
-                            'shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.08em]',
-                            item.kind === 'app'
-                              ? 'bg-stone-200/80 text-stone-600'
-                              : 'bg-stone-100 text-stone-500',
-                          )}
-                        >
-                          {item.kind}
-                        </span>
                       </div>
                       {item.body ? (
-                        <p className="mt-1 line-clamp-3 break-words text-[11px] leading-5 text-stone-500">
+                        <p className="zeroade-notification-body mt-1 line-clamp-3 break-words text-[11px] leading-5 text-stone-500">
                           {item.body}
                         </p>
                       ) : null}
-                      <div className="mt-2 flex items-center gap-1.5 text-[10px] text-stone-400">
-                        <span className="truncate">{item.origin}</span>
-                        <span>&bull;</span>
+                      <div className="zeroade-notification-meta mt-2 flex w-full items-center justify-end text-[10px] text-stone-400">
                         <span>{formatPushTimestamp(item.createdAtMs)}</span>
                       </div>
                     </div>
                     {!item.read ? (
                       <span
-                        className={cn(
-                          'mt-1 inline-flex h-2.5 w-2.5 shrink-0 rounded-full',
-                          item.severity === 'error' ? 'bg-rose-500' : 'bg-stone-800',
-                        )}
+                        className="zeroade-notification-unread-dot mt-1 inline-flex h-2.5 w-2.5 shrink-0 rounded-full bg-stone-800"
                       />
                     ) : null}
                   </div>

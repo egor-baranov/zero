@@ -1,5 +1,7 @@
 import * as React from 'react';
 import {
+  ArrowLeft,
+  ArrowRight,
   ArrowUp,
   ChevronDown,
   Ellipsis,
@@ -57,9 +59,11 @@ import { useAcp, type TimelineItem } from '@renderer/store/use-acp';
 import { useWorkspaceReview } from '@renderer/store/use-workspace-review';
 import type {
   AcpCustomAgentConfig,
+  AcpPromptAudioContent,
   AcpPromptAttachment,
   AcpTerminalAuthLaunchSpec,
 } from '@shared/types/acp';
+import type { WorkspaceSearchTextMatch } from '@shared/types/workspace';
 import type { UpdaterState } from '@shared/types/updater';
 import zeroLogo from '@renderer/assets/zero-logo.png';
 
@@ -67,6 +71,9 @@ const getFolderName = (folderPath: string): string =>
   folderPath.split(/[\\/]/).filter(Boolean).pop() ?? folderPath;
 const normalizeMessageText = (value: string): string =>
   value.replace(/\s+/g, ' ').trim();
+const TITLEBAR_ICON_BUTTON_CLASS =
+  'no-drag inline-flex h-6 min-h-6 w-6 min-w-6 shrink-0 items-center justify-center rounded-md p-0 text-stone-600 transition-colors hover:bg-white/55 hover:text-stone-700';
+const TITLEBAR_ICON_CLASS = 'h-3.5 w-3.5';
 const TIMELINE_SNAPSHOT_STORAGE_KEY = 'zeroade.shell.timeline-snapshots.v1';
 const EXTERNAL_LINK_SCHEME_PATTERN = /^[a-z][a-z\d+\-.]*:/i;
 const WINDOWS_ABSOLUTE_PATH_PATTERN = /^[a-zA-Z]:\//;
@@ -255,7 +262,8 @@ const areTimelineItemsEquivalent = (left: TimelineItem, right: TimelineItem): bo
   if (left.kind === 'user-message' && right.kind === 'user-message') {
     return (
       normalizeMessageText(left.text) === normalizeMessageText(right.text) &&
-      arePromptAttachmentsEqual(left.attachments, right.attachments)
+      arePromptAttachmentsEqual(left.attachments, right.attachments) &&
+      Boolean(left.hasAudio) === Boolean(right.hasAudio)
     );
   }
 
@@ -362,6 +370,7 @@ interface QueuedPrompt {
   threadId: string;
   text: string;
   attachments: AcpPromptAttachment[];
+  audio?: AcpPromptAudioContent | null;
 }
 
 interface RenameThreadTarget {
@@ -446,6 +455,7 @@ const normalizePersistedTimelineItem = (value: unknown): TimelineItem | null => 
       kind,
       text,
       attachments: attachments.length > 0 ? attachments : undefined,
+      hasAudio: value.hasAudio === true || undefined,
     };
   }
 
@@ -565,6 +575,7 @@ const TOAST_LIFETIME_MS = 7_000;
 const ACP_REGISTRY_URL =
   'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json';
 const WELCOME_CUSTOM_AGENT_ID = '__custom__';
+const VOICE_PROMPT_PREVIEW_TEXT = '[Voice prompt]';
 const REVIEW_PANEL_WIDTH_KEY = 'zeroade.review-panel.width.v1';
 const REVIEW_PANEL_WIDTH_DEFAULT = 560;
 const REVIEW_PANEL_WIDTH_MIN = 320;
@@ -973,6 +984,7 @@ export const Shell = (): JSX.Element => {
   const {
     connectionState,
     connectionMessage,
+    promptCapabilities,
     agentPreset,
     codexAgentConfig,
     claudeAgentConfig,
@@ -997,6 +1009,10 @@ export const Shell = (): JSX.Element => {
 
   const [statusText, setStatusText] = React.useState('Shell ready');
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = React.useState(false);
+  const [isFileSearchOpen, setIsFileSearchOpen] = React.useState(false);
+  const [fileSearchQuery, setFileSearchQuery] = React.useState('');
+  const [fileSearchItems, setFileSearchItems] = React.useState<CommandPaletteItem[]>([]);
+  const [isFileSearchLoading, setIsFileSearchLoading] = React.useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = React.useState(false);
   const [isRunConfigurationOpen, setIsRunConfigurationOpen] = React.useState(false);
   const [isCommitPanelOpen, setIsCommitPanelOpen] = React.useState(false);
@@ -1029,6 +1045,12 @@ export const Shell = (): JSX.Element => {
   const [isAgentAuthRequired, setIsAgentAuthRequired] = React.useState(false);
   const [isAgentAuthLaunching, setIsAgentAuthLaunching] = React.useState(false);
   const [agentAuthMessage, setAgentAuthMessage] = React.useState<string | null>(null);
+  const [reviewRevealLocation, setReviewRevealLocation] = React.useState<{
+    requestId: number;
+    relativePath: string;
+    lineNumber: number;
+    column: number;
+  } | null>(null);
   const [agentSelectionEpoch, setAgentSelectionEpoch] = React.useState(0);
   const [composerPrefillRequest, setComposerPrefillRequest] = React.useState<{
     id: number;
@@ -1050,6 +1072,13 @@ export const Shell = (): JSX.Element => {
   const [welcomeCustomArgs, setWelcomeCustomArgs] = React.useState(
     customAgentConfig?.args.join(' ') ?? '',
   );
+  const [threadNavigationHistory, setThreadNavigationHistory] = React.useState<{
+    entries: string[];
+    index: number;
+  }>({
+    entries: [],
+    index: -1,
+  });
   const [welcomeCustomCwd, setWelcomeCustomCwd] = React.useState(
     customAgentConfig?.cwd ?? '',
   );
@@ -1064,6 +1093,7 @@ export const Shell = (): JSX.Element => {
     RegistryAgentCatalogEntry[]
   >([]);
   const lastShiftTapAtRef = React.useRef(0);
+  const fileSearchRequestIdRef = React.useRef(0);
   const dispatchingQueuedPromptRef = React.useRef(false);
   const blockedQueuedPromptIdRef = React.useRef<string | null>(null);
   const previousThreadPromptingByIdRef = React.useRef<Record<string, boolean>>({});
@@ -1073,6 +1103,7 @@ export const Shell = (): JSX.Element => {
   const pendingComposerSubmitRef = React.useRef<{
     text: string;
     attachments: AcpPromptAttachment[];
+    audio?: AcpPromptAudioContent | null;
   } | null>(null);
   const connectionErrorToastRef = React.useRef('');
   const toastTimeoutByIdRef = React.useRef<Record<number, number>>({});
@@ -1080,6 +1111,10 @@ export const Shell = (): JSX.Element => {
   const reviewPanelResizeActiveRef = React.useRef(false);
   const reviewPanelContainerRef = React.useRef<HTMLDivElement | null>(null);
   const pendingWelcomeStartPathRef = React.useRef<string | null>(null);
+  const pendingThreadNavigationIndexRef = React.useRef<number | null>(null);
+  const threadNavigationHistoryRef = React.useRef(threadNavigationHistory);
+  const fileSearchRevealRequestIdRef = React.useRef(0);
+  const fileSearchPreviewEpochRef = React.useRef(0);
 
   const platform = window.desktop?.platform ?? 'darwin';
   const navigationZoneClass =
@@ -1131,12 +1166,79 @@ export const Shell = (): JSX.Element => {
     refreshReviewPath,
   } = useWorkspaceReview(workspacePath);
   const focusedReviewRelativePath = activeReviewFile?.relativePath ?? null;
+  const knownThreadIds = React.useMemo(
+    () => [
+      ...threadGroups.flatMap((group) => group.threads.map((thread) => thread.id)),
+      ...(selectedThread ? [selectedThread.id] : []),
+    ],
+    [selectedThread, threadGroups],
+  );
 
   const ensureSessionForThreadRef = React.useRef(ensureSessionForThread);
 
   React.useEffect(() => {
     ensureSessionForThreadRef.current = ensureSessionForThread;
   }, [ensureSessionForThread]);
+
+  React.useEffect(() => {
+    threadNavigationHistoryRef.current = threadNavigationHistory;
+  }, [threadNavigationHistory]);
+
+  React.useEffect(() => {
+    const knownThreadIdSet = new Set(knownThreadIds);
+
+    setThreadNavigationHistory((previous) => {
+      if (previous.entries.length === 0) {
+        return previous;
+      }
+
+      const nextEntries = previous.entries.filter((threadId) => knownThreadIdSet.has(threadId));
+      const nextIndex =
+        nextEntries.length === 0 ? -1 : Math.min(previous.index, nextEntries.length - 1);
+
+      if (nextEntries.length === previous.entries.length && nextIndex === previous.index) {
+        return previous;
+      }
+
+      pendingThreadNavigationIndexRef.current = null;
+      return {
+        entries: nextEntries,
+        index: nextIndex,
+      };
+    });
+  }, [knownThreadIds]);
+
+  React.useEffect(() => {
+    if (!selectedThreadId) {
+      return;
+    }
+
+    setThreadNavigationHistory((previous) => {
+      const pendingIndex = pendingThreadNavigationIndexRef.current;
+      if (pendingIndex !== null) {
+        pendingThreadNavigationIndexRef.current = null;
+
+        if (previous.entries[pendingIndex] === selectedThreadId) {
+          return previous.index === pendingIndex
+            ? previous
+            : {
+                ...previous,
+                index: pendingIndex,
+              };
+        }
+      }
+
+      if (previous.entries[previous.index] === selectedThreadId) {
+        return previous;
+      }
+
+      const nextEntries = [...previous.entries.slice(0, previous.index + 1), selectedThreadId];
+      return {
+        entries: nextEntries,
+        index: nextEntries.length - 1,
+      };
+    });
+  }, [selectedThreadId]);
 
   React.useEffect(() => {
     authRecheckEpochRef.current += 1;
@@ -1676,6 +1778,7 @@ export const Shell = (): JSX.Element => {
   );
 
   const handleOpenCommandPalette = React.useCallback(() => {
+    setIsFileSearchOpen(false);
     setIsCommandPaletteOpen(true);
   }, []);
 
@@ -1784,6 +1887,52 @@ export const Shell = (): JSX.Element => {
 
     return threads;
   }, [selectedThread, threadGroups]);
+
+  const handleSelectThread = React.useCallback(
+    (threadId: string) => {
+      setIsSettingsOpen(false);
+      setCompletedThreadIds((previous) => {
+        if (!previous.has(threadId)) {
+          return previous;
+        }
+
+        const next = new Set(previous);
+        next.delete(threadId);
+        return next;
+      });
+      selectThread(threadId);
+    },
+    [selectThread],
+  );
+
+  const canNavigateThreadBack = threadNavigationHistory.index > 0;
+  const canNavigateThreadForward =
+    threadNavigationHistory.index >= 0 &&
+    threadNavigationHistory.index < threadNavigationHistory.entries.length - 1;
+
+  const handleNavigateThreadHistory = React.useCallback(
+    (direction: -1 | 1) => {
+      const { entries, index } = threadNavigationHistoryRef.current;
+      const nextIndex = index + direction;
+      const nextThreadId = entries[nextIndex];
+      if (!nextThreadId) {
+        return;
+      }
+
+      pendingThreadNavigationIndexRef.current = nextIndex;
+      setThreadNavigationHistory((previous) =>
+        previous.index === nextIndex
+          ? previous
+          : {
+              ...previous,
+              index: nextIndex,
+            },
+      );
+      handleSelectThread(nextThreadId);
+      setStatusText(`Thread ${threadById.get(nextThreadId)?.title ?? 'selected'}`);
+    },
+    [handleSelectThread, threadById],
+  );
 
   React.useEffect(() => {
     try {
@@ -2078,6 +2227,7 @@ export const Shell = (): JSX.Element => {
       threadId: string,
       text: string,
       attachments: AcpPromptAttachment[],
+      audio?: AcpPromptAudioContent | null,
     ): Promise<boolean> => {
       const thread = threadById.get(threadId);
       if (!thread) {
@@ -2104,19 +2254,33 @@ export const Shell = (): JSX.Element => {
       }
 
       const trimmedText = normalizeMessageText(text);
-      if (!trimmedText) {
+      const normalizedAudio =
+        promptCapabilities.audio &&
+        audio &&
+        audio.data.trim().length > 0 &&
+        audio.mimeType.trim().length > 0
+          ? {
+              data: audio.data.trim(),
+              mimeType: audio.mimeType.trim(),
+            }
+          : null;
+      if (!trimmedText && !normalizedAudio) {
+        if (audio) {
+          setStatusText('Current agent does not accept voice prompts');
+        }
         return false;
       }
+      const previewText = trimmedText || VOICE_PROMPT_PREVIEW_TEXT;
 
       const isDraftThread = threadWorkspaceId.trim().length === 0;
       try {
         await ensureSessionForThreadRef.current(threadId, targetWorkspace.path);
         if (isDraftThread) {
-          bindThreadToWorkspace(threadId, targetWorkspaceId, trimmedText);
+          bindThreadToWorkspace(threadId, targetWorkspaceId, previewText);
         } else {
-          updateThreadFromMessage(threadId, trimmedText);
+          updateThreadFromMessage(threadId, previewText);
         }
-        await sendPrompt(trimmedText, attachments);
+        await sendPrompt(trimmedText, attachments, normalizedAudio);
         setIsAgentAuthRequired(false);
         setAgentAuthMessage(null);
       } catch (error) {
@@ -2147,6 +2311,7 @@ export const Shell = (): JSX.Element => {
     },
     [
       bindThreadToWorkspace,
+      promptCapabilities.audio,
       selectedWorkspaceId,
       sendPrompt,
       threadById,
@@ -2355,10 +2520,21 @@ export const Shell = (): JSX.Element => {
   }, [completedThreadIds, threadById, threadPromptingById]);
 
   const handleComposerSubmit = React.useCallback(
-    async (text: string, attachments: AcpPromptAttachment[]) => {
+    async (
+      text: string,
+      attachments: AcpPromptAttachment[],
+      audio?: AcpPromptAudioContent | null,
+    ) => {
       const trimmedText = text.trim();
+      const normalizedAudio =
+        audio && audio.data.trim().length > 0 && audio.mimeType.trim().length > 0
+          ? {
+              data: audio.data.trim(),
+              mimeType: audio.mimeType.trim(),
+            }
+          : null;
 
-      if (!trimmedText) {
+      if (!trimmedText && !normalizedAudio) {
         return;
       }
 
@@ -2373,6 +2549,7 @@ export const Shell = (): JSX.Element => {
         pendingComposerSubmitRef.current = {
           text: trimmedText,
           attachments,
+          audio: normalizedAudio,
         };
         createThreadInWorkspace(workspaceId);
         setStatusText('Creating a new chat');
@@ -2385,6 +2562,7 @@ export const Shell = (): JSX.Element => {
           threadId: selectedThreadId,
           text: trimmedText,
           attachments,
+          audio: normalizedAudio,
         };
 
         setQueuedPromptsByThread((previous) => {
@@ -2398,7 +2576,7 @@ export const Shell = (): JSX.Element => {
         return;
       }
 
-      await sendPromptToThread(selectedThreadId, trimmedText, attachments);
+      await sendPromptToThread(selectedThreadId, trimmedText, attachments, normalizedAudio);
     },
     [
       createThreadInWorkspace,
@@ -2431,6 +2609,7 @@ export const Shell = (): JSX.Element => {
       selectedThreadId,
       pendingSubmit.text,
       pendingSubmit.attachments,
+      pendingSubmit.audio,
     );
   }, [selectedThreadId, sendPromptToThread, threadById]);
 
@@ -2477,6 +2656,43 @@ export const Shell = (): JSX.Element => {
     handleRunConfiguration(selectedRunConfiguration.id);
   }, [handleRunConfiguration, selectedRunConfiguration]);
 
+  const revealFileSearchMatch = React.useCallback(
+    (match: WorkspaceSearchTextMatch, focusEditor: boolean): void => {
+      fileSearchPreviewEpochRef.current += 1;
+      const previewEpoch = fileSearchPreviewEpochRef.current;
+
+      void (async () => {
+        const matchingOpenFile = reviewFiles.find(
+          (file) => file.kind === 'file' && file.relativePath === match.relativePath,
+        );
+
+        if (matchingOpenFile && isReviewPanelVisible) {
+          setActiveReviewFile(matchingOpenFile.id);
+        } else {
+          await openFile(match.relativePath);
+        }
+
+        if (fileSearchPreviewEpochRef.current !== previewEpoch) {
+          return;
+        }
+
+        fileSearchRevealRequestIdRef.current += 1;
+        setReviewRevealLocation({
+          requestId: fileSearchRevealRequestIdRef.current,
+          relativePath: match.relativePath,
+          lineNumber: match.lineNumber,
+          column: match.column,
+          focusEditor,
+        });
+
+        if (focusEditor) {
+          setStatusText(`${match.relativePath} ${match.lineNumber}`);
+        }
+      })();
+    },
+    [isReviewPanelVisible, openFile, reviewFiles, setActiveReviewFile],
+  );
+
   const handleInterruptRun = React.useCallback(() => {
     if (!activeRunExecution) {
       return;
@@ -2493,7 +2709,16 @@ export const Shell = (): JSX.Element => {
       const isMod = event.metaKey || event.ctrlKey;
       if (isMod && event.key.toLowerCase() === 'k') {
         event.preventDefault();
+        setIsFileSearchOpen(false);
         setIsCommandPaletteOpen((previous) => !previous);
+        lastShiftTapAtRef.current = 0;
+        return;
+      }
+
+      if (isMod && event.shiftKey && event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        setIsCommandPaletteOpen(false);
+        setIsFileSearchOpen((previous) => !previous);
         lastShiftTapAtRef.current = 0;
         return;
       }
@@ -2553,7 +2778,7 @@ export const Shell = (): JSX.Element => {
         keywords: `${thread.title} ${thread.preview} ${group.label}`,
         icon: 'thread',
         onSelect: () => {
-          selectThread(thread.id);
+          handleSelectThread(thread.id);
           setStatusText(`Thread ${thread.title}`);
         },
       })),
@@ -2606,10 +2831,82 @@ export const Shell = (): JSX.Element => {
     openFileTree,
     recentWorkspaces,
     setIsCommitPanelOpen,
-    selectThread,
+    handleSelectThread,
     selectWorkspace,
     threadGroups,
   ]);
+
+  React.useEffect(() => {
+    if (!isFileSearchOpen) {
+      fileSearchPreviewEpochRef.current += 1;
+      setFileSearchQuery('');
+      setFileSearchItems([]);
+      setIsFileSearchLoading(false);
+      fileSearchRequestIdRef.current += 1;
+      return;
+    }
+
+    const normalizedQuery = fileSearchQuery.trim();
+    if (!normalizedQuery || !workspacePath || workspacePath === '/') {
+      fileSearchPreviewEpochRef.current += 1;
+      setFileSearchItems([]);
+      setIsFileSearchLoading(false);
+      fileSearchRequestIdRef.current += 1;
+      return;
+    }
+
+    const requestId = fileSearchRequestIdRef.current + 1;
+    fileSearchRequestIdRef.current = requestId;
+    setIsFileSearchLoading(true);
+    setFileSearchItems([]);
+
+    const timeoutId = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await window.desktop.workspaceSearchText({
+            workspacePath,
+            query: normalizedQuery,
+            maxResults: 80,
+          });
+
+          if (fileSearchRequestIdRef.current !== requestId) {
+            return;
+          }
+
+          setFileSearchItems(
+            result.matches.map((match) => ({
+              id: `project-search-${match.relativePath}-${match.lineNumber}-${match.column}`,
+              section: 'Files',
+              title: match.preview || `${getFolderName(match.relativePath)} ${match.lineNumber}`,
+              subtitle: `${match.relativePath} ${match.lineNumber}`,
+              keywords: `${match.relativePath} ${match.preview}`,
+              icon: 'file' as const,
+              onPreview: () => {
+                revealFileSearchMatch(match, false);
+              },
+              onSelect: () => {
+                revealFileSearchMatch(match, true);
+              },
+            })),
+          );
+        } catch {
+          if (fileSearchRequestIdRef.current !== requestId) {
+            return;
+          }
+
+          setFileSearchItems([]);
+        } finally {
+          if (fileSearchRequestIdRef.current === requestId) {
+            setIsFileSearchLoading(false);
+          }
+        }
+      })();
+    }, 120);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [fileSearchQuery, isFileSearchOpen, revealFileSearchMatch, workspacePath]);
 
   const removeQueuedPrompt = React.useCallback(
     (queueId: string) => {
@@ -2760,6 +3057,7 @@ export const Shell = (): JSX.Element => {
           targetPrompt.threadId,
           targetPrompt.text,
           targetPrompt.attachments,
+          targetPrompt.audio,
         );
 
         if (!sent) {
@@ -2810,6 +3108,7 @@ export const Shell = (): JSX.Element => {
         nextPrompt.threadId,
         nextPrompt.text,
         nextPrompt.attachments,
+        nextPrompt.audio,
       );
 
       if (sent) {
@@ -3091,14 +3390,40 @@ export const Shell = (): JSX.Element => {
                 style={{ width: activeSidebarWidth }}
               >
                 <div className="flex h-full items-center justify-between px-2">
-                  <div className={cn('flex items-center', navigationZoneClass)}>
+                  <div className={cn('flex items-center gap-1', navigationZoneClass)}>
                     <button
                       type="button"
                       aria-label="Collapse sidebar"
-                      className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-white/55 hover:text-stone-700"
+                      className={TITLEBAR_ICON_BUTTON_CLASS}
                       onClick={toggleCollapsed}
                     >
-                      <PanelLeftClose className="h-4 w-4" />
+                      <PanelLeftClose className={TITLEBAR_ICON_CLASS} />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Previous thread"
+                      title="Previous thread"
+                      className={cn(
+                        TITLEBAR_ICON_BUTTON_CLASS,
+                        'disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-stone-500',
+                      )}
+                      onClick={() => handleNavigateThreadHistory(-1)}
+                      disabled={!canNavigateThreadBack}
+                    >
+                      <ArrowLeft className={TITLEBAR_ICON_CLASS} />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Next thread"
+                      title="Next thread"
+                      className={cn(
+                        TITLEBAR_ICON_BUTTON_CLASS,
+                        'disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-stone-500',
+                      )}
+                      onClick={() => handleNavigateThreadHistory(1)}
+                      disabled={!canNavigateThreadForward}
+                    >
+                      <ArrowRight className={TITLEBAR_ICON_CLASS} />
                     </button>
                   </div>
 
@@ -3106,8 +3431,7 @@ export const Shell = (): JSX.Element => {
                     <button
                       type="button"
                       className={cn(
-                        'no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors',
-                        'hover:bg-white/55 hover:text-stone-700',
+                        TITLEBAR_ICON_BUTTON_CLASS,
                         'disabled:cursor-not-allowed disabled:opacity-65',
                       )}
                       onClick={() => {
@@ -3117,7 +3441,7 @@ export const Shell = (): JSX.Element => {
                       title={updaterState?.message || 'Update available'}
                     >
                       <RefreshCw
-                        className={cn('h-3.5 w-3.5', isUpdateIconSpinning && 'animate-spin')}
+                        className={cn(TITLEBAR_ICON_CLASS, isUpdateIconSpinning && 'animate-spin')}
                       />
                     </button>
                   ) : null}
@@ -3135,10 +3459,10 @@ export const Shell = (): JSX.Element => {
                     <button
                       type="button"
                       aria-label="Expand sidebar"
-                      className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-white/55 hover:text-stone-700"
+                      className={TITLEBAR_ICON_BUTTON_CLASS}
                       onClick={toggleCollapsed}
                     >
-                      <PanelLeftOpen className="h-4 w-4" />
+                      <PanelLeftOpen className={TITLEBAR_ICON_CLASS} />
                     </button>
                   </div>
                 )}
@@ -3264,17 +3588,7 @@ export const Shell = (): JSX.Element => {
                   groups={threadGroups}
                   threadIndicatorById={threadIndicatorById}
                   onSelectThread={(threadId) => {
-                    setIsSettingsOpen(false);
-                    setCompletedThreadIds((previous) => {
-                      if (!previous.has(threadId)) {
-                        return previous;
-                      }
-
-                      const next = new Set(previous);
-                      next.delete(threadId);
-                      return next;
-                    });
-                    selectThread(threadId);
+                    handleSelectThread(threadId);
                   }}
                   onCreateThread={handleCreateThread}
                   onOpenFolder={() => {
@@ -3368,6 +3682,7 @@ export const Shell = (): JSX.Element => {
                             workspacePath={workspacePath}
                             tabs={reviewFiles}
                             activeFilePath={activeReviewFilePath}
+                            revealLocation={reviewRevealLocation}
                             onSelectTab={setActiveReviewFile}
                             onCloseTab={closeReviewFile}
                             onReorderTabs={reorderReviewFiles}
@@ -3475,6 +3790,7 @@ export const Shell = (): JSX.Element => {
                             onSelectAgentPreset={handleSelectAgentPreset}
                             onSaveAgentConfig={saveAgentConfig}
                             onSubmit={handleComposerSubmit}
+                            promptCapabilities={promptCapabilities}
                             sessionControls={effectiveSessionControls}
                             onSetSessionMode={setSessionMode}
                             onSetSessionModel={setSessionModel}
@@ -3704,8 +4020,37 @@ export const Shell = (): JSX.Element => {
 
       <CommandPalette
         open={isCommandPaletteOpen}
-        onOpenChange={setIsCommandPaletteOpen}
+        onOpenChange={(open) => {
+          if (open) {
+            setIsFileSearchOpen(false);
+          }
+          setIsCommandPaletteOpen(open);
+        }}
         items={commandPaletteItems}
+      />
+
+      <CommandPalette
+        open={isFileSearchOpen}
+        onOpenChange={(open) => {
+          if (open) {
+            setIsCommandPaletteOpen(false);
+          }
+          setIsFileSearchOpen(open);
+        }}
+        items={fileSearchItems}
+        query={fileSearchQuery}
+        onQueryChange={setFileSearchQuery}
+        filterItems={false}
+        loading={isFileSearchLoading}
+        placeholder="Search project text"
+        emptyMessage={
+          !workspacePath || workspacePath === '/'
+            ? 'Open a workspace to search project text'
+            : fileSearchQuery.trim().length === 0
+              ? 'Type to search project text'
+              : 'No matching text results'
+        }
+        sectionOrder={['Files']}
       />
 
       <RunConfigurationDialog

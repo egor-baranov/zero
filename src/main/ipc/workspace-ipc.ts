@@ -8,12 +8,13 @@ import type {
   WorkspaceGitCheckoutBranchRequest,
   WorkspaceGitCreateBranchRequest,
   WorkspaceGitPushRequest,
-  WorkspaceMoveEntryRequest,
-  WorkspaceGitStatusRequest,
-  WorkspaceListFilesRequest,
-  WorkspaceReadFileRequest,
-  WorkspaceWriteFileRequest,
-  WorkspaceRevealFileRequest,
+    WorkspaceMoveEntryRequest,
+    WorkspaceGitStatusRequest,
+    WorkspaceListFilesRequest,
+    WorkspaceSearchTextRequest,
+    WorkspaceReadFileRequest,
+    WorkspaceWriteFileRequest,
+    WorkspaceRevealFileRequest,
 } from '@shared/types/workspace';
 import type { WorkspaceService } from '../services/workspace/workspace-service';
 
@@ -21,6 +22,11 @@ export const registerWorkspaceIpc = (workspaceService: WorkspaceService): void =
   ipcMain.handle(
     IPC_CHANNELS.workspaceListFiles,
     (_event, request: WorkspaceListFilesRequest) => workspaceService.listFiles(request),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.workspaceSearchText,
+    (_event, request: WorkspaceSearchTextRequest) => workspaceService.searchText(request),
   );
 
   ipcMain.handle(

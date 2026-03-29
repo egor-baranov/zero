@@ -62,15 +62,17 @@ import type {
   WorkspaceGitCheckoutBranchRequest,
   WorkspaceGitCreateBranchRequest,
   WorkspaceGitMutationResult,
-  WorkspaceMoveEntryRequest,
-  WorkspaceMoveEntryResult,
-  WorkspaceGitPushRequest,
-  WorkspaceGitStatusRequest,
-  WorkspaceGitStatusResult,
-  WorkspaceListFilesRequest,
-  WorkspaceListFilesResult,
-  WorkspaceReadFileRequest,
-  WorkspaceReadFileResult,
+    WorkspaceMoveEntryRequest,
+    WorkspaceMoveEntryResult,
+    WorkspaceGitPushRequest,
+    WorkspaceGitStatusRequest,
+    WorkspaceGitStatusResult,
+    WorkspaceListFilesRequest,
+    WorkspaceListFilesResult,
+    WorkspaceSearchTextRequest,
+    WorkspaceSearchTextResult,
+    WorkspaceReadFileRequest,
+    WorkspaceReadFileResult,
   WorkspaceWriteFileRequest,
   WorkspaceWriteFileResult,
   WorkspaceRevealFileRequest,
@@ -89,6 +91,11 @@ import type {
   UpdaterRendererEvent,
   UpdaterState,
 } from '@shared/types/updater';
+import type { VoiceSettings } from '@shared/types/settings';
+import type {
+  VoiceTranscriptionRequest,
+  VoiceTranscriptionResult,
+} from '@shared/types/voice';
 
 export const desktopApi: DesktopApi = {
   platform: process.platform,
@@ -114,6 +121,10 @@ export const desktopApi: DesktopApi = {
     request: WorkspaceListFilesRequest,
   ): Promise<WorkspaceListFilesResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.workspaceListFiles, request),
+  workspaceSearchText: (
+    request: WorkspaceSearchTextRequest,
+  ): Promise<WorkspaceSearchTextResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.workspaceSearchText, request),
   workspaceReadFile: (
     request: WorkspaceReadFileRequest,
   ): Promise<WorkspaceReadFileResult> =>
@@ -158,6 +169,14 @@ export const desktopApi: DesktopApi = {
     request: WorkspaceGitPushRequest,
   ): Promise<WorkspaceGitMutationResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.workspaceGitPush, request),
+  settingsGetVoiceSettings: (): Promise<VoiceSettings> =>
+    ipcRenderer.invoke(IPC_CHANNELS.settingsGetVoiceSettings),
+  settingsSetVoiceSettings: (request: VoiceSettings): Promise<VoiceSettings> =>
+    ipcRenderer.invoke(IPC_CHANNELS.settingsSetVoiceSettings, request),
+  voiceTranscribe: (
+    request: VoiceTranscriptionRequest,
+  ): Promise<VoiceTranscriptionResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.voiceTranscribe, request),
   workspaceRevealFile: (
     request: WorkspaceRevealFileRequest,
   ): Promise<WorkspaceRevealFileResult> =>

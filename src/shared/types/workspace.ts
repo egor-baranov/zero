@@ -17,6 +17,24 @@ export interface WorkspaceReadFileResult {
   content: string;
 }
 
+export interface WorkspaceSearchTextRequest {
+  workspacePath: string;
+  query: string;
+  maxResults?: number;
+}
+
+export interface WorkspaceSearchTextMatch {
+  absolutePath: string;
+  relativePath: string;
+  lineNumber: number;
+  column: number;
+  preview: string;
+}
+
+export interface WorkspaceSearchTextResult {
+  matches: WorkspaceSearchTextMatch[];
+}
+
 export interface WorkspaceWriteFileRequest {
   workspacePath: string;
   filePath: string;
