@@ -292,6 +292,7 @@ export const SideBySideDiffView = ({
       ensureMonacoThemes();
       const editor = monaco.editor.createDiffEditor(editorHost, {
         theme: getMonacoTheme(),
+        'semanticHighlighting.enabled': true,
         automaticLayout: true,
         readOnly: true,
         renderSideBySide: true,
@@ -374,6 +375,7 @@ export const SideBySideDiffView = ({
       monaco.editor.setTheme(getMonacoTheme());
       editorRef.current?.updateOptions({
         fontFamily: readResolvedCodeFontFamily(),
+        'semanticHighlighting.enabled': true,
       });
     };
 

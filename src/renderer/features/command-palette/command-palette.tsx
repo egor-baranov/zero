@@ -44,12 +44,14 @@ export const CommandPalette = ({
   const [uncontrolledQuery, setUncontrolledQuery] = React.useState('');
   const [activeItemId, setActiveItemId] = React.useState<string | null>(null);
   const itemButtonByIdRef = React.useRef(new Map<string, HTMLButtonElement>());
+  const suppressNextPreviewRef = React.useRef(false);
   const query = controlledQuery ?? uncontrolledQuery;
 
   React.useEffect(() => {
     if (!open) {
       setUncontrolledQuery('');
       setActiveItemId(null);
+      suppressNextPreviewRef.current = false;
       onQueryChange?.('');
     }
   }, [onQueryChange, open]);
@@ -111,12 +113,18 @@ export const CommandPalette = ({
   React.useEffect(() => {
     if (orderedItems.length === 0) {
       setActiveItemId(null);
+      suppressNextPreviewRef.current = false;
       return;
     }
 
-    setActiveItemId((previous) =>
-      previous && orderedItems.some((item) => item.id === previous) ? previous : orderedItems[0].id,
-    );
+    setActiveItemId((previous) => {
+      if (previous && orderedItems.some((item) => item.id === previous)) {
+        return previous;
+      }
+
+      suppressNextPreviewRef.current = true;
+      return orderedItems[0].id;
+    });
   }, [orderedItems]);
 
   React.useEffect(() => {
@@ -131,6 +139,11 @@ export const CommandPalette = ({
 
   React.useEffect(() => {
     if (!activeItemId) {
+      return;
+    }
+
+    if (suppressNextPreviewRef.current) {
+      suppressNextPreviewRef.current = false;
       return;
     }
 
@@ -164,6 +177,7 @@ export const CommandPalette = ({
 
         const nextIndex =
           (currentIndex + direction + orderedItems.length) % orderedItems.length;
+        suppressNextPreviewRef.current = false;
         return orderedItems[nextIndex]?.id ?? previous;
       });
     },
@@ -217,7 +231,12 @@ export const CommandPalette = ({
           </label>
         </div>
 
-        <div className="max-h-[56vh] overflow-y-auto px-3 py-3">
+        <div
+          className={cn(
+            'overflow-y-auto px-3 py-3',
+            filterItems ? 'max-h-[56vh]' : 'h-[52vh] min-h-[280px] max-h-[56vh]',
+          )}
+        >
           <div className="space-y-5 pb-2">
             {groupedItems.length === 0 && (
               <div className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-500">
@@ -249,8 +268,14 @@ export const CommandPalette = ({
                         'no-drag flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-stone-100',
                         activeItemId === item.id && 'bg-stone-100',
                       )}
-                      onMouseEnter={() => setActiveItemId(item.id)}
-                      onFocus={() => setActiveItemId(item.id)}
+                      onMouseEnter={() => {
+                        suppressNextPreviewRef.current = false;
+                        setActiveItemId(item.id);
+                      }}
+                      onFocus={() => {
+                        suppressNextPreviewRef.current = false;
+                        setActiveItemId(item.id);
+                      }}
                       onClick={() => selectItem(item)}
                     >
                       <span className="mt-0.5 rounded-md bg-stone-100 p-1 text-stone-500">

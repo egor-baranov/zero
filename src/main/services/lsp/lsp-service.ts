@@ -3,6 +3,11 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { app } from 'electron';
+import {
+  LSP_SEMANTIC_TOKEN_MODIFIERS,
+  LSP_SEMANTIC_TOKEN_TYPES,
+} from '@shared/types/lsp';
 import type {
   LspCompletionItem,
   LspCompletionRequest,
@@ -19,6 +24,8 @@ import type {
   LspReferencesRequest,
   LspReferencesResult,
   LspRendererEvent,
+  LspSemanticTokensRequest,
+  LspSemanticTokensResult,
   LspTextDocumentPositionRequest,
   LspTextEdit,
 } from '@shared/types/lsp';
@@ -60,10 +67,29 @@ interface PendingRequest {
   reject: (reason: Error) => void;
 }
 
+interface LspSemanticTokensLegend {
+  tokenTypes: string[];
+  tokenModifiers: string[];
+}
+
+interface LspSemanticTokensSupport {
+  legend: LspSemanticTokensLegend;
+  full: boolean;
+}
+
 const COMPLETION_TRIGGER_INVOKED = 1;
 const COMPLETION_TRIGGER_CHARACTER = 2;
 
 const POSITION_ENCODING = 'utf-16';
+const CLIENT_SEMANTIC_TOKEN_TYPES = [...LSP_SEMANTIC_TOKEN_TYPES];
+const CLIENT_SEMANTIC_TOKEN_MODIFIERS = [...LSP_SEMANTIC_TOKEN_MODIFIERS];
+const CLIENT_SEMANTIC_TOKEN_TYPE_INDEX = new Map(
+  CLIENT_SEMANTIC_TOKEN_TYPES.map((tokenType, index) => [tokenType, index]),
+);
+const CLIENT_SEMANTIC_TOKEN_MODIFIER_INDEX = new Map(
+  CLIENT_SEMANTIC_TOKEN_MODIFIERS.map((modifier, index) => [modifier, index]),
+);
+const BUNDLED_LSP_PLATFORM_DIR = `${process.platform}-${process.arch}`;
 
 const resolveLocalBin = (name: string): string =>
   path.join(
@@ -76,6 +102,11 @@ const resolveLocalBin = (name: string): string =>
 const getExecutableName = (name: string): string =>
   process.platform === 'win32' && !name.endsWith('.cmd') ? `${name}.cmd` : name;
 
+const getBundledExecutableNames = (name: string): string[] =>
+  process.platform === 'win32'
+    ? [`${name}.bat`, `${name}.cmd`, `${name}.exe`, name]
+    : [name];
+
 const COMMON_BIN_DIRECTORIES = Array.from(
   new Set([
     path.join(homedir(), '.local', 'share', 'nvim', 'mason', 'bin'),
@@ -87,6 +118,72 @@ const COMMON_BIN_DIRECTORIES = Array.from(
     '/usr/local/bin',
   ]),
 );
+
+const resolveBundledLspPlatformRoots = (): string[] =>
+  Array.from(
+    new Set([
+      path.join(process.resourcesPath, 'lsp', BUNDLED_LSP_PLATFORM_DIR),
+      path.join(process.cwd(), '.bundled-tools', 'lsp', BUNDLED_LSP_PLATFORM_DIR),
+    ]),
+  ).filter((candidate) => existsSync(candidate));
+
+const resolveBundledJavaHome = (): string | null => {
+  for (const root of resolveBundledLspPlatformRoots()) {
+    const candidates =
+      process.platform === 'darwin'
+        ? [path.join(root, 'java', 'openjdk.jdk', 'Contents', 'Home')]
+        : [path.join(root, 'java')];
+
+    for (const candidate of candidates) {
+      if (
+        existsSync(
+          path.join(candidate, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'),
+        )
+      ) {
+        return candidate;
+      }
+    }
+  }
+
+  return null;
+};
+
+const resolveAppPackageRoots = (): string[] => {
+  const candidates = new Set<string>([
+    process.cwd(),
+    path.join(process.resourcesPath, 'app.asar'),
+    path.join(process.resourcesPath, 'app.asar.unpacked'),
+  ]);
+
+  try {
+    const appPath = app.getAppPath();
+    if (appPath) {
+      candidates.add(appPath);
+    }
+  } catch {
+    // Ignore app path lookup errors during early startup and keep other fallbacks.
+  }
+
+  return Array.from(candidates).filter((candidate) => existsSync(candidate));
+};
+
+const resolveBundledNodePackageScripts = (
+  packageName: string,
+  relativeScriptPaths: string[],
+): string[] => {
+  const candidates: string[] = [];
+
+  for (const root of resolveAppPackageRoots()) {
+    for (const relativeScriptPath of relativeScriptPaths) {
+      const candidate = path.join(root, 'node_modules', packageName, relativeScriptPath);
+      if (existsSync(candidate)) {
+        candidates.push(candidate);
+      }
+    }
+  }
+
+  return Array.from(new Set(candidates));
+};
 
 const resolveCommandInDirectories = (
   command: string,
@@ -149,65 +246,103 @@ const resolveExecutableLaunchCandidates = (
   return dedupeLaunchCandidates(candidates);
 };
 
-const resolveTypeScriptLanguageServerCandidates = (): LspLaunchCandidate[] => {
-  const directBin = resolveLocalBin('typescript-language-server');
-  const cliPath = path.join(
-    process.cwd(),
-    'node_modules',
-    'typescript-language-server',
-    'lib',
-    'cli.mjs',
-  );
+const resolveBundledLaunchCandidates = (
+  serverDirectory: string,
+  commands: string[],
+  args: string[] = [],
+  options?: {
+    includeBundledJavaHome?: boolean;
+  },
+): LspLaunchCandidate[] => {
   const candidates: LspLaunchCandidate[] = [];
+  const bundledJavaHome = options?.includeBundledJavaHome ? resolveBundledJavaHome() : null;
 
-  if (existsSync(directBin)) {
-    candidates.push({
-      command: directBin,
-      args: ['--stdio'],
-    });
+  for (const root of resolveBundledLspPlatformRoots()) {
+    for (const command of commands) {
+      for (const executableName of getBundledExecutableNames(command)) {
+        const bundledCommand = path.join(root, serverDirectory, 'bin', executableName);
+
+        if (!existsSync(bundledCommand)) {
+          continue;
+        }
+
+        candidates.push({
+          command: bundledCommand,
+          args,
+          env: bundledJavaHome ? { JAVA_HOME: bundledJavaHome } : undefined,
+        });
+      }
+    }
   }
 
-  if (existsSync(cliPath)) {
-    candidates.push({
+  return dedupeLaunchCandidates(candidates);
+};
+
+const resolveBundledThenExecutableLaunchCandidates = (
+  bundledServerDirectory: string,
+  commands: string[],
+  args: string[] = [],
+  options?: {
+    includeBundledJavaHome?: boolean;
+  },
+): LspLaunchCandidate[] =>
+  dedupeLaunchCandidates([
+    ...resolveBundledLaunchCandidates(
+      bundledServerDirectory,
+      commands,
+      args,
+      options,
+    ),
+    ...resolveExecutableLaunchCandidates(commands, args),
+  ]);
+
+const resolveBundledNodePackageLaunchCandidates = (
+  packageName: string,
+  relativeScriptPaths: string[],
+  commands: string[],
+  args: string[] = [],
+): LspLaunchCandidate[] =>
+  dedupeLaunchCandidates([
+    ...resolveBundledNodePackageScripts(packageName, relativeScriptPaths).map((scriptPath) => ({
       command: process.execPath,
-      args: [cliPath, '--stdio'],
+      args: [scriptPath, ...args],
       env: {
         ELECTRON_RUN_AS_NODE: '1',
       },
-    });
-    candidates.push({
-      command: 'node',
-      args: [cliPath, '--stdio'],
-    });
-  }
+    })),
+    ...resolveExecutableLaunchCandidates(commands, args),
+  ]);
 
-  candidates.push({
-    command: 'typescript-language-server',
-    args: ['--stdio'],
-  });
-
-  return candidates;
-};
-
-const createPathServerConfig = (
+const createBundledDiscoveredServerConfig = (
   id: string,
   languages: string[],
-  command: string,
+  bundledServerDirectory: string,
+  commands: string[],
   args: string[] = [],
+  options?: {
+    includeBundledJavaHome?: boolean;
+    installHint?: string;
+  },
 ): LspServerConfig => ({
   id,
   languages,
-  launchCandidates: () => [
-    {
-      command,
+  installHint: options?.installHint,
+  launchCandidates: () =>
+    resolveBundledThenExecutableLaunchCandidates(
+      bundledServerDirectory,
+      commands,
       args,
-    },
-  ],
+      {
+        includeBundledJavaHome: options?.includeBundledJavaHome,
+      },
+    ),
 });
 
-const createDiscoveredServerConfig = (
+const createBundledNodePackageServerConfig = (
   id: string,
   languages: string[],
+  packageName: string,
+  relativeScriptPaths: string[],
   commands: string[],
   args: string[] = [],
   installHint?: string,
@@ -215,50 +350,125 @@ const createDiscoveredServerConfig = (
   id,
   languages,
   installHint,
-  launchCandidates: () => resolveExecutableLaunchCandidates(commands, args),
+  launchCandidates: () =>
+    resolveBundledNodePackageLaunchCandidates(
+      packageName,
+      relativeScriptPaths,
+      commands,
+      args,
+    ),
 });
 
 const SERVER_CONFIGS: LspServerConfig[] = [
-  {
-    id: 'typescript-language-server',
-    languages: ['typescript', 'javascript'],
-    launchCandidates: resolveTypeScriptLanguageServerCandidates,
-    installHint: 'Install `typescript-language-server` so the TypeScript/JavaScript LSP can start.',
-  },
-  createDiscoveredServerConfig(
+  createBundledNodePackageServerConfig(
+    'typescript-language-server',
+    ['typescript', 'javascript'],
+    'typescript-language-server',
+    ['lib/cli.mjs'],
+    ['typescript-language-server'],
+    ['--stdio'],
+    'Packaged builds should ship `typescript-language-server` and `typescript` in app dependencies.',
+  ),
+  createBundledNodePackageServerConfig(
     'pyright',
     ['python'],
+    'pyright',
+    ['langserver.index.js'],
     ['pyright-langserver'],
     ['--stdio'],
-    'Install `pyright` so `pyright-langserver` is available on PATH, in `node_modules/.bin`, or in a common user bin directory.',
+    'Packaged builds should ship `pyright` in app dependencies.',
   ),
-  createDiscoveredServerConfig(
+  createBundledDiscoveredServerConfig(
     'gopls',
     ['go'],
+    'gopls',
     ['gopls'],
     [],
-    'Install `gopls` and make sure it is available on PATH, in `~/go/bin`, or in a common user bin directory.',
+    {
+      installHint:
+        'Packaged builds should bundle `gopls`. For local development, stage it with `npm run stage:lsps`, set `ZERO_BUNDLED_GOPLS`, or install `gopls` on PATH.',
+    },
   ),
-  createDiscoveredServerConfig(
+  createBundledDiscoveredServerConfig(
     'kotlin-lsp',
     ['kotlin'],
+    'kotlin-language-server',
     ['kotlin-language-server', 'kotlin-lsp'],
     [],
-    'Install `kotlin-language-server` or `kotlin-lsp` and make sure the binary is available on PATH or in a common user bin directory.',
+    {
+      includeBundledJavaHome: true,
+      installHint:
+        'Packaged builds should bundle Kotlin LSP resources. For local development, stage them with `npm run stage:lsps` or install `kotlin-language-server` / `kotlin-lsp` on PATH.',
+    },
   ),
-  createPathServerConfig('rust-analyzer', ['rust'], 'rust-analyzer'),
-  createDiscoveredServerConfig(
+  createBundledDiscoveredServerConfig(
+    'rust-analyzer',
+    ['rust'],
+    'rust-analyzer',
+    ['rust-analyzer'],
+    [],
+    {
+      installHint:
+        'Packaged builds should bundle `rust-analyzer`. For local development, stage it with `npm run stage:lsps`, set `ZERO_BUNDLED_RUST_ANALYZER`, or install `rust-analyzer` on PATH.',
+    },
+  ),
+  createBundledDiscoveredServerConfig(
     'jdtls',
     ['java'],
+    'jdtls',
     ['jdtls'],
     [],
-    'Install `jdtls` and make sure it is available on PATH, via Mason, or in a common user bin directory.',
+    {
+      includeBundledJavaHome: true,
+      installHint:
+        'Packaged builds should bundle JDTLS resources. For local development, stage them with `npm run stage:lsps` or install `jdtls` on PATH.',
+    },
   ),
-  createPathServerConfig('json-ls', ['json'], 'vscode-json-language-server', ['--stdio']),
-  createPathServerConfig('yaml-ls', ['yaml'], 'yaml-language-server', ['--stdio']),
-  createPathServerConfig('bash-ls', ['shell'], 'bash-language-server', ['start']),
-  createPathServerConfig('html-ls', ['html'], 'vscode-html-language-server', ['--stdio']),
-  createPathServerConfig('css-ls', ['css'], 'vscode-css-language-server', ['--stdio']),
+  createBundledNodePackageServerConfig(
+    'json-ls',
+    ['json'],
+    'vscode-langservers-extracted',
+    ['bin/vscode-json-language-server'],
+    ['vscode-json-language-server'],
+    ['--stdio'],
+    'Packaged builds should ship `vscode-langservers-extracted` in app dependencies.',
+  ),
+  createBundledNodePackageServerConfig(
+    'yaml-ls',
+    ['yaml'],
+    'yaml-language-server',
+    ['bin/yaml-language-server'],
+    ['yaml-language-server'],
+    ['--stdio'],
+    'Packaged builds should ship `yaml-language-server` in app dependencies.',
+  ),
+  createBundledNodePackageServerConfig(
+    'bash-ls',
+    ['shell'],
+    'bash-language-server',
+    ['out/cli.js'],
+    ['bash-language-server'],
+    ['start'],
+    'Packaged builds should ship `bash-language-server` in app dependencies.',
+  ),
+  createBundledNodePackageServerConfig(
+    'html-ls',
+    ['html'],
+    'vscode-langservers-extracted',
+    ['bin/vscode-html-language-server'],
+    ['vscode-html-language-server'],
+    ['--stdio'],
+    'Packaged builds should ship `vscode-langservers-extracted` in app dependencies.',
+  ),
+  createBundledNodePackageServerConfig(
+    'css-ls',
+    ['css'],
+    'vscode-langservers-extracted',
+    ['bin/vscode-css-language-server'],
+    ['vscode-css-language-server'],
+    ['--stdio'],
+    'Packaged builds should ship `vscode-langservers-extracted` in app dependencies.',
+  ),
 ];
 
 const isMissingExecutableMessage = (value: string): boolean =>
@@ -534,6 +744,308 @@ const normalizeDiagnostics = (value: unknown): LspDiagnostic[] => {
     .filter((entry): entry is LspDiagnostic => entry !== null);
 };
 
+const normalizeSemanticTokenLegend = (value: unknown): LspSemanticTokensLegend | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const tokenTypes = Array.isArray(value.tokenTypes)
+    ? value.tokenTypes.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+  const tokenModifiers = Array.isArray(value.tokenModifiers)
+    ? value.tokenModifiers.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+
+  if (tokenTypes.length === 0) {
+    return null;
+  }
+
+  return {
+    tokenTypes,
+    tokenModifiers,
+  };
+};
+
+const normalizeSemanticTokenSupport = (value: unknown): LspSemanticTokensSupport | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const legend = normalizeSemanticTokenLegend(value.legend);
+  if (!legend) {
+    return null;
+  }
+
+  const full =
+    value.full === true || isRecord(value.full);
+
+  return {
+    legend,
+    full,
+  };
+};
+
+const normalizeSemanticTokenType = (value: string): string | null => {
+  if (CLIENT_SEMANTIC_TOKEN_TYPE_INDEX.has(value)) {
+    return value;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.includes('parameter') || normalized.includes('argument')) {
+    return 'parameter';
+  }
+
+  if (normalized.includes('method')) {
+    return 'method';
+  }
+
+  if (normalized.includes('function')) {
+    return 'function';
+  }
+
+  if (normalized.includes('field') || normalized.includes('property') || normalized.includes('member')) {
+    return 'property';
+  }
+
+  if (normalized.includes('typeparameter')) {
+    return 'typeParameter';
+  }
+
+  if (normalized.includes('interface')) {
+    return 'interface';
+  }
+
+  if (normalized.includes('enum') && normalized.includes('member')) {
+    return 'enumMember';
+  }
+
+  if (normalized.includes('enum')) {
+    return 'enum';
+  }
+
+  if (normalized.includes('class')) {
+    return 'class';
+  }
+
+  if (normalized.includes('struct')) {
+    return 'struct';
+  }
+
+  if (normalized.includes('namespace') || normalized.includes('module') || normalized.includes('package')) {
+    return 'namespace';
+  }
+
+  if (normalized.includes('keyword')) {
+    return 'keyword';
+  }
+
+  if (normalized.includes('operator')) {
+    return 'operator';
+  }
+
+  if (normalized.includes('decorator') || normalized.includes('annotation') || normalized.includes('metadata')) {
+    return 'decorator';
+  }
+
+  if (normalized.includes('comment')) {
+    return 'comment';
+  }
+
+  if (normalized.includes('string')) {
+    return 'string';
+  }
+
+  if (normalized.includes('regexp') || normalized.includes('regex')) {
+    return 'regexp';
+  }
+
+  if (normalized.includes('number')) {
+    return 'number';
+  }
+
+  if (normalized.includes('modifier')) {
+    return 'modifier';
+  }
+
+  if (normalized.includes('event')) {
+    return 'event';
+  }
+
+  if (normalized.includes('macro')) {
+    return 'macro';
+  }
+
+  if (normalized.includes('type')) {
+    return 'type';
+  }
+
+  if (normalized.includes('variable') || normalized.includes('local')) {
+    return 'variable';
+  }
+
+  return null;
+};
+
+const normalizeSemanticTokenModifier = (value: string): string | null => {
+  if (CLIENT_SEMANTIC_TOKEN_MODIFIER_INDEX.has(value)) {
+    return value;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.includes('declare')) {
+    return 'declaration';
+  }
+
+  if (normalized.includes('define')) {
+    return 'definition';
+  }
+
+  if (normalized.includes('readonly')) {
+    return 'readonly';
+  }
+
+  if (normalized.includes('static')) {
+    return 'static';
+  }
+
+  if (normalized.includes('deprecated')) {
+    return 'deprecated';
+  }
+
+  if (normalized.includes('abstract')) {
+    return 'abstract';
+  }
+
+  if (normalized.includes('async')) {
+    return 'async';
+  }
+
+  if (normalized.includes('modification') || normalized.includes('mutable')) {
+    return 'modification';
+  }
+
+  if (normalized.includes('documentation') || normalized.includes('doc')) {
+    return 'documentation';
+  }
+
+  if (normalized.includes('defaultlibrary') || normalized.includes('builtin')) {
+    return 'defaultLibrary';
+  }
+
+  return null;
+};
+
+const normalizeSemanticTokensResult = (
+  value: unknown,
+  legend: LspSemanticTokensLegend | null,
+): LspSemanticTokensResult => {
+  if (!isRecord(value) || !legend || !Array.isArray(value.data)) {
+    return {
+      supported: legend !== null,
+      data: [],
+      resultId: null,
+    };
+  }
+
+  const rawData = value.data.filter(
+    (entry): entry is number => typeof entry === 'number' && Number.isFinite(entry),
+  );
+  if (rawData.length < 5) {
+    return {
+      supported: true,
+      data: [],
+      resultId: typeof value.resultId === 'string' ? value.resultId : null,
+    };
+  }
+
+  const remappedData: number[] = [];
+  let inputLine = 0;
+  let inputCharacter = 0;
+  let outputLine = 0;
+  let outputCharacter = 0;
+
+  for (let index = 0; index + 4 < rawData.length; index += 5) {
+    const deltaLine = rawData[index];
+    const deltaCharacter = rawData[index + 1];
+    const length = rawData[index + 2];
+    const serverTokenTypeIndex = rawData[index + 3];
+    const serverModifierSet = rawData[index + 4];
+
+    inputLine += deltaLine;
+    inputCharacter = deltaLine === 0 ? inputCharacter + deltaCharacter : deltaCharacter;
+
+    if (!Number.isInteger(length) || length <= 0 || !Number.isInteger(serverTokenTypeIndex)) {
+      continue;
+    }
+
+    const serverTokenType = legend.tokenTypes[serverTokenTypeIndex];
+    if (typeof serverTokenType !== 'string') {
+      continue;
+    }
+
+    const normalizedType = normalizeSemanticTokenType(serverTokenType);
+    const clientTokenTypeIndex =
+      normalizedType !== null ? CLIENT_SEMANTIC_TOKEN_TYPE_INDEX.get(normalizedType) : undefined;
+    if (typeof clientTokenTypeIndex !== 'number') {
+      continue;
+    }
+
+    let clientModifierSet = 0;
+    let modifierSet = serverModifierSet;
+    let modifierIndex = 0;
+
+    while (modifierSet > 0 && modifierIndex < legend.tokenModifiers.length) {
+      if (modifierSet & 1) {
+        const serverModifier = legend.tokenModifiers[modifierIndex];
+        const normalizedModifier =
+          typeof serverModifier === 'string'
+            ? normalizeSemanticTokenModifier(serverModifier)
+            : null;
+        const clientModifierIndex =
+          normalizedModifier !== null
+            ? CLIENT_SEMANTIC_TOKEN_MODIFIER_INDEX.get(normalizedModifier)
+            : undefined;
+
+        if (typeof clientModifierIndex === 'number') {
+          clientModifierSet |= 1 << clientModifierIndex;
+        }
+      }
+
+      modifierSet >>= 1;
+      modifierIndex += 1;
+    }
+
+    const outputDeltaLine = inputLine - outputLine;
+    const outputDeltaCharacter =
+      outputDeltaLine === 0 ? inputCharacter - outputCharacter : inputCharacter;
+
+    remappedData.push(
+      outputDeltaLine,
+      outputDeltaCharacter,
+      length,
+      clientTokenTypeIndex,
+      clientModifierSet,
+    );
+
+    outputLine = inputLine;
+    outputCharacter = inputCharacter;
+  }
+
+  return {
+    supported: true,
+    data: remappedData,
+    resultId: typeof value.resultId === 'string' ? value.resultId : null,
+  };
+};
+
 const toCompletionContext = (
   triggerCharacter?: string,
   triggerKind?: number,
@@ -557,6 +1069,7 @@ class LspServerSession {
   private child: ChildProcessWithoutNullStreams | null = null;
   private readonly documents = new Map<string, LspDocumentState>();
   private readonly pendingRequests = new Map<JsonRpcId, PendingRequest>();
+  private semanticTokensSupport: LspSemanticTokensSupport | null = null;
   private nextRequestId = 1;
   private outputBuffer = Buffer.alloc(0);
   private readyPromise: Promise<void> | null = null;
@@ -660,6 +1173,37 @@ class LspServerSession {
       context: toCompletionContext(request.triggerCharacter, request.triggerKind),
     });
     return normalizeCompletionResult(result);
+  }
+
+  public async semanticTokens(
+    request: LspSemanticTokensRequest,
+  ): Promise<LspSemanticTokensResult> {
+    await this.ensureReady();
+
+    if (!this.semanticTokensSupport?.full) {
+      return {
+        supported: false,
+        data: [],
+        resultId: null,
+      };
+    }
+
+    const uri = toWorkspaceFileUri(this.workspacePath, request.relativePath);
+    if (!this.documents.has(uri)) {
+      return {
+        supported: true,
+        data: [],
+        resultId: null,
+      };
+    }
+
+    const result = await this.request('textDocument/semanticTokens/full', {
+      textDocument: {
+        uri,
+      },
+    });
+
+    return normalizeSemanticTokensResult(result, this.semanticTokensSupport.legend);
   }
 
   public async definition(
@@ -769,6 +1313,14 @@ class LspServerSession {
           hover: {
             contentFormat: ['markdown', 'plaintext'],
           },
+          semanticTokens: {
+            tokenTypes: CLIENT_SEMANTIC_TOKEN_TYPES,
+            tokenModifiers: CLIENT_SEMANTIC_TOKEN_MODIFIERS,
+            formats: ['relative'],
+            requests: {
+              full: true,
+            },
+          },
           completion: {
             completionItem: {
               snippetSupport: true,
@@ -809,6 +1361,13 @@ class LspServerSession {
     if (!isRecord(initializeResult)) {
       throw new Error('Language server returned an invalid initialize response.');
     }
+
+    const capabilities = isRecord(initializeResult.capabilities)
+      ? initializeResult.capabilities
+      : null;
+    this.semanticTokensSupport = capabilities
+      ? normalizeSemanticTokenSupport(capabilities.semanticTokensProvider)
+      : null;
 
     this.notify('initialized', {});
     this.emitStatus('ready', null);
@@ -1198,6 +1757,21 @@ export class LspService {
     } catch {
       return {
         locations: [],
+      };
+    }
+  }
+
+  public async semanticTokens(
+    request: LspSemanticTokensRequest,
+  ): Promise<LspSemanticTokensResult> {
+    try {
+      const session = await this.ensureSession(request.workspacePath, request.languageId);
+      return await session.semanticTokens(request);
+    } catch {
+      return {
+        supported: false,
+        data: [],
+        resultId: null,
       };
     }
   }

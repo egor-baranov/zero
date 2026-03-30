@@ -5,6 +5,7 @@ export interface SkillSummary {
   directoryPath: string;
   relativePath: string;
   slug: string;
+  iconAbsolutePath: string | null;
   name: string;
   description: string;
   scope: SkillScope;
@@ -15,6 +16,34 @@ export interface SkillSummary {
 export interface SkillsListResult {
   skillsRoot: string;
   skills: SkillSummary[];
+}
+
+export interface SkillsCatalogEntry {
+  source: string;
+  owner: string;
+  repo: string;
+  skillId: string;
+  name: string;
+  installsCount: number | null;
+  pageUrl: string;
+  repositoryUrl: string;
+  installCommand: string;
+}
+
+export interface SkillsCatalogResult {
+  catalogUrl: string;
+  total: number;
+  skills: SkillsCatalogEntry[];
+}
+
+export interface SkillsCatalogDetailRequest {
+  pageUrl: string;
+}
+
+export interface SkillsCatalogDetailResult {
+  skill: SkillsCatalogEntry;
+  summary: string | null;
+  weeklyInstalls: string | null;
 }
 
 export interface SkillsReadRequest {
@@ -43,4 +72,17 @@ export interface SkillsDeleteRequest {
 
 export interface SkillsDeleteResult {
   deleted: boolean;
+}
+
+export interface SkillsInstallRequest {
+  source: string;
+  skillId: string;
+  repositoryUrl?: string;
+}
+
+export interface SkillsInstallResult {
+  source: string;
+  skillId: string;
+  repositoryUrl: string;
+  command: string;
 }

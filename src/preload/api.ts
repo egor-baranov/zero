@@ -23,8 +23,12 @@ import type {
   AcpSessionNewResult,
 } from '@shared/types/acp';
 import type {
+  SkillsCatalogDetailRequest,
+  SkillsCatalogDetailResult,
   SkillsDeleteRequest,
   SkillsDeleteResult,
+  SkillsInstallRequest,
+  SkillsInstallResult,
   SkillsReadRequest,
   SkillsReadResult,
   SkillsWriteRequest,
@@ -41,6 +45,8 @@ import type {
   LspReferencesRequest,
   LspReferencesResult,
   LspRendererEvent,
+  LspSemanticTokensRequest,
+  LspSemanticTokensResult,
   LspTextDocumentPositionRequest,
 } from '@shared/types/lsp';
 import type {
@@ -197,6 +203,10 @@ export const desktopApi: DesktopApi = {
     request: LspCompletionRequest,
   ): Promise<LspCompletionResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.lspCompletion, request),
+  lspSemanticTokens: (
+    request: LspSemanticTokensRequest,
+  ): Promise<LspSemanticTokensResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspSemanticTokens, request),
   lspDefinition: (
     request: LspTextDocumentPositionRequest,
   ): Promise<LspDefinitionResult> =>
@@ -260,12 +270,17 @@ export const desktopApi: DesktopApi = {
     };
   },
   skillsList: () => ipcRenderer.invoke(IPC_CHANNELS.skillsList),
+  skillsCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.skillsCatalog),
+  skillsCatalogDetail: (request: SkillsCatalogDetailRequest): Promise<SkillsCatalogDetailResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.skillsCatalogDetail, request),
   skillsRead: (request: SkillsReadRequest): Promise<SkillsReadResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.skillsRead, request),
   skillsWrite: (request: SkillsWriteRequest): Promise<SkillsWriteResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.skillsWrite, request),
   skillsDelete: (request: SkillsDeleteRequest): Promise<SkillsDeleteResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.skillsDelete, request),
+  skillsInstall: (request: SkillsInstallRequest): Promise<SkillsInstallResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.skillsInstall, request),
   terminalCreate: (request: TerminalCreateRequest): Promise<TerminalCreateResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.terminalCreate, request),
   terminalWrite: (request: TerminalWriteRequest): Promise<void> =>

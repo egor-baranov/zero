@@ -38,6 +38,7 @@ const config: ForgeConfig = {
       // Keep runtime-executed binaries outside app.asar.
       unpackDir: '{**/node_modules/@zed-industries,**/node_modules/node-pty}',
     },
+    extraResource: ['.bundled-tools/lsp'],
     usageDescription: {
       Microphone: 'Zero uses your microphone for composer voice input.',
     },

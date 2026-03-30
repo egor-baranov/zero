@@ -5,6 +5,7 @@ import type {
   LspDocumentCloseRequest,
   LspReferencesRequest,
   LspDocumentSyncRequest,
+  LspSemanticTokensRequest,
   LspTextDocumentPositionRequest,
 } from '@shared/types/lsp';
 import type { LspService } from '../services/lsp/lsp-service';
@@ -28,6 +29,11 @@ export const registerLspIpc = (lspService: LspService): void => {
   ipcMain.handle(
     IPC_CHANNELS.lspCompletion,
     (_event, request: LspCompletionRequest) => lspService.completion(request),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.lspSemanticTokens,
+    (_event, request: LspSemanticTokensRequest) => lspService.semanticTokens(request),
   );
 
   ipcMain.handle(

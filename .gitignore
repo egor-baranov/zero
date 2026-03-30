@@ -90,6 +90,7 @@ typings/
 
 # Electron-Forge
 out/
+.bundled-tools/
 
 # Local/editor metadata
 .idea/

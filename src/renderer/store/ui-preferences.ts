@@ -36,6 +36,49 @@ export interface EditorThemeSemanticColors {
   skill: string;
 }
 
+export interface EditorThemeSyntaxColors {
+  comment?: string;
+  delimiter?: string;
+  function?: string;
+  interface?: string;
+  keyword?: string;
+  metadata?: string;
+  number?: string;
+  operator?: string;
+  parameter?: string;
+  property?: string;
+  string?: string;
+  type?: string;
+  variable?: string;
+}
+
+export interface EditorThemeSyntaxStyles {
+  comment?: string;
+  delimiter?: string;
+  function?: string;
+  interface?: string;
+  keyword?: string;
+  metadata?: string;
+  number?: string;
+  operator?: string;
+  parameter?: string;
+  property?: string;
+  string?: string;
+  type?: string;
+  variable?: string;
+}
+
+export interface EditorThemeEditorColors {
+  activeIndentGuide?: string;
+  activeLineNumber?: string;
+  bracketMatchBorder?: string;
+  cursor?: string;
+  indentGuide?: string;
+  lineHighlightBackground?: string;
+  lineNumber?: string;
+  selectionBackground?: string;
+}
+
 export interface EditorThemeSettings {
   preset: EditorThemePreset;
   accent: string;
@@ -48,6 +91,9 @@ export interface EditorThemeSettings {
   diffAdded: string;
   diffRemoved: string;
   skill: string;
+  editorColors?: EditorThemeEditorColors;
+  syntaxColors?: EditorThemeSyntaxColors;
+  syntaxStyles?: EditorThemeSyntaxStyles;
 }
 
 export interface UiPreferences {
@@ -92,6 +138,27 @@ const normalizeHexColor = (value: unknown, fallback: string): string => {
 
   return fallback;
 };
+
+const parseLooseHexColor = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().replace(/^#/, '').toLowerCase();
+
+  if (!/^[0-9a-f]{1,8}$/.test(normalized)) {
+    return null;
+  }
+
+  if (normalized.length === 8) {
+    return `#${normalized.slice(0, 6)}`;
+  }
+
+  return `#${normalized.padStart(6, '0')}`;
+};
+
+const normalizeOptionalHexColor = (value: unknown): string | undefined =>
+  parseLooseHexColor(value) ?? undefined;
 
 const parseThemePreference = (value: string | null): ThemePreference => {
   if (value === 'light' || value === 'dark' || value === 'system') {
@@ -149,6 +216,25 @@ const parseCodeFontPreference = (value: unknown): CodeFontPreference | null => {
   }
 
   return null;
+};
+
+const normalizeFontStyle = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const allowed = new Set(['italic', 'bold', 'underline', 'strikethrough']);
+  const tokens = value
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token, index, values) => allowed.has(token) && values.indexOf(token) === index);
+
+  if (tokens.length === 0) {
+    return undefined;
+  }
+
+  return tokens.join(' ');
 };
 
 const resolveTheme = (theme: ThemePreference): EditorThemeMode => {
@@ -418,6 +504,9 @@ const normalizeEditorThemeSettings = (
     diffAdded: normalizeHexColor(value.diffAdded, base.diffAdded),
     diffRemoved: normalizeHexColor(value.diffRemoved, base.diffRemoved),
     skill: normalizeHexColor(value.skill, base.skill),
+    editorColors: normalizeOptionalEditorColors(value.editorColors),
+    syntaxColors: normalizeOptionalSyntaxColors(value.syntaxColors),
+    syntaxStyles: normalizeOptionalSyntaxStyles(value.syntaxStyles),
   };
 };
 
@@ -505,6 +594,224 @@ const parseOptionalUiFont = (value: unknown, fallback: string | null): string | 
   return fallback;
 };
 
+const normalizeOptionalSyntaxColors = (value: unknown): EditorThemeSyntaxColors | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const syntaxColors: EditorThemeSyntaxColors = {
+    comment: normalizeOptionalHexColor(value.comment),
+    delimiter: normalizeOptionalHexColor(value.delimiter),
+    function: normalizeOptionalHexColor(value.function),
+    interface: normalizeOptionalHexColor(value.interface),
+    keyword: normalizeOptionalHexColor(value.keyword),
+    metadata: normalizeOptionalHexColor(value.metadata),
+    number: normalizeOptionalHexColor(value.number),
+    operator: normalizeOptionalHexColor(value.operator),
+    parameter: normalizeOptionalHexColor(value.parameter),
+    property: normalizeOptionalHexColor(value.property),
+    string: normalizeOptionalHexColor(value.string),
+    type: normalizeOptionalHexColor(value.type),
+    variable: normalizeOptionalHexColor(value.variable),
+  };
+
+  return Object.values(syntaxColors).some((entry) => entry !== undefined) ? syntaxColors : undefined;
+};
+
+const normalizeOptionalSyntaxStyles = (value: unknown): EditorThemeSyntaxStyles | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const syntaxStyles: EditorThemeSyntaxStyles = {
+    comment: normalizeFontStyle(value.comment),
+    delimiter: normalizeFontStyle(value.delimiter),
+    function: normalizeFontStyle(value.function),
+    interface: normalizeFontStyle(value.interface),
+    keyword: normalizeFontStyle(value.keyword),
+    metadata: normalizeFontStyle(value.metadata),
+    number: normalizeFontStyle(value.number),
+    operator: normalizeFontStyle(value.operator),
+    parameter: normalizeFontStyle(value.parameter),
+    property: normalizeFontStyle(value.property),
+    string: normalizeFontStyle(value.string),
+    type: normalizeFontStyle(value.type),
+    variable: normalizeFontStyle(value.variable),
+  };
+
+  return Object.values(syntaxStyles).some((entry) => entry !== undefined) ? syntaxStyles : undefined;
+};
+
+const normalizeOptionalEditorColors = (value: unknown): EditorThemeEditorColors | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const editorColors: EditorThemeEditorColors = {
+    activeIndentGuide: normalizeOptionalHexColor(value.activeIndentGuide),
+    activeLineNumber: normalizeOptionalHexColor(value.activeLineNumber),
+    bracketMatchBorder: normalizeOptionalHexColor(value.bracketMatchBorder),
+    cursor: normalizeOptionalHexColor(value.cursor),
+    indentGuide: normalizeOptionalHexColor(value.indentGuide),
+    lineHighlightBackground: normalizeOptionalHexColor(value.lineHighlightBackground),
+    lineNumber: normalizeOptionalHexColor(value.lineNumber),
+    selectionBackground: normalizeOptionalHexColor(value.selectionBackground),
+  };
+
+  return Object.values(editorColors).some((entry) => entry !== undefined) ? editorColors : undefined;
+};
+
+const pickImportedColor = (values: unknown[], fallback: string): string => {
+  for (const value of values) {
+    const parsed = parseLooseHexColor(value);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return fallback;
+};
+
+const getRelativeLuminance = (hexColor: string): number => {
+  const channels = [1, 3, 5].map((offset) => Number.parseInt(hexColor.slice(offset, offset + 2), 16) / 255);
+  const [red, green, blue] = channels.map((value) =>
+    value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4,
+  );
+
+  return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+};
+
+const deriveImportedContrast = (
+  background: string,
+  foreground: string,
+  fallback: number,
+): number => {
+  try {
+    const backgroundLuminance = getRelativeLuminance(background);
+    const foregroundLuminance = getRelativeLuminance(foreground);
+    const contrastRatio =
+      (Math.max(backgroundLuminance, foregroundLuminance) + 0.05) /
+      (Math.min(backgroundLuminance, foregroundLuminance) + 0.05);
+
+    return clamp(Math.round(((contrastRatio - 1) / 20) * 100), 0, 100);
+  } catch {
+    return fallback;
+  }
+};
+
+const readXmlOptionMap = (parent: Element | null): Record<string, string> => {
+  const values: Record<string, string> = {};
+
+  if (!parent) {
+    return values;
+  }
+
+  Array.from(parent.children).forEach((child) => {
+    if (child.tagName !== 'option') {
+      return;
+    }
+
+    const name = child.getAttribute('name');
+    const value = child.getAttribute('value');
+
+    if (name && value) {
+      values[name] = value;
+    }
+  });
+
+  return values;
+};
+
+const readIntellijAttributeMap = (parent: Element | null): Record<string, Record<string, string>> => {
+  const values: Record<string, Record<string, string>> = {};
+
+  if (!parent) {
+    return values;
+  }
+
+  Array.from(parent.children).forEach((child) => {
+    if (child.tagName !== 'option') {
+      return;
+    }
+
+    const name = child.getAttribute('name');
+    if (!name) {
+      return;
+    }
+
+    const valueElement = Array.from(child.children).find((entry) => entry.tagName === 'value') ?? null;
+    values[name] = readXmlOptionMap(valueElement);
+  });
+
+  return values;
+};
+
+const pickAttributeColor = (
+  attributes: Record<string, Record<string, string>>,
+  names: string[],
+  property: string,
+): string | null => {
+  for (const name of names) {
+    const parsed = parseLooseHexColor(attributes[name]?.[property]);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return null;
+};
+
+const pickAttributeEntry = (
+  attributes: Record<string, Record<string, string>>,
+  names: string[],
+): Record<string, string> | null => {
+  for (const name of names) {
+    const entry = attributes[name];
+    if (entry) {
+      return entry;
+    }
+  }
+
+  return null;
+};
+
+const parseIntellijFontStyle = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  switch (value.trim()) {
+    case '1':
+      return 'bold';
+    case '2':
+      return 'italic';
+    case '3':
+      return 'bold italic';
+    default:
+      return undefined;
+  }
+};
+
+const parseIntellijCodeFont = (
+  value: string | undefined,
+  fallback: CodeFontPreference,
+): CodeFontPreference => {
+  if (!value) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized.includes('sf mono') || normalized.includes('sfmono')) {
+    return 'sf-mono';
+  }
+
+  if (normalized.includes('menlo')) {
+    return 'menlo';
+  }
+
+  return fallback;
+};
+
 export const serializeEditorThemeForClipboard = (
   mode: EditorThemeMode,
   settings: EditorThemeSettings,
@@ -518,6 +825,7 @@ export const serializeEditorThemeForClipboard = (
         code: toTransferCodeFont(settings.codeFont),
         ui: settings.uiFont,
       } as EditorThemeFonts,
+      editorColors: settings.editorColors,
       ink: settings.foreground,
       opaqueWindows: settings.opaqueWindows,
       semanticColors: {
@@ -525,6 +833,8 @@ export const serializeEditorThemeForClipboard = (
         diffRemoved: settings.diffRemoved,
         skill: settings.skill,
       } as EditorThemeSemanticColors,
+      syntaxColors: settings.syntaxColors,
+      syntaxStyles: settings.syntaxStyles,
       surface: settings.background,
     },
     variant: mode,
@@ -567,8 +877,11 @@ export const parseEditorThemeFromClipboard = (
     typeof parsed.codeThemeId === 'string' ? parseEditorThemePreset(parsed.codeThemeId) : null;
   const base = getEditorThemePresetDefaults(payloadMode, parsedPreset ?? 'custom');
   const theme = isRecord(parsed.theme) ? parsed.theme : parsed;
+  const editorColors = isRecord(theme.editorColors) ? theme.editorColors : null;
   const fonts = isRecord(theme.fonts) ? theme.fonts : null;
   const semanticColors = isRecord(theme.semanticColors) ? theme.semanticColors : null;
+  const syntaxColors = isRecord(theme.syntaxColors) ? theme.syntaxColors : null;
+  const syntaxStyles = isRecord(theme.syntaxStyles) ? theme.syntaxStyles : null;
 
   return {
     preset: parsedPreset ?? 'custom',
@@ -586,6 +899,241 @@ export const parseEditorThemeFromClipboard = (
     diffAdded: normalizeHexColor(semanticColors?.diffAdded, base.diffAdded),
     diffRemoved: normalizeHexColor(semanticColors?.diffRemoved, base.diffRemoved),
     skill: normalizeHexColor(semanticColors?.skill, base.skill),
+    editorColors: normalizeOptionalEditorColors(editorColors),
+    syntaxColors: normalizeOptionalSyntaxColors(syntaxColors),
+    syntaxStyles: normalizeOptionalSyntaxStyles(syntaxStyles),
+  };
+};
+
+export const parseEditorThemeFromIntellijIcls = (
+  value: string,
+  fallbackMode: EditorThemeMode,
+): EditorThemeSettings => {
+  const parser = new DOMParser();
+  const document = parser.parseFromString(value, 'application/xml');
+  const parseError = document.querySelector('parsererror');
+
+  if (parseError) {
+    throw new Error('Could not parse IntelliJ IDEA color scheme.');
+  }
+
+  const scheme = document.documentElement;
+  if (!scheme || scheme.tagName !== 'scheme') {
+    throw new Error('IntelliJ IDEA color scheme must contain a <scheme> root.');
+  }
+
+  const base = getEditorThemePresetDefaults(fallbackMode, 'custom');
+  const options = readXmlOptionMap(scheme);
+  const colorsElement = Array.from(scheme.children).find((child) => child.tagName === 'colors') ?? null;
+  const attributesElement =
+    Array.from(scheme.children).find((child) => child.tagName === 'attributes') ?? null;
+  const colors = readXmlOptionMap(colorsElement);
+  const attributes = readIntellijAttributeMap(attributesElement);
+  const identifierEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_IDENTIFIER',
+    'DEFAULT_LOCAL_VARIABLE',
+    'DEFAULT_PARAMETER',
+    'DEFAULT_LABEL',
+    'TEXT',
+  ]);
+  const keywordEntry = pickAttributeEntry(attributes, ['DEFAULT_KEYWORD']);
+  const functionEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_FUNCTION_DECLARATION',
+    'DEFAULT_INSTANCE_METHOD',
+    'DEFAULT_FUNCTION_CALL',
+    'DEFAULT_STATIC_METHOD',
+  ]);
+  const interfaceEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_INTERFACE_NAME',
+    'DEFAULT_TRAIT_NAME',
+  ]);
+  const stringEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_STRING',
+    'DEFAULT_VALID_STRING_ESCAPE',
+  ]);
+  const numberEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_NUMBER',
+    'DEFAULT_CONSTANT',
+  ]);
+  const typeEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_CLASS_NAME',
+    'DEFAULT_INTERFACE_NAME',
+    'DEFAULT_TYPE_PARAMETER',
+    'DEFAULT_CLASS_REFERENCE',
+  ]);
+  const commentEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_LINE_COMMENT',
+    'DEFAULT_BLOCK_COMMENT',
+    'DEFAULT_DOC_COMMENT',
+  ]);
+  const parameterEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_PARAMETER',
+    'DEFAULT_REASSIGNED_PARAMETER',
+  ]);
+  const propertyEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_INSTANCE_FIELD',
+    'DEFAULT_STATIC_FIELD',
+    'DEFAULT_GLOBAL_VARIABLE',
+  ]);
+  const delimiterEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_PARENTHS',
+    'DEFAULT_BRACES',
+    'DEFAULT_BRACKETS',
+    'DEFAULT_SEMICOLON',
+    'DEFAULT_COMMA',
+    'DEFAULT_DOT',
+  ]);
+  const operatorEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_OPERATION_SIGN',
+  ]);
+  const metadataEntry = pickAttributeEntry(attributes, [
+    'DEFAULT_METADATA',
+    'DEFAULT_PREDEFINED_SYMBOL',
+    'ANNOTATION_NAME_ATTRIBUTES',
+  ]);
+  const foregroundFromAttributes = pickAttributeColor(
+    attributes,
+    [
+      'DEFAULT_IDENTIFIER',
+      'DEFAULT_LOCAL_VARIABLE',
+      'DEFAULT_PARAMETER',
+      'DEFAULT_LABEL',
+      'TEXT',
+    ],
+    'FOREGROUND',
+  );
+  const accentFromAttributes = pickAttributeColor(
+    attributes,
+    [
+      'DEFAULT_FUNCTION_CALL',
+      'DEFAULT_INSTANCE_METHOD',
+      'DEFAULT_KEYWORD',
+      'DEFAULT_CLASS_NAME',
+      'DEFAULT_CONSTANT',
+    ],
+    'FOREGROUND',
+  );
+  const skillFromAttributes = pickAttributeColor(
+    attributes,
+    [
+      'DEFAULT_KEYWORD',
+      'DEFAULT_DOC_COMMENT_TAG',
+      'DEFAULT_CLASS_REFERENCE',
+      'DEFAULT_INTERFACE_NAME',
+    ],
+    'FOREGROUND',
+  );
+  const background = pickImportedColor(
+    [
+      colors.CONSOLE_BACKGROUND_KEY,
+      colors.GUTTER_BACKGROUND,
+      colors.DOCUMENTATION_COLOR,
+      colors.TOOLTIP,
+      colors.CARET_ROW_COLOR,
+    ],
+    base.background,
+  );
+  const foreground = pickImportedColor(
+    [
+      foregroundFromAttributes,
+      colors.SELECTION_FOREGROUND,
+      colors.ANNOTATIONS_COLOR,
+    ],
+    base.foreground,
+  );
+  const accent = pickImportedColor(
+    [
+      colors.TAB_UNDERLINE,
+      colors.DOC_COMMENT_LINK,
+      colors.CARET_COLOR,
+      accentFromAttributes,
+    ],
+    base.accent,
+  );
+  const diffAdded = pickImportedColor(
+    [
+      colors.ADDED_LINES_COLOR,
+      colors.FILESTATUS_ADDED,
+    ],
+    base.diffAdded,
+  );
+  const diffRemoved = pickImportedColor(
+    [
+      colors.DELETED_LINES_COLOR,
+      colors.FILESTATUS_DELETED,
+    ],
+    base.diffRemoved,
+  );
+  const syntaxColors: EditorThemeSyntaxColors = {
+    comment: pickImportedColor([commentEntry?.FOREGROUND], foreground),
+    delimiter: pickImportedColor([delimiterEntry?.FOREGROUND], foreground),
+    function: pickImportedColor([functionEntry?.FOREGROUND], accent),
+    interface: pickImportedColor(
+      [interfaceEntry?.FOREGROUND, typeEntry?.FOREGROUND],
+      pickImportedColor([skillFromAttributes], base.skill),
+    ),
+    keyword: pickImportedColor([keywordEntry?.FOREGROUND], accent),
+    metadata: pickImportedColor([metadataEntry?.FOREGROUND], accent),
+    number: pickImportedColor([numberEntry?.FOREGROUND], accent),
+    operator: pickImportedColor([operatorEntry?.FOREGROUND], foreground),
+    parameter: pickImportedColor([parameterEntry?.FOREGROUND], foreground),
+    property: pickImportedColor([propertyEntry?.FOREGROUND], foreground),
+    string: pickImportedColor([stringEntry?.FOREGROUND], diffAdded),
+    type: pickImportedColor([typeEntry?.FOREGROUND], pickImportedColor([skillFromAttributes], base.skill)),
+    variable: pickImportedColor([identifierEntry?.FOREGROUND], foreground),
+  };
+  const syntaxStyles: EditorThemeSyntaxStyles = {
+    comment: parseIntellijFontStyle(commentEntry?.FONT_TYPE),
+    delimiter: parseIntellijFontStyle(delimiterEntry?.FONT_TYPE),
+    function: parseIntellijFontStyle(functionEntry?.FONT_TYPE),
+    interface: parseIntellijFontStyle(interfaceEntry?.FONT_TYPE),
+    keyword: parseIntellijFontStyle(keywordEntry?.FONT_TYPE),
+    metadata: parseIntellijFontStyle(metadataEntry?.FONT_TYPE),
+    number: parseIntellijFontStyle(numberEntry?.FONT_TYPE),
+    operator: parseIntellijFontStyle(operatorEntry?.FONT_TYPE),
+    parameter: parseIntellijFontStyle(parameterEntry?.FONT_TYPE),
+    property: parseIntellijFontStyle(propertyEntry?.FONT_TYPE),
+    string: parseIntellijFontStyle(stringEntry?.FONT_TYPE),
+    type: parseIntellijFontStyle(typeEntry?.FONT_TYPE),
+    variable: parseIntellijFontStyle(identifierEntry?.FONT_TYPE),
+  };
+  const editorColors: EditorThemeEditorColors = {
+    activeIndentGuide: pickImportedColor([colors.SELECTED_INDENT_GUIDE], accent),
+    activeLineNumber: pickImportedColor(
+      [colors.LINE_NUMBER_ON_CARET_ROW_COLOR, colors.SELECTION_FOREGROUND],
+      foreground,
+    ),
+    bracketMatchBorder: pickImportedColor([colors.SELECTED_TEARLINE_COLOR, colors.TAB_UNDERLINE], accent),
+    cursor: pickImportedColor([colors.CARET_COLOR], accent),
+    indentGuide: pickImportedColor([colors.INDENT_GUIDE, colors.VISUAL_INDENT_GUIDE], foreground),
+    lineHighlightBackground: pickImportedColor([colors.CARET_ROW_COLOR], background),
+    lineNumber: pickImportedColor([colors.LINE_NUMBERS_COLOR], foreground),
+    selectionBackground: pickImportedColor([colors.SELECTION_BACKGROUND], accent),
+  };
+
+  return {
+    preset: 'custom',
+    accent,
+    background,
+    foreground,
+    codeFont: parseIntellijCodeFont(options.EDITOR_FONT_NAME, base.codeFont),
+    uiFont: base.uiFont,
+    contrast: deriveImportedContrast(background, foreground, base.contrast),
+    opaqueWindows: base.opaqueWindows,
+    diffAdded,
+    diffRemoved,
+    editorColors,
+    skill: pickImportedColor(
+      [
+        colors.DOC_COMMENT_LINK,
+        colors.TAB_UNDERLINE,
+        skillFromAttributes,
+        accent,
+      ],
+      base.skill,
+    ),
+    syntaxColors,
+    syntaxStyles,
   };
 };
 

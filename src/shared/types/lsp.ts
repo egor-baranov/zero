@@ -10,6 +10,45 @@ export interface LspRange {
 
 export type LspServerStatus = 'ready' | 'starting' | 'unsupported' | 'error';
 
+export const LSP_SEMANTIC_TOKEN_TYPES = [
+  'namespace',
+  'type',
+  'class',
+  'enum',
+  'interface',
+  'struct',
+  'typeParameter',
+  'parameter',
+  'variable',
+  'property',
+  'enumMember',
+  'event',
+  'function',
+  'method',
+  'macro',
+  'keyword',
+  'modifier',
+  'comment',
+  'string',
+  'number',
+  'regexp',
+  'operator',
+  'decorator',
+] as const;
+
+export const LSP_SEMANTIC_TOKEN_MODIFIERS = [
+  'declaration',
+  'definition',
+  'readonly',
+  'static',
+  'deprecated',
+  'abstract',
+  'async',
+  'modification',
+  'documentation',
+  'defaultLibrary',
+] as const;
+
 export interface LspDocumentSyncRequest {
   workspacePath: string;
   relativePath: string;
@@ -36,6 +75,18 @@ export interface LspTextDocumentPositionRequest {
   relativePath: string;
   languageId: string;
   position: LspPosition;
+}
+
+export interface LspSemanticTokensRequest {
+  workspacePath: string;
+  relativePath: string;
+  languageId: string;
+}
+
+export interface LspSemanticTokensResult {
+  supported: boolean;
+  data: number[];
+  resultId: string | null;
 }
 
 export interface LspHoverResult {

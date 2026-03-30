@@ -102,8 +102,11 @@ export const ReviewPanel = ({
   const primaryEditorContainerRef = React.useRef<HTMLDivElement | null>(null);
   const secondaryEditorContainerRef = React.useRef<HTMLDivElement | null>(null);
   const editorsContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const primaryTabScrollerRef = React.useRef<HTMLDivElement | null>(null);
+  const secondaryTabScrollerRef = React.useRef<HTMLDivElement | null>(null);
   const primaryEditorRef = React.useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const secondaryEditorRef = React.useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  const tabButtonByPathRef = React.useRef<Map<string, HTMLButtonElement>>(new Map());
   const modelsRef = React.useRef<Map<string, monaco.editor.ITextModel>>(new Map());
   const editedContentByPathRef = React.useRef<Map<string, string>>(new Map());
   const lspSyncTimeoutByPathRef = React.useRef<Map<string, number>>(new Map());
@@ -117,6 +120,9 @@ export const ReviewPanel = ({
   const [rightPanePaths, setRightPanePaths] = React.useState<string[]>([]);
   const [splitRatio, setSplitRatio] = React.useState(SPLIT_RATIO_DEFAULT);
   const [isSplitResizing, setIsSplitResizing] = React.useState(false);
+  const [isDarkEditorTheme, setIsDarkEditorTheme] = React.useState(
+    () => getMonacoTheme() === 'zeroade-editor-dark',
+  );
   const tabById = React.useMemo(
     () => new Map(tabs.map((tab) => [tab.id, tab])),
     [tabs],
@@ -190,6 +196,7 @@ export const ReviewPanel = ({
       value: '',
       language: 'plaintext',
       theme: getMonacoTheme(),
+      'semanticHighlighting.enabled': true,
       readOnly: false,
       automaticLayout: true,
       minimap: { enabled: false },
@@ -276,6 +283,18 @@ export const ReviewPanel = ({
     [toEditorContent],
   );
 
+  const setTabButtonRef = React.useCallback(
+    (path: string) => (node: HTMLButtonElement | null) => {
+      if (node) {
+        tabButtonByPathRef.current.set(path, node);
+        return;
+      }
+
+      tabButtonByPathRef.current.delete(path);
+    },
+    [],
+  );
+
   const rightPanePathSet = React.useMemo(() => new Set(rightPanePaths), [rightPanePaths]);
 
   const leftTabs = React.useMemo(() => {
@@ -310,6 +329,30 @@ export const ReviewPanel = ({
 
     return rightTabs[0] ?? null;
   }, [isSplitView, rightTabs, secondaryFilePath]);
+
+  const scrollTabIntoView = React.useCallback(
+    (container: HTMLDivElement | null, path: string | null) => {
+      if (!container || !path) {
+        return;
+      }
+
+      const button = tabButtonByPathRef.current.get(path);
+      if (!button) {
+        return;
+      }
+
+      const containerRect = container.getBoundingClientRect();
+      const buttonRect = button.getBoundingClientRect();
+
+      if (buttonRect.left < containerRect.left || buttonRect.right > containerRect.right) {
+        button.scrollIntoView({
+          block: 'nearest',
+          inline: 'nearest',
+        });
+      }
+    },
+    [],
+  );
 
   const stopSplitResizing = React.useCallback(() => {
     if (!splitResizeActiveRef.current) {
@@ -532,13 +575,29 @@ export const ReviewPanel = ({
     ensureMonacoLsp(workspacePath);
   }, [workspacePath]);
 
+  React.useLayoutEffect(() => {
+    const primaryPath = activeFilePath ?? tabs.at(-1)?.id ?? null;
+    scrollTabIntoView(primaryTabScrollerRef.current, primaryPath);
+  }, [activeFilePath, scrollTabIntoView, tabs]);
+
+  React.useLayoutEffect(() => {
+    if (!isSplitView) {
+      return;
+    }
+
+    scrollTabIntoView(secondaryTabScrollerRef.current, effectiveSecondaryPath?.id ?? null);
+  }, [effectiveSecondaryPath?.id, isSplitView, scrollTabIntoView]);
+
   React.useEffect(() => {
     const applyTheme = (): void => {
+      const nextTheme = getMonacoTheme();
+      setIsDarkEditorTheme(nextTheme === 'zeroade-editor-dark');
       ensureMonacoSetup();
       ensureMonacoThemes();
-      monaco.editor.setTheme(getMonacoTheme());
+      monaco.editor.setTheme(nextTheme);
       const nextOptions = {
         fontFamily: readResolvedCodeFontFamily(),
+        'semanticHighlighting.enabled': true as const,
       };
       primaryEditorRef.current?.updateOptions(nextOptions);
       secondaryEditorRef.current?.updateOptions(nextOptions);
@@ -738,9 +797,13 @@ export const ReviewPanel = ({
     currentPath: string | null,
     onSelectPath: (path: string) => void,
     showOptions: boolean,
+    scrollerRef: React.RefObject<HTMLDivElement | null>,
   ): JSX.Element => (
     <div className="flex min-h-10 items-center bg-white/90">
-      <div className="min-w-0 flex-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div
+        ref={scrollerRef}
+        className="min-w-0 flex-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      >
         <div className="flex w-max min-w-full items-center gap-2 px-2 pb-1.5 pt-0">
           {tabItems.map((tab) => {
             const tabName = getFileName(tab.relativePath);
@@ -749,13 +812,22 @@ export const ReviewPanel = ({
             return (
               <button
                 key={tab.id}
+                ref={setTabButtonRef(tab.id)}
                 type="button"
                 draggable
                 className={cn(
-                  'no-drag group flex h-8 max-w-[220px] shrink-0 items-center gap-1.5 rounded-[12px] bg-stone-50 px-3 text-[13px] text-stone-600 transition-colors hover:bg-stone-100 hover:text-stone-900',
-                  isActive && 'bg-stone-200/75 text-stone-900',
+                  'no-drag group flex h-8 max-w-[220px] shrink-0 items-center gap-1.5 rounded-[12px] px-3 text-[13px] transition-colors',
+                  isDarkEditorTheme
+                    ? 'bg-white/[0.04] text-stone-300 hover:bg-white/[0.08] hover:text-stone-100'
+                    : 'bg-stone-50 text-stone-600 hover:bg-stone-100 hover:text-stone-900',
+                  isActive &&
+                    (isDarkEditorTheme
+                      ? 'bg-white/[0.14] text-stone-100'
+                      : 'bg-stone-200/75 text-stone-900'),
                   draggingTabPath === tab.id && 'opacity-60',
-                  dragOverTabPath === tab.id && draggingTabPath !== tab.id && 'bg-stone-200/65',
+                  dragOverTabPath === tab.id &&
+                    draggingTabPath !== tab.id &&
+                    (isDarkEditorTheme ? 'bg-white/[0.08]' : 'bg-stone-200/65'),
                 )}
                 onClick={() => onSelectPath(tab.id)}
                 onDragStart={(event) => {
@@ -842,7 +914,13 @@ export const ReviewPanel = ({
                 width: isSplitView ? `${splitRatio * 100}%` : '100%',
               }}
             >
-              {renderTabBar(isSplitView ? leftTabs : tabs, activeFilePath, onSelectTab, !isSplitView)}
+              {renderTabBar(
+                isSplitView ? leftTabs : tabs,
+                activeFilePath,
+                onSelectTab,
+                !isSplitView,
+                primaryTabScrollerRef,
+              )}
               <div className="min-h-0 flex-1">
                 <div
                   ref={primaryEditorContainerRef}
@@ -875,7 +953,13 @@ export const ReviewPanel = ({
                   <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-stone-300/80" />
                 </button>
                 <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[#fdfdff]">
-                  {renderTabBar(rightTabs, effectiveSecondaryPath?.id ?? null, handleSelectSecondaryTab, true)}
+                  {renderTabBar(
+                    rightTabs,
+                    effectiveSecondaryPath?.id ?? null,
+                    handleSelectSecondaryTab,
+                    true,
+                    secondaryTabScrollerRef,
+                  )}
                   <div className="min-h-0 flex-1">
                     <div ref={secondaryEditorContainerRef} className="h-full w-full" />
                   </div>

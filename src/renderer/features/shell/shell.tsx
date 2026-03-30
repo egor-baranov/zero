@@ -2858,7 +2858,6 @@ export const Shell = (): JSX.Element => {
     const requestId = fileSearchRequestIdRef.current + 1;
     fileSearchRequestIdRef.current = requestId;
     setIsFileSearchLoading(true);
-    setFileSearchItems([]);
 
     const timeoutId = window.setTimeout(() => {
       void (async () => {
@@ -3795,6 +3794,7 @@ export const Shell = (): JSX.Element => {
                             onSetSessionMode={setSessionMode}
                             onSetSessionModel={setSessionModel}
                             onSetSessionConfigOption={setSessionConfigOption}
+                            onShowErrorToast={pushErrorToast}
                             onCancel={cancelPrompt}
                             onOpenCommitDialog={() => {
                               handleOpenCommitPanel();
@@ -4152,32 +4152,32 @@ export const Shell = (): JSX.Element => {
         onSave={handleSaveRenamedThread}
       />
 
-      <div className="pointer-events-none fixed bottom-4 right-4 z-[200] flex w-[min(420px,calc(100vw-2rem))] flex-col gap-2">
+      <div className="pointer-events-none fixed bottom-4 right-4 z-[200] flex w-[min(380px,calc(100vw-2rem))] flex-col gap-2">
         {toasts.map((toast) => (
           <div
             key={toast.id}
             className={cn(
-              'pointer-events-auto rounded-xl border bg-white/95 px-3 py-2 shadow-lg backdrop-blur',
+              'pointer-events-auto h-[84px] rounded-2xl border bg-white/95 px-3 py-3 shadow-lg backdrop-blur',
               toast.tone === 'error' ? 'border-rose-200' : 'border-stone-200',
             )}
           >
-            <div className="flex items-start gap-2">
-              <div className="min-w-0 flex-1">
+            <div className="flex h-full items-start gap-2">
+              <div className="min-w-0 flex-1 overflow-hidden">
                 <p
                   className={cn(
-                    'text-[12px] font-semibold',
+                    'line-clamp-1 text-[12px] font-semibold',
                     toast.tone === 'error' ? 'text-rose-700' : 'text-stone-800',
                   )}
                 >
                   {toast.title}
                 </p>
-                <p className="mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-stone-700">
+                <p className="mt-1 line-clamp-2 whitespace-pre-wrap break-words text-[12px] leading-5 text-stone-700">
                   {toast.message}
                 </p>
               </div>
               <button
                 type="button"
-                className="no-drag inline-flex h-5 w-5 items-center justify-center rounded text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-700"
+                className="no-drag inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-700"
                 onClick={() => removeToast(toast.id)}
                 aria-label="Dismiss notification"
               >

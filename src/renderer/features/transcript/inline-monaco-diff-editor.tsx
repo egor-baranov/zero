@@ -160,6 +160,7 @@ export const InlineMonacoDiffEditor = ({
       ensureMonacoThemes();
       const editor = monaco.editor.createDiffEditor(container, {
         theme: getMonacoTheme(),
+        'semanticHighlighting.enabled': true,
         automaticLayout: true,
         readOnly: true,
         renderSideBySide: false,
@@ -218,6 +219,7 @@ export const InlineMonacoDiffEditor = ({
       monaco.editor.setTheme(getMonacoTheme());
       editorRef.current?.updateOptions({
         fontFamily: readResolvedCodeFontFamily(),
+        'semanticHighlighting.enabled': true,
       });
     };
 

@@ -21,8 +21,13 @@ import type {
   AcpSessionNewResult,
 } from './acp';
 import type {
+  SkillsCatalogDetailRequest,
+  SkillsCatalogDetailResult,
+  SkillsCatalogResult,
   SkillsDeleteRequest,
   SkillsDeleteResult,
+  SkillsInstallRequest,
+  SkillsInstallResult,
   SkillsListResult,
   SkillsReadRequest,
   SkillsReadResult,
@@ -40,6 +45,8 @@ import type {
   LspReferencesRequest,
   LspReferencesResult,
   LspRendererEvent,
+  LspSemanticTokensRequest,
+  LspSemanticTokensResult,
   LspTextDocumentPositionRequest,
 } from './lsp';
 import type {
@@ -181,6 +188,9 @@ export interface DesktopApi {
   lspCompletion: (
     request: LspCompletionRequest,
   ) => Promise<LspCompletionResult>;
+  lspSemanticTokens: (
+    request: LspSemanticTokensRequest,
+  ) => Promise<LspSemanticTokensResult>;
   lspDefinition: (
     request: LspTextDocumentPositionRequest,
   ) => Promise<LspDefinitionResult>;
@@ -211,9 +221,14 @@ export interface DesktopApi {
   ) => Promise<AcpRespondPermissionResult>;
   onAcpEvent: (listener: (event: AcpRendererEvent) => void) => () => void;
   skillsList: () => Promise<SkillsListResult>;
+  skillsCatalog: () => Promise<SkillsCatalogResult>;
+  skillsCatalogDetail: (
+    request: SkillsCatalogDetailRequest,
+  ) => Promise<SkillsCatalogDetailResult>;
   skillsRead: (request: SkillsReadRequest) => Promise<SkillsReadResult>;
   skillsWrite: (request: SkillsWriteRequest) => Promise<SkillsWriteResult>;
   skillsDelete: (request: SkillsDeleteRequest) => Promise<SkillsDeleteResult>;
+  skillsInstall: (request: SkillsInstallRequest) => Promise<SkillsInstallResult>;
   terminalCreate: (request: TerminalCreateRequest) => Promise<TerminalCreateResult>;
   terminalWrite: (request: TerminalWriteRequest) => Promise<void>;
   terminalResize: (request: TerminalResizeRequest) => Promise<void>;

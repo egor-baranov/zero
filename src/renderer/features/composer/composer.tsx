@@ -87,6 +87,7 @@ interface ComposerProps {
   onSetSessionConfigOption: (
     request: Omit<AcpSetSessionConfigOptionRequest, 'sessionId'>,
   ) => Promise<void>;
+  onShowErrorToast?: (title: string, message: string) => void;
   onCancel: () => Promise<void>;
   onOpenCommitDialog: () => void;
 }
@@ -923,6 +924,7 @@ export const Composer = ({
   onSetSessionMode,
   onSetSessionModel,
   onSetSessionConfigOption,
+  onShowErrorToast,
   onCancel,
   onOpenCommitDialog,
 }: ComposerProps): JSX.Element => {
@@ -999,6 +1001,7 @@ export const Composer = ({
   const recordingStartedAtRef = React.useRef<number | null>(null);
   const voiceVisualizerTrackRef = React.useRef<HTMLDivElement | null>(null);
   const voiceVisualizerBarCountRef = React.useRef(VOICE_VISUALIZER_DEFAULT_BAR_COUNT);
+  const previousVoiceErrorRef = React.useRef<string | null>(null);
 
   const canSend = !disabled && (message.trim().length > 0 || pendingVoicePrompt !== null);
 
@@ -1304,6 +1307,20 @@ export const Composer = ({
     setPendingVoicePrompt(null);
     setVoiceError('Voice prompt cleared because the active agent does not accept audio input.');
   }, [pendingVoicePrompt, supportsAcpAudioPrompt]);
+
+  React.useEffect(() => {
+    if (!voiceError) {
+      previousVoiceErrorRef.current = null;
+      return;
+    }
+
+    if (previousVoiceErrorRef.current === voiceError) {
+      return;
+    }
+
+    previousVoiceErrorRef.current = voiceError;
+    onShowErrorToast?.('Voice input', voiceError);
+  }, [onShowErrorToast, voiceError]);
 
   React.useEffect(() => {
     if (!isVoiceRecordingSurfaceVisible) {
@@ -2782,12 +2799,6 @@ export const Composer = ({
             }}
           />
         </div>
-
-        {voiceError ? (
-          <div className="px-3 pb-1 pt-1">
-            <p className="text-[12px] font-medium text-amber-700">{voiceError}</p>
-          </div>
-        ) : null}
 
         {isVoiceRecordingSurfaceVisible ? (
           <div className="flex h-10 items-center gap-1.5 px-2 pb-1 pt-0">

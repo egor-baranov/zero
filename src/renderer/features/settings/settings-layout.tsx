@@ -4,6 +4,7 @@ import {
   Bot,
   ChevronDown,
   Check,
+  Copy,
   ExternalLink,
   FolderSearch,
   GitBranch,
@@ -41,21 +42,28 @@ import {
   getCodeFontFamily,
   getEditorThemePresetDefaults,
   parseEditorThemeFromClipboard,
+  parseEditorThemeFromIntellijIcls,
   readUiPreferences,
   serializeEditorThemeForClipboard,
   type AccentColorPreference,
   type CodeFontPreference,
+  type EditorThemeEditorColors,
   type EditorThemeMode,
   type EditorThemePreset,
   type EditorThemeSettings,
+  type EditorThemeSyntaxColors,
   type UiPreferences,
   writeAccentColorPreference,
   writeEditorThemesPreference,
   writeThemePreference,
 } from '@renderer/store/ui-preferences';
 import { McpSettingsSection } from '@renderer/features/settings/mcp-settings-section';
+import { resolveEditorThemeVisuals } from '@renderer/lib/monaco-theme';
 import type { AcpCustomAgentConfig } from '@shared/types/acp';
 import type {
+  SkillsCatalogDetailResult,
+  SkillsCatalogEntry,
+  SkillsCatalogResult,
   SkillSummary,
   SkillsListResult,
 } from '@shared/types/skills';
@@ -283,6 +291,36 @@ const codeFontOptions: CodeFontOption[] = [
   { value: 'menlo', label: 'Menlo' },
 ];
 
+type SyntaxColorKey = keyof NonNullable<EditorThemeSyntaxColors>;
+type EditorColorKey = keyof NonNullable<EditorThemeEditorColors>;
+
+const editorThemeSyntaxColorOptions: Array<{ key: SyntaxColorKey; label: string }> = [
+  { key: 'keyword', label: 'Keyword' },
+  { key: 'function', label: 'Function' },
+  { key: 'type', label: 'Type' },
+  { key: 'interface', label: 'Interface' },
+  { key: 'parameter', label: 'Parameter' },
+  { key: 'property', label: 'Property' },
+  { key: 'variable', label: 'Variable' },
+  { key: 'string', label: 'String' },
+  { key: 'number', label: 'Number' },
+  { key: 'delimiter', label: 'Delimiter' },
+  { key: 'operator', label: 'Operator' },
+  { key: 'metadata', label: 'Metadata' },
+  { key: 'comment', label: 'Comment' },
+];
+
+const editorThemeEditorColorOptions: Array<{ key: EditorColorKey; label: string }> = [
+  { key: 'selectionBackground', label: 'Selection' },
+  { key: 'lineHighlightBackground', label: 'Current line' },
+  { key: 'cursor', label: 'Cursor' },
+  { key: 'lineNumber', label: 'Line numbers' },
+  { key: 'activeLineNumber', label: 'Active line number' },
+  { key: 'indentGuide', label: 'Indent guides' },
+  { key: 'activeIndentGuide', label: 'Active indent guide' },
+  { key: 'bracketMatchBorder', label: 'Bracket match' },
+];
+
 const ACP_REGISTRY_URL =
   'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json';
 const CUSTOM_AGENT_LIBRARY_KEY = 'zeroade.acp.custom-agent-library.v1';
@@ -293,6 +331,14 @@ const KNOWN_CUSTOM_AGENT_LABEL_BY_COMMAND: Record<string, string> = {
 
 const getWindowBackgroundColor = (mode: EditorThemeMode): string =>
   mode === 'light' ? '#fdfdff' : '#101013';
+
+const resolveInterfaceTheme = (theme: UiPreferences['theme']): EditorThemeMode => {
+  if (theme === 'light' || theme === 'dark') {
+    return theme;
+  }
+
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+};
 
 const hexToRgba = (value: string, alpha: number): string => {
   const normalized = value.replace('#', '');
@@ -800,6 +846,9 @@ export const SettingsLayout = ({
   const [isGitStatusLoading, setIsGitStatusLoading] = React.useState(false);
   const [gitStatusError, setGitStatusError] = React.useState<string | null>(null);
   const themeFeedbackTimeoutsRef = React.useRef<Partial<Record<EditorThemeMode, number>>>({});
+  const editorThemeImportFileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const editorThemeImportModeRef = React.useRef<EditorThemeMode | null>(null);
+  const interfaceTheme = resolveInterfaceTheme(uiPreferences.theme);
 
   const hasWorkspace = workspacePath.trim().length > 1 && workspacePath !== '/';
   const workspaceName = hasWorkspace ? getFolderName(workspacePath) : 'No workspace';
@@ -994,6 +1043,36 @@ export const SettingsLayout = ({
     }));
   }, []);
 
+  const updateEditorThemeSyntaxColor = React.useCallback((
+    mode: EditorThemeMode,
+    key: SyntaxColorKey,
+    value: string,
+  ): void => {
+    updateEditorTheme(mode, (theme) => ({
+      ...theme,
+      preset: 'custom',
+      syntaxColors: {
+        ...(theme.syntaxColors ?? {}),
+        [key]: value,
+      },
+    }));
+  }, [updateEditorTheme]);
+
+  const updateEditorThemeEditorColor = React.useCallback((
+    mode: EditorThemeMode,
+    key: EditorColorKey,
+    value: string,
+  ): void => {
+    updateEditorTheme(mode, (theme) => ({
+      ...theme,
+      preset: 'custom',
+      editorColors: {
+        ...(theme.editorColors ?? {}),
+        [key]: value,
+      },
+    }));
+  }, [updateEditorTheme]);
+
   const copyEditorTheme = React.useCallback(
     async (mode: EditorThemeMode): Promise<void> => {
       const serialized = serializeEditorThemeForClipboard(mode, uiPreferences.editorThemes[mode]);
@@ -1009,7 +1088,30 @@ export const SettingsLayout = ({
     [showEditorThemeFeedback, uiPreferences.editorThemes],
   );
 
-  const importEditorTheme = React.useCallback(
+  const parseImportedEditorTheme = React.useCallback((
+    value: string,
+    mode: EditorThemeMode,
+  ): EditorThemeSettings => {
+    try {
+      return parseEditorThemeFromClipboard(value, mode);
+    } catch (clipboardError) {
+      try {
+        return parseEditorThemeFromIntellijIcls(value, mode);
+      } catch (iclsError) {
+        if (value.trim().startsWith('<') && iclsError instanceof Error) {
+          throw iclsError;
+        }
+
+        if (clipboardError instanceof Error) {
+          throw clipboardError;
+        }
+
+        throw new Error('Theme format is not recognized.');
+      }
+    }
+  }, []);
+
+  const importEditorThemeFromClipboard = React.useCallback(
     async (mode: EditorThemeMode): Promise<void> => {
       let rawTheme = '';
 
@@ -1029,18 +1131,61 @@ export const SettingsLayout = ({
       }
 
       try {
-        const importedTheme = parseEditorThemeFromClipboard(rawTheme, mode);
+        const importedTheme = parseImportedEditorTheme(rawTheme, mode);
         updateEditorTheme(mode, () => importedTheme);
         showEditorThemeFeedback(mode, 'Theme imported.');
       } catch (error) {
         window.alert(error instanceof Error ? error.message : 'Could not import theme.');
       }
     },
-    [showEditorThemeFeedback, updateEditorTheme],
+    [parseImportedEditorTheme, showEditorThemeFeedback, updateEditorTheme],
   );
+
+  const importEditorThemeFromFile = React.useCallback((mode: EditorThemeMode): void => {
+    editorThemeImportModeRef.current = mode;
+    if (editorThemeImportFileInputRef.current) {
+      editorThemeImportFileInputRef.current.value = '';
+      editorThemeImportFileInputRef.current.click();
+    }
+  }, []);
+
+  const handleEditorThemeImportFile = React.useCallback((
+    event: React.ChangeEvent<HTMLInputElement>,
+  ): void => {
+    const mode = editorThemeImportModeRef.current;
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = '';
+
+    if (!mode || !file) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const rawTheme = (await file.text()).trim();
+
+        if (rawTheme.length === 0) {
+          return;
+        }
+
+        const importedTheme = parseImportedEditorTheme(rawTheme, mode);
+        updateEditorTheme(mode, () => importedTheme);
+        showEditorThemeFeedback(mode, `Imported ${file.name}.`);
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : 'Could not import theme.');
+      }
+    })();
+  }, [parseImportedEditorTheme, showEditorThemeFeedback, updateEditorTheme]);
 
   const renderAppearanceSection = (): JSX.Element => (
     <>
+      <input
+        ref={editorThemeImportFileInputRef}
+        type="file"
+        accept=".icls,.xml,.json,.txt"
+        className="hidden"
+        onChange={handleEditorThemeImportFile}
+      />
       <SectionGroup title="Theme">
         <SettingsCard>
           <SettingRow
@@ -1096,11 +1241,15 @@ export const SettingsLayout = ({
       <SectionGroup title="Editor Themes">
         <div className="space-y-4">
           <EditorThemeCard
+            appearanceMode={interfaceTheme}
             mode="light"
             theme={uiPreferences.editorThemes.light}
             statusMessage={editorThemeFeedback.light}
-            onImportTheme={() => {
-              void importEditorTheme('light');
+            onImportFromClipboard={() => {
+              void importEditorThemeFromClipboard('light');
+            }}
+            onImportFromFile={() => {
+              importEditorThemeFromFile('light');
             }}
             onCopyTheme={() => {
               void copyEditorTheme('light');
@@ -1136,6 +1285,12 @@ export const SettingsLayout = ({
                 foreground,
               }));
             }}
+            onSyntaxColorChange={(key, value) => {
+              updateEditorThemeSyntaxColor('light', key, value);
+            }}
+            onEditorColorChange={(key, value) => {
+              updateEditorThemeEditorColor('light', key, value);
+            }}
             onCodeFontChange={(codeFont) => {
               updateEditorTheme('light', (theme) => ({
                 ...theme,
@@ -1152,11 +1307,15 @@ export const SettingsLayout = ({
             }}
           />
           <EditorThemeCard
+            appearanceMode={interfaceTheme}
             mode="dark"
             theme={uiPreferences.editorThemes.dark}
             statusMessage={editorThemeFeedback.dark}
-            onImportTheme={() => {
-              void importEditorTheme('dark');
+            onImportFromClipboard={() => {
+              void importEditorThemeFromClipboard('dark');
+            }}
+            onImportFromFile={() => {
+              importEditorThemeFromFile('dark');
             }}
             onCopyTheme={() => {
               void copyEditorTheme('dark');
@@ -1191,6 +1350,12 @@ export const SettingsLayout = ({
                 preset: 'custom',
                 foreground,
               }));
+            }}
+            onSyntaxColorChange={(key, value) => {
+              updateEditorThemeSyntaxColor('dark', key, value);
+            }}
+            onEditorColorChange={(key, value) => {
+              updateEditorThemeEditorColor('dark', key, value);
             }}
             onCodeFontChange={(codeFont) => {
               updateEditorTheme('dark', (theme) => ({
@@ -1615,7 +1780,7 @@ const SectionGroup = ({ title, action, children }: SectionGroupProps): JSX.Eleme
 );
 
 const SettingsCard = ({ children }: { children: React.ReactNode }): JSX.Element => (
-  <div className="rounded-2xl border border-stone-200/80 bg-white">{children}</div>
+  <div className="overflow-hidden rounded-2xl border border-stone-200/80 bg-white">{children}</div>
 );
 
 interface SettingRowProps {
@@ -1690,14 +1855,15 @@ const EditorThemePreviewPane = ({
   mode,
   theme,
 }: EditorThemePreviewPaneProps): JSX.Element => {
+  const resolvedVisuals = React.useMemo(() => resolveEditorThemeVisuals(theme, mode), [mode, theme]);
   const lineOverlay =
     mode === 'light' ? hexToRgba(theme.diffRemoved, 0.18) : hexToRgba(theme.diffAdded, 0.18);
   const gutterOverlay =
     mode === 'light' ? hexToRgba(theme.diffRemoved, 0.28) : hexToRgba(theme.diffAdded, 0.28);
-  const keywordColor = mode === 'light' ? '#7c3aed' : '#8b7dff';
-  const propertyColor = theme.skill;
-  const valueColor = theme.diffAdded;
-  const numericColor = theme.accent;
+  const keywordColor = resolvedVisuals.syntaxColors.keyword;
+  const propertyColor = resolvedVisuals.syntaxColors.type;
+  const valueColor = resolvedVisuals.syntaxColors.string;
+  const numericColor = resolvedVisuals.syntaxColors.number;
   const fontFamily = getCodeFontFamily(theme.codeFont);
   const rows =
     mode === 'light'
@@ -1774,38 +1940,47 @@ const EditorThemePreviewPane = ({
 };
 
 interface EditorThemeCardProps {
+  appearanceMode: EditorThemeMode;
   mode: EditorThemeMode;
   theme: EditorThemeSettings;
   statusMessage: string | null;
-  onImportTheme: () => void;
+  onImportFromClipboard: () => void;
+  onImportFromFile: () => void;
   onCopyTheme: () => void;
   onSelectPreset: (preset: Exclude<EditorThemePreset, 'custom'>) => void;
   onAccentChange: (value: string) => void;
   onBackgroundChange: (value: string) => void;
   onMatchWindowBackground: () => void;
   onForegroundChange: (value: string) => void;
+  onSyntaxColorChange: (key: SyntaxColorKey, value: string) => void;
+  onEditorColorChange: (key: EditorColorKey, value: string) => void;
   onCodeFontChange: (value: CodeFontPreference) => void;
   onContrastChange: (value: number) => void;
 }
 
 const EditorThemeCard = ({
+  appearanceMode,
   mode,
   theme,
   statusMessage,
-  onImportTheme,
+  onImportFromClipboard,
+  onImportFromFile,
   onCopyTheme,
   onSelectPreset,
   onAccentChange,
   onBackgroundChange,
   onMatchWindowBackground,
   onForegroundChange,
+  onSyntaxColorChange,
+  onEditorColorChange,
   onCodeFontChange,
   onContrastChange,
 }: EditorThemeCardProps): JSX.Element => {
   const title = mode === 'light' ? 'Light theme' : 'Dark theme';
+  const resolvedVisuals = React.useMemo(() => resolveEditorThemeVisuals(theme, mode), [mode, theme]);
 
   return (
-    <div className="rounded-2xl border border-stone-200/80 bg-white">
+    <div className="overflow-hidden rounded-2xl border border-stone-200/80 bg-white">
       <div className="flex items-center justify-between gap-4 border-b border-stone-200/75 px-3 py-3">
         <div>
           <p className="text-[15px] font-medium text-stone-800">{title}</p>
@@ -1819,7 +1994,28 @@ const EditorThemeCard = ({
           </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-4">
-          <HeaderActionButton onClick={onImportTheme}>Import</HeaderActionButton>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <HeaderActionButton className="gap-1.5">
+                Import
+                <ChevronDown className="h-3.5 w-3.5" />
+              </HeaderActionButton>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-[180px] rounded-[18px] p-2">
+              <DropdownMenuItem
+                className="min-h-10 rounded-[12px] px-3 text-[14px]"
+                onSelect={onImportFromClipboard}
+              >
+                From clipboard
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="min-h-10 rounded-[12px] px-3 text-[14px]"
+                onSelect={onImportFromFile}
+              >
+                Browse..
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <HeaderActionButton onClick={onCopyTheme}>Copy theme</HeaderActionButton>
           <EditorThemePresetSelect mode={mode} value={theme.preset} onSelect={onSelectPreset} />
         </div>
@@ -1849,6 +2045,32 @@ const EditorThemeCard = ({
         title="Contrast"
         control={<ContrastSlider value={theme.contrast} onChange={onContrastChange} />}
       />
+      <ThemeColorSection
+        mode={appearanceMode}
+        title="Syntax"
+        description="Fine-tune the token palette used in the editor."
+        items={editorThemeSyntaxColorOptions.map((option) => ({
+          key: option.key,
+          label: option.label,
+          value: resolvedVisuals.syntaxColors[option.key],
+        }))}
+        onChange={(key, value) => {
+          onSyntaxColorChange(key as SyntaxColorKey, value);
+        }}
+      />
+      <ThemeColorSection
+        mode={appearanceMode}
+        title="Editor"
+        description="Adjust editor chrome like selection, cursor, and guides."
+        items={editorThemeEditorColorOptions.map((option) => ({
+          key: option.key,
+          label: option.label,
+          value: resolvedVisuals.editorColors[option.key],
+        }))}
+        onChange={(key, value) => {
+          onEditorColorChange(key as EditorColorKey, value);
+        }}
+      />
     </div>
   );
 };
@@ -1856,12 +2078,27 @@ const EditorThemeCard = ({
 interface HexColorControlProps {
   value: string;
   onChange: (value: string) => void;
+  variant?: 'light' | 'dark';
 }
 
-const HexColorControl = ({ value, onChange }: HexColorControlProps): JSX.Element => (
-  <label className="no-drag relative inline-flex h-8 cursor-pointer items-center gap-2 rounded-full border border-stone-200 bg-white pl-2 pr-2.5 text-[13px] text-stone-700 transition-colors hover:bg-stone-50">
+const HexColorControl = ({
+  value,
+  onChange,
+  variant = 'light',
+}: HexColorControlProps): JSX.Element => (
+  <label
+    className={cn(
+      'no-drag relative inline-flex h-8 cursor-pointer items-center gap-2 rounded-full pl-2 pr-2.5 text-[13px] transition-colors',
+      variant === 'dark'
+        ? 'border border-[var(--zeroade-border)] bg-[var(--zeroade-bg-canvas)] text-[var(--zeroade-text-strong)] hover:bg-[var(--zeroade-bg-panel)]'
+        : 'border border-stone-200 bg-white text-stone-700 hover:bg-stone-50',
+    )}
+  >
     <span
-      className="h-4 w-4 rounded-full border border-black/10"
+      className={cn(
+        'h-4 w-4 rounded-full',
+        variant === 'dark' ? 'border border-white/10' : 'border border-black/10',
+      )}
       style={{ backgroundColor: value }}
     />
     <span className="font-mono uppercase">{value}</span>
@@ -1875,6 +2112,81 @@ const HexColorControl = ({ value, onChange }: HexColorControlProps): JSX.Element
       aria-label="Choose color"
     />
   </label>
+);
+
+interface ThemeColorSectionProps {
+  mode: EditorThemeMode;
+  title: string;
+  description?: string;
+  items: Array<{ key: string; label: string; value: string }>;
+  onChange: (key: string, value: string) => void;
+}
+
+const ThemeColorSection = ({
+  mode,
+  title,
+  description,
+  items,
+  onChange,
+}: ThemeColorSectionProps): JSX.Element => (
+  <div
+    className={cn(
+      'border-t px-3 py-3',
+      mode === 'dark'
+        ? 'border-[var(--zeroade-border)] bg-[var(--zeroade-bg-panel)]'
+        : 'border-stone-200/75 bg-transparent',
+    )}
+  >
+    <div className="mb-3">
+      <p
+        className={cn(
+          'text-[14px] font-medium',
+          mode === 'dark' ? 'text-[var(--zeroade-text-strong)]' : 'text-stone-800',
+        )}
+      >
+        {title}
+      </p>
+      {description ? (
+        <p
+          className={cn(
+            'mt-0.5 text-[13px]',
+            mode === 'dark' ? 'text-[var(--zeroade-text-muted)]' : 'text-stone-500',
+          )}
+        >
+          {description}
+        </p>
+      ) : null}
+    </div>
+    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+      {items.map((item) => (
+        <div
+          key={item.key}
+          className={cn(
+            'flex items-center justify-between gap-3 rounded-[14px] border px-3 py-2',
+            mode === 'dark'
+              ? 'border-[var(--zeroade-border)] bg-[var(--zeroade-bg-elev)] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]'
+              : 'border-stone-200/80 bg-stone-50/60',
+          )}
+        >
+          <span
+            className={cn(
+              'min-w-0 text-[13px]',
+              mode === 'dark' ? 'text-[var(--zeroade-text)]' : 'text-stone-700',
+            )}
+          >
+            {item.label}
+          </span>
+          <HexColorControl
+            value={item.value}
+            variant={mode === 'dark' ? 'dark' : 'light'}
+            onChange={(value) => {
+              onChange(item.key, value);
+            }}
+          />
+        </div>
+      ))}
+    </div>
+  </div>
 );
 
 const ActionChip = ({
@@ -1893,21 +2205,24 @@ const ActionChip = ({
   </button>
 );
 
-const HeaderActionButton = ({
-  children,
-  onClick,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-}): JSX.Element => (
+const HeaderActionButton = React.forwardRef<
+  HTMLButtonElement,
+  React.ButtonHTMLAttributes<HTMLButtonElement>
+>(({ children, className, type = 'button', ...props }, ref): JSX.Element => (
   <button
-    type="button"
-    className="no-drag inline-flex h-8 items-center rounded-[10px] px-2.5 text-[13px] font-medium text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 focus-visible:bg-stone-100"
-    onClick={onClick}
+    ref={ref}
+    type={type}
+    className={cn(
+      'no-drag inline-flex h-8 items-center rounded-[10px] px-2.5 text-[13px] font-medium text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 focus-visible:bg-stone-100',
+      className,
+    )}
+    {...props}
   >
     {children}
   </button>
-);
+));
+
+HeaderActionButton.displayName = 'HeaderActionButton';
 
 const SettingsSelectTrigger = ({
   children,
@@ -3184,9 +3499,12 @@ const toSkillsErrorMessage = (error: unknown, fallback: string): string => {
     if (
       error.message.includes("No handler registered for 'skills:") ||
       error.message.includes('skillsList is not a function') ||
+      error.message.includes('skillsCatalog is not a function') ||
+      error.message.includes('skillsCatalogDetail is not a function') ||
       error.message.includes('skillsRead is not a function') ||
       error.message.includes('skillsWrite is not a function') ||
-      error.message.includes('skillsDelete is not a function')
+      error.message.includes('skillsDelete is not a function') ||
+      error.message.includes('skillsInstall is not a function')
     ) {
       return restartMessage;
     }
@@ -3198,9 +3516,12 @@ const toSkillsErrorMessage = (error: unknown, fallback: string): string => {
     if (
       error.includes("No handler registered for 'skills:") ||
       error.includes('skillsList is not a function') ||
+      error.includes('skillsCatalog is not a function') ||
+      error.includes('skillsCatalogDetail is not a function') ||
       error.includes('skillsRead is not a function') ||
       error.includes('skillsWrite is not a function') ||
-      error.includes('skillsDelete is not a function')
+      error.includes('skillsDelete is not a function') ||
+      error.includes('skillsInstall is not a function')
     ) {
       return restartMessage;
     }
@@ -3211,11 +3532,161 @@ const toSkillsErrorMessage = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
+const REMOTE_SKILLS_PAGE_SIZE = 20;
+
+const toCatalogSkillKey = (skill: Pick<SkillsCatalogEntry, 'source' | 'skillId'>): string =>
+  `${skill.source}/${skill.skillId}`.toLowerCase();
+
+const formatSkillInstallCount = (value: number | null): string | null => {
+  if (!Number.isFinite(value ?? NaN) || !value || value <= 0) {
+    return null;
+  }
+
+  return `${new Intl.NumberFormat('en', {
+    notation: 'compact',
+    maximumFractionDigits: value >= 100000 ? 0 : 1,
+  }).format(value)} installs`;
+};
+
+const toCatalogSkillIconCandidates = (skill: SkillsCatalogEntry): string[] => {
+  const branches = ['main', 'master'];
+  const paths = [
+    'resources/icon.png',
+    `resources/${skill.skillId}.png`,
+    `resources/${skill.skillId}/icon.png`,
+    'assets/icon.png',
+    `assets/${skill.skillId}.png`,
+    `assets/${skill.skillId}/icon.png`,
+    `skills/${skill.skillId}/resources/icon.png`,
+    `skills/${skill.skillId}/resources/${skill.skillId}.png`,
+    `skills/${skill.skillId}/assets/icon.png`,
+    `skills/${skill.skillId}/assets/${skill.skillId}.png`,
+  ];
+
+  return branches.flatMap((branch) =>
+    paths.map(
+      (relativePath) =>
+        `https://raw.githubusercontent.com/${skill.source}/${branch}/${relativePath}`,
+    ),
+  );
+};
+
+const toVisibleCatalogPages = (
+  currentPage: number,
+  pageCount: number,
+): Array<number | 'ellipsis'> => {
+  if (pageCount <= 5) {
+    return Array.from({ length: pageCount }, (_value, index) => index + 1);
+  }
+
+  const pages = new Set<number>([1, pageCount, currentPage - 1, currentPage, currentPage + 1]);
+  const normalizedPages = [...pages]
+    .filter((page) => page >= 1 && page <= pageCount)
+    .sort((left, right) => left - right);
+  const visiblePages: Array<number | 'ellipsis'> = [];
+
+  for (const page of normalizedPages) {
+    const previous = visiblePages[visiblePages.length - 1];
+    if (typeof previous === 'number' && page - previous > 1) {
+      visiblePages.push('ellipsis');
+    }
+
+    visiblePages.push(page);
+  }
+
+  return visiblePages;
+};
+
+const useResolvedSkillIconSource = ({
+  localIconAbsolutePath,
+  remoteIconCandidates,
+}: {
+  localIconAbsolutePath?: string | null;
+  remoteIconCandidates?: string[];
+}): {
+  imageSource: string | null;
+  handleImageError: () => void;
+} => {
+  const remoteCandidatesKey = React.useMemo(
+    () => (remoteIconCandidates ?? []).join('\n'),
+    [remoteIconCandidates],
+  );
+  const [imageSource, setImageSource] = React.useState<string | null>(null);
+  const [remoteIconIndex, setRemoteIconIndex] = React.useState(0);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setImageSource(null);
+    setRemoteIconIndex(0);
+
+    const resolveIcon = async (): Promise<void> => {
+      const normalizedLocalPath = localIconAbsolutePath?.trim() ?? '';
+      if (normalizedLocalPath) {
+        try {
+          const preview = await window.desktop.readAttachmentPreview({
+            absolutePath: normalizedLocalPath,
+          });
+          if (!cancelled && preview.dataUrl?.trim()) {
+            setImageSource(preview.dataUrl);
+            return;
+          }
+        } catch {
+          // Fall through to remote candidates.
+        }
+      }
+
+      const nextRemoteCandidate = remoteIconCandidates?.[0] ?? null;
+      if (!cancelled) {
+        setImageSource(nextRemoteCandidate);
+      }
+    };
+
+    void resolveIcon();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [localIconAbsolutePath, remoteCandidatesKey, remoteIconCandidates]);
+
+  const handleImageError = React.useCallback(() => {
+    setRemoteIconIndex((previous) => {
+      const nextIndex = previous + 1;
+      const nextSource = remoteIconCandidates?.[nextIndex] ?? null;
+      setImageSource(nextSource);
+      return nextIndex;
+    });
+  }, [remoteIconCandidates]);
+
+  React.useEffect(() => {
+    if (!imageSource && remoteIconIndex > 0) {
+      setRemoteIconIndex(0);
+    }
+  }, [imageSource, remoteIconIndex]);
+
+  return {
+    imageSource,
+    handleImageError,
+  };
+};
+
 const SkillsSettingsSection = (): JSX.Element => {
   const [skillsResult, setSkillsResult] = React.useState<SkillsListResult | null>(null);
   const [isSkillsLoading, setIsSkillsLoading] = React.useState(false);
   const [skillsError, setSkillsError] = React.useState<string | null>(null);
   const [searchQuery, setSearchQuery] = React.useState('');
+  const [catalogResult, setCatalogResult] = React.useState<SkillsCatalogResult | null>(null);
+  const [isCatalogLoading, setIsCatalogLoading] = React.useState(false);
+  const [catalogError, setCatalogError] = React.useState<string | null>(null);
+  const [catalogSearchQuery, setCatalogSearchQuery] = React.useState('');
+  const [catalogPage, setCatalogPage] = React.useState(1);
+  const [selectedCatalogSkill, setSelectedCatalogSkill] = React.useState<SkillsCatalogEntry | null>(null);
+  const [selectedCatalogSkillDetail, setSelectedCatalogSkillDetail] =
+    React.useState<SkillsCatalogDetailResult | null>(null);
+  const [isCatalogDetailLoading, setIsCatalogDetailLoading] = React.useState(false);
+  const [catalogDetailError, setCatalogDetailError] = React.useState<string | null>(null);
+  const [installingCatalogSkillKey, setInstallingCatalogSkillKey] = React.useState<string | null>(
+    null,
+  );
   const [editorState, setEditorState] = React.useState<SkillEditorState | null>(null);
   const [pendingDeleteSkill, setPendingDeleteSkill] = React.useState<SkillSummary | null>(null);
   const [isSkillActionPending, setIsSkillActionPending] = React.useState(false);
@@ -3234,15 +3705,33 @@ const SkillsSettingsSection = (): JSX.Element => {
     }
   }, []);
 
+  const loadCatalog = React.useCallback(async (): Promise<void> => {
+    setIsCatalogLoading(true);
+    setCatalogError(null);
+
+    try {
+      const result = await window.desktop.skillsCatalog();
+      setCatalogResult(result);
+    } catch (error) {
+      setCatalogError(toSkillsErrorMessage(error, 'Could not load skills.sh.'));
+    } finally {
+      setIsCatalogLoading(false);
+    }
+  }, []);
+
   React.useEffect(() => {
     void loadSkills();
   }, [loadSkills]);
 
+  React.useEffect(() => {
+    void loadCatalog();
+  }, [loadCatalog]);
+
   const skills = skillsResult?.skills ?? [];
-  const installedSkillCount = skills.length;
-  const customSkillCount = skills.filter((skill) => skill.scope === 'custom').length;
-  const builtInSkillCount = skills.filter((skill) => skill.scope === 'system').length;
+  const catalogSkills = catalogResult?.skills ?? [];
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const normalizedCatalogSearchQuery = catalogSearchQuery.trim().toLowerCase();
+
   const filteredSkills = React.useMemo(
     () =>
       skills.filter((skill) => {
@@ -3256,6 +3745,62 @@ const SkillsSettingsSection = (): JSX.Element => {
     [normalizedSearchQuery, skills],
   );
 
+  const filteredCatalogSkills = React.useMemo(
+    () =>
+      catalogSkills.filter((skill) => {
+        if (!normalizedCatalogSearchQuery) {
+          return true;
+        }
+
+        const haystack =
+          `${skill.name} ${skill.skillId} ${skill.source} ${skill.owner} ${skill.repo}`.toLowerCase();
+        return haystack.includes(normalizedCatalogSearchQuery);
+      }),
+    [catalogSkills, normalizedCatalogSearchQuery],
+  );
+
+  const catalogPageCount = Math.max(1, Math.ceil(filteredCatalogSkills.length / REMOTE_SKILLS_PAGE_SIZE));
+  const visibleCatalogSkills = React.useMemo(() => {
+    const offset = (catalogPage - 1) * REMOTE_SKILLS_PAGE_SIZE;
+    return filteredCatalogSkills.slice(offset, offset + REMOTE_SKILLS_PAGE_SIZE);
+  }, [catalogPage, filteredCatalogSkills]);
+  const visibleCatalogPages = React.useMemo(
+    () => toVisibleCatalogPages(catalogPage, catalogPageCount),
+    [catalogPage, catalogPageCount],
+  );
+
+  const installedSkillLookup = React.useMemo(() => {
+    const lookup = new Map<string, SkillSummary>();
+
+    for (const skill of skills) {
+      const normalizedSlug = skill.slug.toLowerCase();
+      lookup.set(normalizedSlug, skill);
+
+      const slugTail = normalizedSlug.split('/').pop();
+      if (slugTail && !lookup.has(slugTail)) {
+        lookup.set(slugTail, skill);
+      }
+    }
+
+    return lookup;
+  }, [skills]);
+
+  React.useEffect(() => {
+    setCatalogPage(1);
+  }, [normalizedCatalogSearchQuery]);
+
+  React.useEffect(() => {
+    setCatalogPage((previous) => Math.min(previous, catalogPageCount));
+  }, [catalogPageCount]);
+
+  const findInstalledSkillForCatalogEntry = React.useCallback(
+    (skill: SkillsCatalogEntry): SkillSummary | null =>
+      installedSkillLookup.get(`${skill.owner}/${skill.repo}/${skill.skillId}`.toLowerCase()) ??
+      installedSkillLookup.get(skill.skillId.toLowerCase()) ??
+      null,
+    [installedSkillLookup],
+  );
+
   const openNewSkillDialog = React.useCallback(() => {
     setEditorState({
       mode: 'create',
@@ -3263,6 +3808,24 @@ const SkillsSettingsSection = (): JSX.Element => {
       content: buildSkillTemplate(DEFAULT_NEW_SKILL_NAME),
       slugTouched: false,
     });
+  }, []);
+
+  const openCatalogSkillDialog = React.useCallback(async (skill: SkillsCatalogEntry) => {
+    setSelectedCatalogSkill(skill);
+    setSelectedCatalogSkillDetail(null);
+    setCatalogDetailError(null);
+    setIsCatalogDetailLoading(true);
+
+    try {
+      const result = await window.desktop.skillsCatalogDetail({
+        pageUrl: skill.pageUrl,
+      });
+      setSelectedCatalogSkillDetail(result);
+    } catch (error) {
+      setCatalogDetailError(toSkillsErrorMessage(error, 'Could not load skills.sh details.'));
+    } finally {
+      setIsCatalogDetailLoading(false);
+    }
   }, []);
 
   const openEditSkillDialog = React.useCallback(async (skill: SkillSummary) => {
@@ -3292,6 +3855,27 @@ const SkillsSettingsSection = (): JSX.Element => {
       window.alert(error instanceof Error ? error.message : 'Could not reveal skill.');
     }
   }, []);
+
+  const handleInstallCatalogSkill = React.useCallback(
+    async (skill: SkillsCatalogEntry): Promise<void> => {
+      const installKey = toCatalogSkillKey(skill);
+      setInstallingCatalogSkillKey(installKey);
+
+      try {
+        await window.desktop.skillsInstall({
+          source: skill.source,
+          skillId: skill.skillId,
+          repositoryUrl: skill.repositoryUrl,
+        });
+        await loadSkills();
+      } catch (error) {
+        window.alert(toSkillsErrorMessage(error, 'Could not install skill from skills.sh.'));
+      } finally {
+        setInstallingCatalogSkillKey(null);
+      }
+    },
+    [loadSkills],
+  );
 
   const handleSaveSkill = React.useCallback(async (): Promise<void> => {
     if (!editorState) {
@@ -3378,37 +3962,47 @@ const SkillsSettingsSection = (): JSX.Element => {
     </div>
   );
 
+  const catalogToolbar = (
+    <div className="flex items-center gap-2">
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 rounded-[10px]"
+        onClick={() => {
+          void loadCatalog();
+        }}
+        disabled={isCatalogLoading}
+        aria-label="Reload skills.sh"
+        title="Reload skills.sh"
+      >
+        {isCatalogLoading ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <RefreshCw className="h-3.5 w-3.5" />
+        )}
+      </Button>
+      <label className="inline-flex h-8 items-center gap-2 rounded-full border border-stone-200 bg-white pl-3 pr-3 text-[13px] text-stone-500">
+        <Search className="h-3.5 w-3.5 shrink-0" />
+        <input
+          value={catalogSearchQuery}
+          onChange={(event) => {
+            setCatalogSearchQuery(event.target.value);
+          }}
+          placeholder="Browse skills.sh"
+          className="w-[180px] bg-transparent text-stone-700 outline-none placeholder:text-stone-400"
+          aria-label="Browse skills.sh"
+        />
+      </label>
+    </div>
+  );
+
+  const selectedCatalogSkillEntry = selectedCatalogSkillDetail?.skill ?? selectedCatalogSkill;
+  const selectedInstalledCatalogSkill = selectedCatalogSkillEntry
+    ? findInstalledSkillForCatalogEntry(selectedCatalogSkillEntry)
+    : null;
+
   return (
     <>
-      <SectionGroup title="Library">
-        <SettingsCard>
-          <SettingRow
-            title="Skills folder"
-            description={skillsResult?.skillsRoot ?? 'Loading local skills directory.'}
-            control={
-              <PillLabel>
-                {skillsResult?.skillsRoot ? getFolderName(skillsResult.skillsRoot) : 'Loading…'}
-              </PillLabel>
-            }
-          />
-          <SettingRow
-            title="Installed skills"
-            description="Skills loaded from your local Codex skills library."
-            control={<PillLabel>{toCountLabel(installedSkillCount, 'skill')}</PillLabel>}
-          />
-          <SettingRow
-            title="Custom skills"
-            description="User-created skills you can edit and remove from settings."
-            control={<PillLabel>{toCountLabel(customSkillCount, 'skill')}</PillLabel>}
-          />
-          <SettingRow
-            title="Built-in skills"
-            description="Bundled skills available in the shared system skills directory."
-            control={<PillLabel>{toCountLabel(builtInSkillCount, 'skill')}</PillLabel>}
-          />
-        </SettingsCard>
-      </SectionGroup>
-
       <SectionGroup title="Installed" action={skillsToolbar}>
         <SettingsCard>
           {isSkillsLoading && skills.length === 0 ? (
@@ -3460,6 +4054,237 @@ const SkillsSettingsSection = (): JSX.Element => {
           )}
         </SettingsCard>
       </SectionGroup>
+
+      <SectionGroup title="Browse" action={catalogToolbar}>
+        <SettingsCard>
+          {isCatalogLoading && catalogSkills.length === 0 ? (
+            <SettingRow
+              title="Loading skills.sh"
+              description="Fetching the public skills catalog from skills.sh."
+              control={<PillLabel>Loading…</PillLabel>}
+            />
+          ) : catalogError ? (
+            <SettingRow
+              title="skills.sh unavailable"
+              description={catalogError}
+              control={<PillLabel>Error</PillLabel>}
+            />
+          ) : visibleCatalogSkills.length === 0 ? (
+            <SettingRow
+              title={normalizedCatalogSearchQuery ? 'No matching skills' : 'No remote skills'}
+              description={
+                normalizedCatalogSearchQuery
+                  ? 'Try a different search query.'
+                  : 'skills.sh did not return any installable skills.'
+              }
+              control={<PillLabel>Empty</PillLabel>}
+            />
+          ) : (
+            <>
+              {visibleCatalogSkills.map((skill) => {
+                const installedSkill = findInstalledSkillForCatalogEntry(skill);
+                const installKey = toCatalogSkillKey(skill);
+
+                return (
+                  <CatalogSkillSettingsRow
+                    key={skill.pageUrl}
+                    skill={skill}
+                    installedSkill={installedSkill}
+                    isInstalling={installingCatalogSkillKey === installKey}
+                    onOpen={() => {
+                      void openCatalogSkillDialog(skill);
+                    }}
+                    onInstall={() => {
+                      void handleInstallCatalogSkill(skill);
+                    }}
+                    onReveal={
+                      installedSkill
+                        ? () => {
+                            void handleRevealSkill(installedSkill);
+                          }
+                        : undefined
+                    }
+                  />
+                );
+              })}
+              {filteredCatalogSkills.length > 0 ? (
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-stone-200/75 px-3 py-3">
+                  <p className="text-[12px] text-stone-500">
+                    Showing{' '}
+                    {(
+                      (catalogPage - 1) * REMOTE_SKILLS_PAGE_SIZE +
+                      (visibleCatalogSkills.length > 0 ? 1 : 0)
+                    ).toLocaleString()}
+                    -
+                    {(
+                      (catalogPage - 1) * REMOTE_SKILLS_PAGE_SIZE +
+                      visibleCatalogSkills.length
+                    ).toLocaleString()}{' '}
+                    of {filteredCatalogSkills.length.toLocaleString()} skills.
+                  </p>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="rounded-[10px]"
+                      onClick={() => {
+                        setCatalogPage((previous) => Math.max(1, previous - 1));
+                      }}
+                      disabled={catalogPage <= 1}
+                    >
+                      Previous
+                    </Button>
+                    {visibleCatalogPages.map((page, index) =>
+                      page === 'ellipsis' ? (
+                        <span
+                          key={`ellipsis-${catalogPageCount}-${index}`}
+                          className="px-1 text-[12px] text-stone-400"
+                        >
+                          …
+                        </span>
+                      ) : (
+                        <Button
+                          key={page}
+                          size="sm"
+                          variant={page === catalogPage ? 'secondary' : 'ghost'}
+                          className="min-w-[36px] rounded-[10px] px-2"
+                          onClick={() => {
+                            setCatalogPage(page);
+                          }}
+                        >
+                          {page}
+                        </Button>
+                      ),
+                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="rounded-[10px]"
+                      onClick={() => {
+                        setCatalogPage((previous) => Math.min(catalogPageCount, previous + 1));
+                      }}
+                      disabled={catalogPage >= catalogPageCount}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </>
+          )}
+        </SettingsCard>
+      </SectionGroup>
+
+      <Dialog
+        open={selectedCatalogSkill !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelectedCatalogSkill(null);
+            setSelectedCatalogSkillDetail(null);
+            setCatalogDetailError(null);
+            setIsCatalogDetailLoading(false);
+          }
+        }}
+      >
+        <DialogContent className="max-w-[680px] rounded-[28px] p-0">
+          <div className="px-5 pb-5 pt-5">
+            <div className="min-w-0">
+              <h2 className="truncate text-[24px] font-semibold leading-none tracking-[-0.015em] text-stone-900">
+                {selectedCatalogSkillEntry?.name ?? 'skills.sh skill'}
+              </h2>
+              <p className="mt-2 text-[13px] leading-[1.45] text-stone-500">
+                {selectedCatalogSkillEntry?.source ?? 'skills.sh'}
+                {selectedCatalogSkillEntry ? ` · ${selectedCatalogSkillEntry.skillId}` : ''}
+              </p>
+            </div>
+
+            {isCatalogDetailLoading ? (
+              <div className="mt-4 rounded-[18px] border border-stone-200 bg-stone-50 px-4 py-4 text-[13px] text-stone-500">
+                Loading skill details from skills.sh…
+              </div>
+            ) : catalogDetailError ? (
+              <div className="mt-4 rounded-[18px] border border-rose-200 bg-rose-50 px-4 py-4 text-[13px] text-rose-700">
+                {catalogDetailError}
+              </div>
+            ) : (
+              <>
+                <p className="mt-4 text-[15px] leading-[1.6] text-stone-600">
+                  {selectedCatalogSkillDetail?.summary ?? 'No summary was provided on skills.sh.'}
+                </p>
+
+                <div className="mt-5 rounded-[16px] bg-stone-50 px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="break-all font-mono text-[13px] leading-[1.6] text-stone-700">
+                      {selectedCatalogSkillEntry?.installCommand ?? 'Unavailable'}
+                    </p>
+                    {selectedCatalogSkillEntry?.installCommand ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 shrink-0 rounded-[10px]"
+                        aria-label="Copy install command"
+                        title="Copy install command"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(selectedCatalogSkillEntry.installCommand);
+                        }}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              </>
+            )}
+
+            <div className="mt-5 flex items-center justify-between gap-3">
+              <p className="text-[13px] text-stone-500">
+                {selectedCatalogSkillDetail?.weeklyInstalls
+                  ? `${selectedCatalogSkillDetail.weeklyInstalls} weekly installs`
+                  : ''}
+              </p>
+              <div className="flex items-center justify-end gap-2">
+                {selectedCatalogSkillEntry ? (
+                  <Button
+                    variant="ghost"
+                    className="h-9 rounded-[11px] px-3 text-[13px]"
+                    title={selectedCatalogSkillEntry.source}
+                    onClick={() => {
+                      window.open(selectedCatalogSkillEntry.repositoryUrl, '_blank', 'noopener,noreferrer');
+                    }}
+                  >
+                    <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                    Repo
+                  </Button>
+                ) : null}
+                {selectedInstalledCatalogSkill ? (
+                  <Button
+                    variant="ghost"
+                    className="h-9 rounded-[11px] px-3 text-[13px]"
+                    onClick={() => {
+                      void handleRevealSkill(selectedInstalledCatalogSkill);
+                    }}
+                  >
+                    <FolderSearch className="mr-1.5 h-3.5 w-3.5" />
+                    Reveal
+                  </Button>
+                ) : selectedCatalogSkillEntry ? (
+                  <Button
+                    className="h-9 rounded-[11px] px-4 text-[13px] font-semibold"
+                    disabled={installingCatalogSkillKey === toCatalogSkillKey(selectedCatalogSkillEntry)}
+                    onClick={() => {
+                      void handleInstallCatalogSkill(selectedCatalogSkillEntry);
+                    }}
+                  >
+                    {installingCatalogSkillKey === toCatalogSkillKey(selectedCatalogSkillEntry)
+                      ? 'Installing…'
+                      : 'Install'}
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={editorState !== null} onOpenChange={(open) => !open && setEditorState(null)}>
         <DialogContent className="max-w-[760px] rounded-[28px] p-0">
@@ -3614,7 +4439,11 @@ const SkillSettingsRow = ({
 }): JSX.Element => (
   <div className="flex items-center justify-between gap-4 border-b border-stone-200/75 px-3 py-3 last:border-b-0">
     <div className="min-w-0 flex items-start gap-3">
-      <SkillAvatar scope={skill.scope} className="mt-0.5 h-10 w-10 rounded-[12px]" />
+      <SkillAvatar
+        scope={skill.scope}
+        iconAbsolutePath={skill.iconAbsolutePath}
+        className="mt-0.5 h-10 w-10 rounded-[12px]"
+      />
       <div className="min-w-0">
         <p className="truncate text-[14px] font-medium text-stone-800">{skill.name}</p>
         <p className="mt-0.5 text-[12px] text-stone-500">
@@ -3661,26 +4490,126 @@ const SkillSettingsRow = ({
   </div>
 );
 
+const CatalogSkillSettingsRow = ({
+  skill,
+  installedSkill,
+  isInstalling,
+  onOpen,
+  onInstall,
+  onReveal,
+}: {
+  skill: SkillsCatalogEntry;
+  installedSkill: SkillSummary | null;
+  isInstalling: boolean;
+  onOpen: () => void;
+  onInstall: () => void;
+  onReveal?: () => void;
+}): JSX.Element => (
+  <div
+    className="flex cursor-pointer items-center justify-between gap-4 border-b border-stone-200/75 px-3 py-3 transition-colors hover:bg-stone-50/60 last:border-b-0"
+    onClick={onOpen}
+  >
+    <div className="min-w-0 flex items-start gap-3">
+      <SkillAvatar
+        scope={installedSkill?.scope ?? 'system'}
+        iconAbsolutePath={installedSkill?.iconAbsolutePath}
+        remoteIconCandidates={toCatalogSkillIconCandidates(skill)}
+        className="mt-0.5 h-10 w-10 rounded-[12px]"
+      />
+      <div className="min-w-0">
+        <p className="truncate text-[14px] font-medium text-stone-800">{skill.name}</p>
+        <p className="mt-0.5 truncate text-[12px] text-stone-500">{skill.source}</p>
+        {formatSkillInstallCount(skill.installsCount) ? (
+          <p className="mt-1 text-[12px] text-stone-500">
+            {formatSkillInstallCount(skill.installsCount)}
+          </p>
+        ) : null}
+        <p className="mt-1 break-all text-[13px] text-stone-500">{skill.installCommand}</p>
+      </div>
+    </div>
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+      {installedSkill && onReveal ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="rounded-[10px]"
+          onClick={(event) => {
+            event.stopPropagation();
+            onReveal();
+          }}
+        >
+          <Check className="mr-1.5 h-3.5 w-3.5" />
+          Installed
+        </Button>
+      ) : (
+        <Button
+          size="sm"
+          variant="outline"
+          className="rounded-[10px]"
+          onClick={(event) => {
+            event.stopPropagation();
+            onInstall();
+          }}
+          disabled={isInstalling}
+        >
+          {isInstalling ? (
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Plus className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          {isInstalling ? 'Installing…' : 'Install'}
+        </Button>
+      )}
+    </div>
+  </div>
+);
+
 const SkillAvatar = ({
   scope,
+  iconAbsolutePath,
+  remoteIconCandidates,
   className,
 }: {
   scope: SkillSummary['scope'];
+  iconAbsolutePath?: string | null;
+  remoteIconCandidates?: string[];
   className?: string;
-}): JSX.Element => (
-  <div
-    className={cn(
-      'inline-flex items-center justify-center border border-black/5',
-      scope === 'custom'
-        ? 'bg-amber-50 text-amber-700'
-        : 'bg-stone-100 text-stone-600',
-      className,
-    )}
-  >
-    {scope === 'custom' ? (
-      <Sparkles className="h-[18px] w-[18px]" />
-    ) : (
-      <Bot className="h-[18px] w-[18px]" />
-    )}
-  </div>
-);
+}): JSX.Element => {
+  const { imageSource, handleImageError } = useResolvedSkillIconSource({
+    localIconAbsolutePath: iconAbsolutePath,
+    remoteIconCandidates,
+  });
+
+  return (
+    <Avatar
+      className={cn(
+        'border border-black/5 bg-white',
+        className,
+      )}
+    >
+      {imageSource ? (
+        <AvatarImage
+          src={imageSource}
+          alt=""
+          className="h-full w-full object-cover object-center"
+          onError={handleImageError}
+        />
+      ) : null}
+      <AvatarFallback
+        className={cn(
+          'rounded-[12px]',
+          'text-stone-600',
+          scope === 'custom'
+            ? 'bg-amber-50 text-amber-700'
+            : 'bg-stone-100 text-stone-600',
+        )}
+      >
+        {scope === 'custom' ? (
+          <Sparkles className="h-[18px] w-[18px]" />
+        ) : (
+          <Bot className="h-[18px] w-[18px]" />
+        )}
+      </AvatarFallback>
+    </Avatar>
+  );
+};
