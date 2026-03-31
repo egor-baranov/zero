@@ -54,6 +54,7 @@ import {
   type EditorThemeSyntaxColors,
   type UiPreferences,
   writeAccentColorPreference,
+  writeEditorFontSizePreference,
   writeEditorThemesPreference,
   writeThemePreference,
 } from '@renderer/store/ui-preferences';
@@ -290,6 +291,8 @@ const codeFontOptions: CodeFontOption[] = [
   { value: 'sf-mono', label: 'SF Mono' },
   { value: 'menlo', label: 'Menlo' },
 ];
+
+const editorFontSizeOptions = Array.from({ length: 14 }, (_value, index) => 11 + index);
 
 type SyntaxColorKey = keyof NonNullable<EditorThemeSyntaxColors>;
 type EditorColorKey = keyof NonNullable<EditorThemeEditorColors>;
@@ -861,6 +864,7 @@ export const SettingsLayout = ({
   React.useEffect(() => {
     writeThemePreference(uiPreferences.theme);
     writeAccentColorPreference(uiPreferences.accentColor);
+    writeEditorFontSizePreference(uiPreferences.editorFontSize);
     writeEditorThemesPreference(uiPreferences.editorThemes);
     applyUiPreferences(uiPreferences);
 
@@ -1028,7 +1032,9 @@ export const SettingsLayout = ({
     />
   );
 
-  const renderSkillsSection = (): JSX.Element => <SkillsSettingsSection />;
+  const renderSkillsSection = (): JSX.Element => (
+    <SkillsSettingsSection mode={interfaceTheme} />
+  );
 
   const updateEditorTheme = React.useCallback((
     mode: EditorThemeMode,
@@ -1373,6 +1379,26 @@ export const SettingsLayout = ({
             }}
           />
         </div>
+      </SectionGroup>
+
+      <SectionGroup title="Editor">
+        <SettingsCard>
+          <SettingRow
+            title="Font size"
+            description="Controls Monaco editor text size. You can also use Cmd/Ctrl + and Cmd/Ctrl - while an editor is focused."
+            control={
+              <EditorFontSizeSelect
+                value={uiPreferences.editorFontSize}
+                onSelect={(editorFontSize) => {
+                  setUiPreferences((previous) => ({
+                    ...previous,
+                    editorFontSize,
+                  }));
+                }}
+              />
+            }
+          />
+        </SettingsCard>
       </SectionGroup>
 
       <SectionGroup title="Interface">
@@ -2357,6 +2383,45 @@ interface CodeFontSelectProps {
   value: CodeFontPreference;
   onSelect: (value: CodeFontPreference) => void;
 }
+
+interface EditorFontSizeSelectProps {
+  value: number;
+  onSelect: (value: number) => void;
+}
+
+const EditorFontSizeSelect = ({ value, onSelect }: EditorFontSizeSelectProps): JSX.Element => (
+  <DropdownMenu>
+    <DropdownMenuTrigger asChild>
+      <SettingsSelectTrigger
+        aria-label="Select editor font size"
+        className="min-w-[96px] justify-between"
+      >
+        <span>{value} px</span>
+        <ChevronDown className="h-3.5 w-3.5 text-stone-500" />
+      </SettingsSelectTrigger>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent align="end" className="max-h-[320px] w-[128px] overflow-y-auto rounded-[22px] p-2">
+      {editorFontSizeOptions.map((fontSize) => {
+        const isSelected = fontSize === value;
+
+        return (
+          <SettingsSelectItem
+            key={fontSize}
+            selected={isSelected}
+            onSelect={() => {
+              onSelect(fontSize);
+            }}
+          >
+            <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+              <Check className={cn('h-4 w-4 text-stone-900', !isSelected && 'opacity-0')} />
+            </span>
+            <span>{fontSize} px</span>
+          </SettingsSelectItem>
+        );
+      })}
+    </DropdownMenuContent>
+  </DropdownMenu>
+);
 
 const CodeFontSelect = ({ value, onSelect }: CodeFontSelectProps): JSX.Element => {
   const activeOption = codeFontOptions.find((option) => option.value === value) ?? codeFontOptions[0];
@@ -3669,7 +3734,7 @@ const useResolvedSkillIconSource = ({
   };
 };
 
-const SkillsSettingsSection = (): JSX.Element => {
+const SkillsSettingsSection = ({ mode }: { mode: EditorThemeMode }): JSX.Element => {
   const [skillsResult, setSkillsResult] = React.useState<SkillsListResult | null>(null);
   const [isSkillsLoading, setIsSkillsLoading] = React.useState(false);
   const [skillsError, setSkillsError] = React.useState<string | null>(null);
@@ -4031,6 +4096,7 @@ const SkillsSettingsSection = (): JSX.Element => {
             filteredSkills.map((skill) => (
               <SkillSettingsRow
                 key={skill.absolutePath}
+                mode={mode}
                 skill={skill}
                 onReveal={() => {
                   void handleRevealSkill(skill);
@@ -4088,6 +4154,7 @@ const SkillsSettingsSection = (): JSX.Element => {
                 return (
                   <CatalogSkillSettingsRow
                     key={skill.pageUrl}
+                    mode={mode}
                     skill={skill}
                     installedSkill={installedSkill}
                     isInstalling={installingCatalogSkillKey === installKey}
@@ -4427,11 +4494,13 @@ const SkillsSettingsSection = (): JSX.Element => {
 };
 
 const SkillSettingsRow = ({
+  mode,
   skill,
   onReveal,
   onEdit,
   onDelete,
 }: {
+  mode: EditorThemeMode;
   skill: SkillSummary;
   onReveal: () => void;
   onEdit?: () => void;
@@ -4479,7 +4548,12 @@ const SkillSettingsRow = ({
         <Button
           size="sm"
           variant="ghost"
-          className="rounded-[10px] text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+          className={cn(
+            'rounded-[10px]',
+            mode === 'dark'
+              ? 'text-rose-300 hover:bg-rose-950/40 hover:text-rose-200'
+              : 'text-rose-700 hover:bg-rose-50 hover:text-rose-800',
+          )}
           onClick={onDelete}
         >
           <Trash2 className="mr-1.5 h-3.5 w-3.5" />
@@ -4491,6 +4565,7 @@ const SkillSettingsRow = ({
 );
 
 const CatalogSkillSettingsRow = ({
+  mode,
   skill,
   installedSkill,
   isInstalling,
@@ -4498,6 +4573,7 @@ const CatalogSkillSettingsRow = ({
   onInstall,
   onReveal,
 }: {
+  mode: EditorThemeMode;
   skill: SkillsCatalogEntry;
   installedSkill: SkillSummary | null;
   isInstalling: boolean;
@@ -4506,7 +4582,10 @@ const CatalogSkillSettingsRow = ({
   onReveal?: () => void;
 }): JSX.Element => (
   <div
-    className="flex cursor-pointer items-center justify-between gap-4 border-b border-stone-200/75 px-3 py-3 transition-colors hover:bg-stone-50/60 last:border-b-0"
+    className={cn(
+      'flex cursor-pointer items-center justify-between gap-4 border-b border-stone-200/75 px-3 py-3 transition-colors last:border-b-0',
+      mode === 'dark' ? 'hover:bg-[var(--zeroade-bg-soft)]' : 'hover:bg-stone-50/60',
+    )}
     onClick={onOpen}
   >
     <div className="min-w-0 flex items-start gap-3">
@@ -4591,17 +4670,17 @@ const SkillAvatar = ({
         <AvatarImage
           src={imageSource}
           alt=""
-          className="h-full w-full object-cover object-center"
+          className="zeroade-agent-icon-image h-full w-full object-cover object-center"
           onError={handleImageError}
         />
       ) : null}
       <AvatarFallback
         className={cn(
           'rounded-[12px]',
-          'text-stone-600',
+          'text-stone-800',
           scope === 'custom'
             ? 'bg-amber-50 text-amber-700'
-            : 'bg-stone-100 text-stone-600',
+            : 'bg-stone-100 text-stone-800',
         )}
       >
         {scope === 'custom' ? (

@@ -7,6 +7,7 @@
   --zeroade-accent-strong: #57534e;
   --zeroade-accent-surface: #ffffff;
   --zeroade-accent-text: #1c1917;
+  --zeroade-shell-divider: rgba(24, 24, 29, 0.08);
   --zeroade-selection: rgba(74, 74, 74, 0.18);
   --zeroade-sidebar-hover-shadow: 0 12px 28px -18px rgba(32, 28, 24, 0.26),
     0 4px 12px -10px rgba(32, 28, 24, 0.18);
@@ -78,6 +79,7 @@
   --zeroade-bg-soft-2: #26262e;
   --zeroade-border: #30303a;
   --zeroade-border-strong: #3a3a46;
+  --zeroade-shell-divider: rgba(255, 255, 255, 0.05);
   --zeroade-text: #d4d4d8;
   --zeroade-text-strong: #f5f5f6;
   --zeroade-text-muted: #a7a7b0;
@@ -359,13 +361,23 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
 }
 
 :root[data-zeroade-theme='dark'] .zeroade-notifications-panel {
-  border-left-color: var(--zeroade-border) !important;
-  background: rgba(13, 13, 17, 0.9) !important;
+  border-left-color: var(--zeroade-shell-divider) !important;
+  background: var(--zeroade-bg-panel) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+
+:root[data-zeroade-theme='dark']
+  .zeroade-notifications-resize-handle:hover
+  .zeroade-notifications-resize-line {
+  background-color: var(--zeroade-border-strong) !important;
 }
 
 :root[data-zeroade-theme='dark'] .zeroade-notifications-empty-icon {
-  background: rgba(41, 41, 51, 0.92) !important;
-  color: var(--zeroade-text-faint) !important;
+  border-color: var(--zeroade-border) !important;
+  background: var(--zeroade-bg-elev) !important;
+  color: var(--zeroade-text-muted) !important;
 }
 
 :root[data-zeroade-theme='dark'] .zeroade-notifications-empty-title {
@@ -377,19 +389,21 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
 }
 
 :root[data-zeroade-theme='dark'] .zeroade-notification-card {
-  border-color: rgba(66, 66, 79, 0.92) !important;
-  background: rgba(24, 24, 31, 0.96) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  border-color: var(--zeroade-border) !important;
+  background: var(--zeroade-bg-elev) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.02),
+    0 16px 28px -26px rgba(0, 0, 0, 0.78) !important;
 }
 
 :root[data-zeroade-theme='dark'] .zeroade-notification-card:hover {
-  border-color: rgba(86, 86, 102, 0.95) !important;
-  background: rgba(30, 30, 38, 0.98) !important;
+  border-color: var(--zeroade-border-strong) !important;
+  background: var(--zeroade-bg-soft) !important;
 }
 
 :root[data-zeroade-theme='dark'] .zeroade-notification-card.zeroade-notification-card-unread {
-  border-color: rgba(96, 96, 114, 0.95) !important;
-  background: rgba(34, 34, 44, 0.98) !important;
+  border-color: var(--zeroade-border-strong) !important;
+  background: var(--zeroade-bg-soft-2) !important;
 }
 
 :root[data-zeroade-theme='dark'] .zeroade-notification-title {
@@ -405,7 +419,7 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
 }
 
 :root[data-zeroade-theme='dark'] .zeroade-notification-unread-dot {
-  background: #f4f4f5 !important;
+  background: var(--zeroade-text-strong) !important;
 }
 
 .settings-segment-chip-active {
@@ -513,6 +527,14 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
   padding-left: 6px;
 }
 
+.zeroade-inline-monaco-diff,
+.zeroade-inline-monaco-diff .monaco-editor,
+.zeroade-inline-monaco-diff .monaco-diff-editor,
+.zeroade-inline-monaco-diff .overflow-guard {
+  border-radius: inherit;
+  overflow: hidden;
+}
+
 .zeroade-side-by-side-diff
   .original-in-monaco-diff-editor
   .margin-view-overlays
@@ -613,7 +635,9 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
 }
 
 .monaco-editor .find-widget > .button.codicon-widget-close {
+  top: 5px;
   right: 8px;
+  transform: none;
 }
 
 .monaco-editor .find-widget:not(.replaceToggled) > .button.codicon-widget-close {

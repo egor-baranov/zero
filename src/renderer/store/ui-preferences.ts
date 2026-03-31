@@ -100,12 +100,19 @@ export interface UiPreferences {
   theme: ThemePreference;
   accentColor: AccentColorPreference;
   editorThemes: Record<EditorThemeMode, EditorThemeSettings>;
+  editorFontSize: number;
 }
 
 const THEME_PREFERENCE_KEY = 'zeroade.ui.theme.v1';
 const ACCENT_COLOR_KEY = 'zeroade.ui.accent-color.v1';
 const EDITOR_THEMES_KEY = 'zeroade.ui.editor-themes.v1';
+const EDITOR_FONT_SIZE_KEY = 'zeroade.ui.editor-font-size.v1';
 const LEGACY_ACCENT_ENABLED_KEY = 'zeroade.ui.accent-enabled.v1';
+const DEFAULT_EDITOR_FONT_SIZE = 13;
+const MIN_EDITOR_FONT_SIZE = 11;
+const MAX_EDITOR_FONT_SIZE = 24;
+const MONACO_EDITOR_LINE_HEIGHT_OFFSET = 8;
+const MONACO_INLINE_DIFF_LINE_HEIGHT_OFFSET = 9;
 const CODE_FONT_STACKS: Record<CodeFontPreference, string> = {
   system: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
   'sf-mono':
@@ -118,6 +125,14 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const clamp = (value: number, min: number, max: number): number =>
   Math.min(Math.max(value, min), max);
+
+const normalizeEditorFontSize = (value: unknown): number => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_EDITOR_FONT_SIZE;
+  }
+
+  return clamp(Math.round(value), MIN_EDITOR_FONT_SIZE, MAX_EDITOR_FONT_SIZE);
+};
 
 const isEditorThemeMode = (value: unknown): value is EditorThemeMode =>
   value === 'light' || value === 'dark';
@@ -517,6 +532,7 @@ const DEFAULT_PREFERENCES: UiPreferences = {
     light: getEditorThemePresetDefaults('light', 'zero'),
     dark: getEditorThemePresetDefaults('dark', 'zero'),
   },
+  editorFontSize: DEFAULT_EDITOR_FONT_SIZE,
 };
 
 const readEditorThemesPreference = (): Record<EditorThemeMode, EditorThemeSettings> => {
@@ -540,6 +556,15 @@ const readEditorThemesPreference = (): Record<EditorThemeMode, EditorThemeSettin
   }
 };
 
+const readEditorFontSizePreference = (): number => {
+  const raw = window.localStorage.getItem(EDITOR_FONT_SIZE_KEY);
+  if (!raw) {
+    return DEFAULT_PREFERENCES.editorFontSize;
+  }
+
+  return normalizeEditorFontSize(Number.parseInt(raw, 10));
+};
+
 export const readUiPreferences = (): UiPreferences => {
   const theme = parseThemePreference(window.localStorage.getItem(THEME_PREFERENCE_KEY));
   const parsedAccentColor = parseAccentColorPreference(window.localStorage.getItem(ACCENT_COLOR_KEY));
@@ -551,6 +576,7 @@ export const readUiPreferences = (): UiPreferences => {
     theme,
     accentColor,
     editorThemes: readEditorThemesPreference(),
+    editorFontSize: readEditorFontSizePreference(),
   };
 };
 
@@ -566,6 +592,29 @@ export const writeEditorThemesPreference = (
   editorThemes: Record<EditorThemeMode, EditorThemeSettings>,
 ): void => {
   window.localStorage.setItem(EDITOR_THEMES_KEY, JSON.stringify(editorThemes));
+};
+
+export const writeEditorFontSizePreference = (editorFontSize: number): number => {
+  const normalizedFontSize = normalizeEditorFontSize(editorFontSize);
+  window.localStorage.setItem(EDITOR_FONT_SIZE_KEY, String(normalizedFontSize));
+  return normalizedFontSize;
+};
+
+export const changeEditorFontSizePreference = (delta: number): number => {
+  const preferences = readUiPreferences();
+  const nextEditorFontSize = normalizeEditorFontSize(preferences.editorFontSize + delta);
+
+  if (nextEditorFontSize === preferences.editorFontSize) {
+    return nextEditorFontSize;
+  }
+
+  writeEditorFontSizePreference(nextEditorFontSize);
+  applyUiPreferences({
+    ...preferences,
+    editorFontSize: nextEditorFontSize,
+  });
+
+  return nextEditorFontSize;
 };
 
 const SERIALIZED_EDITOR_THEME_PREFIX = 'zero-theme-v1:';
@@ -1159,6 +1208,17 @@ export const readResolvedEditorThemeSettings = (): EditorThemeSettings => {
 
 export const readResolvedCodeFontFamily = (): string =>
   getCodeFontFamily(readResolvedEditorThemeSettings().codeFont);
+
+export const readResolvedEditorFontSize = (): number =>
+  readUiPreferences().editorFontSize;
+
+export const getMonacoEditorLineHeight = (
+  fontSize: number = readResolvedEditorFontSize(),
+): number => fontSize + MONACO_EDITOR_LINE_HEIGHT_OFFSET;
+
+export const getMonacoInlineDiffLineHeight = (
+  fontSize: number = readResolvedEditorFontSize(),
+): number => fontSize + MONACO_INLINE_DIFF_LINE_HEIGHT_OFFSET;
 
 export const applyUiPreferences = (preferences: UiPreferences): void => {
   const root = document.documentElement;

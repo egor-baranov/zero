@@ -3497,14 +3497,14 @@ export const Composer = ({
       <Dialog open={isRegistryDialogOpen} onOpenChange={setIsRegistryDialogOpen}>
         <DialogContent className="max-w-[980px] rounded-[28px] p-0">
           <div className="px-5 pb-5 pt-5">
-            <h2 className="text-[24px] font-semibold leading-none tracking-[-0.015em] text-stone-900">
+            <h2 className="text-[24px] font-semibold leading-none tracking-[-0.015em] text-[var(--zeroade-text-strong,_#1c1917)]">
               Add from registry
             </h2>
-            <p className="mt-2 text-[13px] leading-[1.35] text-stone-500">
+            <p className="mt-2 text-[13px] leading-[1.35] text-[var(--zeroade-text-muted,_#78716c)]">
               Pick an ACP agent template and add it with one click.
             </p>
             {isRegistryLoading ? (
-              <div className="mt-4 flex h-[240px] items-center justify-center gap-2 text-[13px] text-stone-500">
+              <div className="mt-4 flex h-[240px] items-center justify-center gap-2 text-[13px] text-[var(--zeroade-text-muted,_#78716c)]">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 Loading registry agents...
               </div>
@@ -3540,9 +3540,13 @@ export const Composer = ({
                       role={canAutoConfigure ? 'button' : undefined}
                       tabIndex={canAutoConfigure ? 0 : -1}
                       className={cn(
-                        'group relative flex min-h-[132px] h-full flex-col rounded-[28px] bg-stone-100/95 px-5 py-4 text-left',
-                        'text-stone-700 transition-[background-color,transform] duration-150',
-                        canAutoConfigure && 'cursor-pointer hover:bg-stone-200/90',
+                        'group relative flex h-full min-h-[132px] flex-col rounded-[28px] border px-5 py-4 text-left',
+                        'border-[var(--zeroade-border,_rgba(214,211,209,0.78))]',
+                        'bg-[var(--zeroade-bg-elev,_rgba(248,248,247,0.96))]',
+                        'text-[var(--zeroade-text,_#44403c)] shadow-[0_20px_44px_-34px_rgba(15,15,15,0.55)]',
+                        'transition-[border-color] duration-150',
+                        canAutoConfigure &&
+                          'cursor-pointer focus-visible:outline-none focus-visible:border-[var(--zeroade-border-strong,_rgba(168,162,158,0.88))]',
                         !canAutoConfigure && 'cursor-not-allowed opacity-60',
                       )}
                       onClick={addAgent}
@@ -3563,7 +3567,7 @@ export const Composer = ({
                           <p className="truncate text-[17px] font-semibold leading-tight tracking-[-0.015em] text-current">
                             {agent.name}
                           </p>
-                          <p className="mt-1 truncate text-[12px] text-stone-500">
+                          <p className="mt-1 truncate text-[12px] text-[var(--zeroade-text-faint,_#78716c)]">
                             {agent.id}
                             {agent.version ? ` · v${agent.version}` : ''}
                           </p>
@@ -3574,7 +3578,7 @@ export const Composer = ({
                         <button
                           type="button"
                           aria-label={`Open repository ${agent.repository}`}
-                          className="absolute right-4 top-4 inline-flex h-8 w-8 items-center justify-center rounded-xl text-stone-500 transition-colors hover:bg-white/70 hover:text-stone-800"
+                          className="absolute right-4 top-4 inline-flex h-8 w-8 items-center justify-center rounded-xl text-[var(--zeroade-text-faint,_#78716c)] transition-colors hover:bg-[var(--zeroade-bg-panel,_rgba(255,255,255,0.72))] hover:text-[var(--zeroade-text-strong,_#1c1917)]"
                           onClick={(event) => {
                             event.stopPropagation();
                             handleOpenWebLink(agent.repository ?? '');
@@ -3584,12 +3588,12 @@ export const Composer = ({
                         </button>
                       ) : null}
 
-                      <p className="mt-3 line-clamp-2 text-[14px] leading-[1.45] text-stone-600">
+                      <p className="mt-3 line-clamp-2 text-[14px] leading-[1.45] text-[var(--zeroade-text-muted,_#57534e)]">
                         {agent.description ?? 'No description provided.'}
                       </p>
 
                       {!canAutoConfigure ? (
-                        <p className="mt-auto pt-3 text-[11px] font-medium text-amber-700">
+                        <p className="mt-auto pt-3 text-[11px] font-medium text-[var(--zeroade-text-faint,_#b45309)]">
                           {launchTemplate.preview}
                         </p>
                       ) : null}

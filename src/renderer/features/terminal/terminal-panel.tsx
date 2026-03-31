@@ -728,7 +728,8 @@ export const TerminalPanel = ({
         backgroundColor: surfaceColor,
       }}
       className={cn(
-        'relative overflow-hidden border-t border-stone-200/75 transition-[height] duration-200',
+        'relative overflow-hidden transition-[height] duration-200',
+        open ? 'border-t border-t-[var(--zeroade-shell-divider)]' : 'border-t-0',
         isResizing && 'transition-none',
       )}
     >

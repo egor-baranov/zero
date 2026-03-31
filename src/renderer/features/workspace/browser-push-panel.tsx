@@ -64,6 +64,7 @@ export const BrowserPushPanel = ({
   onRequestClose,
 }: BrowserPushPanelProps): JSX.Element => {
   const [panelWidth, setPanelWidth] = React.useState<number>(() => readStoredPanelWidth());
+  const [isResizing, setIsResizing] = React.useState(false);
   const resizePointerIdRef = React.useRef<number | null>(null);
   const resizeHandleRef = React.useRef<HTMLButtonElement | null>(null);
 
@@ -103,6 +104,7 @@ export const BrowserPushPanel = ({
   const stopResizing = React.useCallback((): void => {
     const pointerId = resizePointerIdRef.current;
     resizePointerIdRef.current = null;
+    setIsResizing(false);
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
 
@@ -114,6 +116,10 @@ export const BrowserPushPanel = ({
   React.useEffect(() => {
     const handlePointerMove = (event: PointerEvent): void => {
       if (resizePointerIdRef.current === null) {
+        return;
+      }
+
+      if (event.pointerId !== resizePointerIdRef.current) {
         return;
       }
 
@@ -131,8 +137,12 @@ export const BrowserPushPanel = ({
       setPanelWidth(next);
     };
 
-    const handlePointerUp = (): void => {
+    const handlePointerUp = (event: PointerEvent): void => {
       if (resizePointerIdRef.current === null) {
+        return;
+      }
+
+      if (event.pointerId !== resizePointerIdRef.current) {
         return;
       }
 
@@ -141,29 +151,41 @@ export const BrowserPushPanel = ({
 
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
+    window.addEventListener('mouseup', stopResizing);
     window.addEventListener('blur', stopResizing);
 
     return () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
+      window.removeEventListener('mouseup', stopResizing);
       window.removeEventListener('blur', stopResizing);
+      stopResizing();
     };
   }, [onRequestClose, stopResizing]);
 
-  const startResizing = (event: React.PointerEvent<HTMLButtonElement>): void => {
+  const startResizing = React.useCallback((event: React.PointerEvent<HTMLButtonElement>): void => {
+    event.preventDefault();
+    event.stopPropagation();
     resizePointerIdRef.current = event.pointerId;
-    resizeHandleRef.current?.setPointerCapture(event.pointerId);
+    setIsResizing(true);
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-    event.preventDefault();
-  };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // no-op
+    }
+  }, []);
 
   return (
     <aside
       style={{ width: open ? panelWidth : 0 }}
       className={cn(
-        'zeroade-notifications-panel relative h-full shrink-0 overflow-hidden border-l border-stone-200 bg-[#fdfdfff2] backdrop-blur-xl transition-[width] duration-200 ease-out',
-        !open && 'border-l-transparent',
+        'zeroade-notifications-panel relative h-full shrink-0 overflow-hidden border-l border-l-[var(--zeroade-shell-divider)] bg-[#fdfdfff2] shadow-[-18px_0_36px_-30px_rgba(28,28,33,0.18)] backdrop-blur-xl transition-[width] duration-200 ease-out',
+        isResizing && 'transition-none',
+        !open && 'border-l-0',
       )}
     >
       <button
@@ -171,12 +193,13 @@ export const BrowserPushPanel = ({
         type="button"
         aria-label="Resize notifications panel"
         className={cn(
-          'no-drag group absolute inset-y-0 left-0 z-10 w-4 cursor-col-resize',
+          'zeroade-notifications-resize-handle no-drag group absolute inset-y-0 left-0 z-10 w-4 cursor-col-resize',
           !open && 'pointer-events-none opacity-0',
         )}
         onPointerDown={startResizing}
+        onLostPointerCapture={stopResizing}
       >
-        <span className="absolute inset-y-0 left-0 w-px bg-transparent transition-colors group-hover:bg-stone-300/80" />
+        <span className="zeroade-notifications-resize-line absolute inset-y-0 left-0 w-px bg-transparent transition-colors group-hover:bg-stone-300/80" />
       </button>
 
       <div
@@ -187,7 +210,7 @@ export const BrowserPushPanel = ({
       >
         {items.length === 0 ? (
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 text-center">
-            <div className="zeroade-notifications-empty-icon flex h-11 w-11 items-center justify-center rounded-2xl bg-stone-100 text-stone-500">
+            <div className="zeroade-notifications-empty-icon flex h-11 w-11 items-center justify-center rounded-2xl border border-stone-200/80 bg-stone-100 text-stone-500">
               <Bell className="h-5 w-5" />
             </div>
             <p className="zeroade-notifications-empty-title mt-4 text-[13px] font-medium text-stone-700">
@@ -202,9 +225,9 @@ export const BrowserPushPanel = ({
             <div className="space-y-2 px-3 py-3">
               {items.map((item) => {
                 const cardClass = cn(
-                  'zeroade-notification-card w-full min-w-0 rounded-2xl border px-3 py-3 text-left transition-colors',
+                  'zeroade-notification-card w-full min-w-0 rounded-2xl border px-3 py-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.58)] transition-[border-color,background-color,box-shadow] duration-150',
                   item.url
-                    ? 'no-drag hover:border-stone-300 hover:bg-white'
+                    ? 'no-drag hover:border-stone-300 hover:bg-white/95'
                     : 'cursor-default',
                   'border-stone-200/80 bg-white/80',
                   !item.read && 'zeroade-notification-card-unread border-stone-300/80 bg-stone-100/70',

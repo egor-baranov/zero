@@ -2063,7 +2063,7 @@ const TranscriptChangedFilesPanel = ({
   const showHeaderTotals = files.length > 1 && showTotals;
 
   return (
-    <div className="rounded-2xl bg-stone-100/80">
+    <div className="overflow-hidden rounded-2xl bg-stone-100/80">
       <div className="px-4 py-2">
         <div className="flex items-center gap-2 text-[14px] font-medium text-stone-800">
           <span>
@@ -2162,7 +2162,11 @@ const TranscriptChangedFilesPanel = ({
                     </div>
                   ) : diffPreview?.patch ? (
                     <div className={cn('overflow-hidden', isLastFile && 'rounded-b-2xl')}>
-                      <InlineMonacoDiffEditor filePath={file.path} patch={diffPreview.patch} />
+                      <InlineMonacoDiffEditor
+                        filePath={file.path}
+                        patch={diffPreview.patch}
+                        className={isLastFile ? 'rounded-b-2xl' : undefined}
+                      />
                     </div>
                   ) : (
                     <div

@@ -4,7 +4,9 @@ import { cn } from '@renderer/lib/cn';
 import { ensureMonacoSetup, getMonacoLanguage } from '@renderer/lib/monaco-setup';
 import { ensureMonacoThemes } from '@renderer/lib/monaco-theme';
 import {
+  getMonacoEditorLineHeight,
   readResolvedCodeFontFamily,
+  readResolvedEditorFontSize,
   readResolvedMonacoTheme,
 } from '@renderer/store/ui-preferences';
 
@@ -290,6 +292,7 @@ export const SideBySideDiffView = ({
     try {
       ensureMonacoSetup();
       ensureMonacoThemes();
+      const fontSize = readResolvedEditorFontSize();
       const editor = monaco.editor.createDiffEditor(editorHost, {
         theme: getMonacoTheme(),
         'semanticHighlighting.enabled': true,
@@ -309,8 +312,8 @@ export const SideBySideDiffView = ({
         scrollBeyondLastLine: false,
         wordWrap: 'off',
         minimap: { enabled: false },
-        fontSize: 13,
-        lineHeight: 21,
+        fontSize,
+        lineHeight: getMonacoEditorLineHeight(fontSize),
         fontFamily: readResolvedCodeFontFamily(),
         scrollbar: {
           horizontalScrollbarSize: 8,
@@ -373,8 +376,11 @@ export const SideBySideDiffView = ({
       ensureMonacoSetup();
       ensureMonacoThemes();
       monaco.editor.setTheme(getMonacoTheme());
+      const fontSize = readResolvedEditorFontSize();
       editorRef.current?.updateOptions({
         fontFamily: readResolvedCodeFontFamily(),
+        fontSize,
+        lineHeight: getMonacoEditorLineHeight(fontSize),
         'semanticHighlighting.enabled': true,
       });
     };

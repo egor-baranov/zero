@@ -1,9 +1,12 @@
 import * as React from 'react';
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
+import { cn } from '@renderer/lib/cn';
 import { ensureMonacoSetup, getMonacoLanguage } from '@renderer/lib/monaco-setup';
 import { ensureMonacoThemes } from '@renderer/lib/monaco-theme';
 import {
+  getMonacoInlineDiffLineHeight,
   readResolvedCodeFontFamily,
+  readResolvedEditorFontSize,
   readResolvedMonacoTheme,
 } from '@renderer/store/ui-preferences';
 
@@ -11,7 +14,6 @@ const diffHunkHeaderExpression = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 const MAX_DIFF_PREVIEW_CHARACTERS = 200_000;
 const MIN_DIFF_PREVIEW_HEIGHT = 88;
 const MAX_DIFF_PREVIEW_HEIGHT = 420;
-const DIFF_EDITOR_LINE_HEIGHT = 22;
 let diffEditorInstanceCounter = 0;
 
 const getMonacoTheme = (): string =>
@@ -120,11 +122,13 @@ const countEditorLines = (value: string): number => {
 interface InlineMonacoDiffEditorProps {
   filePath: string;
   patch: string;
+  className?: string;
 }
 
 export const InlineMonacoDiffEditor = ({
   filePath,
   patch,
+  className,
 }: InlineMonacoDiffEditorProps): JSX.Element => {
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const editorRef = React.useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
@@ -132,10 +136,15 @@ export const InlineMonacoDiffEditor = ({
   const modifiedModelRef = React.useRef<monaco.editor.ITextModel | null>(null);
   const instanceIdRef = React.useRef<number>(diffEditorInstanceCounter += 1);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+  const [editorFontSize, setEditorFontSize] = React.useState<number>(() => readResolvedEditorFontSize());
 
   const content = React.useMemo(() => buildDiffEditorContent(patch), [patch]);
   const language = React.useMemo(() => getMonacoLanguage(filePath), [filePath]);
   const totalCharacterCount = content.original.length + content.modified.length;
+  const diffEditorLineHeight = React.useMemo(
+    () => getMonacoInlineDiffLineHeight(editorFontSize),
+    [editorFontSize],
+  );
   const editorHeight = React.useMemo(() => {
     const visibleLineCount = Math.max(
       countEditorLines(content.original),
@@ -145,9 +154,9 @@ export const InlineMonacoDiffEditor = ({
 
     return Math.min(
       MAX_DIFF_PREVIEW_HEIGHT,
-      Math.max(MIN_DIFF_PREVIEW_HEIGHT, visibleLineCount * DIFF_EDITOR_LINE_HEIGHT),
+      Math.max(MIN_DIFF_PREVIEW_HEIGHT, visibleLineCount * diffEditorLineHeight),
     );
-  }, [content.modified, content.original]);
+  }, [content.modified, content.original, diffEditorLineHeight]);
 
   React.useEffect(() => {
     const container = containerRef.current;
@@ -158,6 +167,7 @@ export const InlineMonacoDiffEditor = ({
     try {
       ensureMonacoSetup();
       ensureMonacoThemes();
+      const fontSize = readResolvedEditorFontSize();
       const editor = monaco.editor.createDiffEditor(container, {
         theme: getMonacoTheme(),
         'semanticHighlighting.enabled': true,
@@ -179,8 +189,8 @@ export const InlineMonacoDiffEditor = ({
         overviewRulerLanes: 0,
         hideCursorInOverviewRuler: true,
         lineNumbers: 'on',
-        fontSize: 13,
-        lineHeight: DIFF_EDITOR_LINE_HEIGHT,
+        fontSize,
+        lineHeight: getMonacoInlineDiffLineHeight(fontSize),
         padding: {
           top: 0,
           bottom: 0,
@@ -217,8 +227,12 @@ export const InlineMonacoDiffEditor = ({
       ensureMonacoSetup();
       ensureMonacoThemes();
       monaco.editor.setTheme(getMonacoTheme());
+      const fontSize = readResolvedEditorFontSize();
+      setEditorFontSize(fontSize);
       editorRef.current?.updateOptions({
         fontFamily: readResolvedCodeFontFamily(),
+        fontSize,
+        lineHeight: getMonacoInlineDiffLineHeight(fontSize),
         'semanticHighlighting.enabled': true,
       });
     };
@@ -301,7 +315,12 @@ export const InlineMonacoDiffEditor = ({
 
   if (errorMessage) {
     return (
-      <div className="flex h-[360px] items-center justify-center rounded-xl bg-stone-100/85 px-4 text-center text-[13px] text-stone-500">
+      <div
+        className={cn(
+          'flex h-[360px] items-center justify-center rounded-xl bg-stone-100/85 px-4 text-center text-[13px] text-stone-500',
+          className,
+        )}
+      >
         {errorMessage}
       </div>
     );
@@ -310,7 +329,7 @@ export const InlineMonacoDiffEditor = ({
   return (
     <div
       ref={containerRef}
-      className="zeroade-inline-monaco-diff w-full"
+      className={cn('zeroade-inline-monaco-diff w-full overflow-hidden', className)}
       style={{ height: `${editorHeight}px` }}
     />
   );

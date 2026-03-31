@@ -20,7 +20,9 @@ import { cn } from '@renderer/lib/cn';
 import { ensureMonacoSetup, getMonacoLanguage } from '@renderer/lib/monaco-setup';
 import { ensureMonacoThemes } from '@renderer/lib/monaco-theme';
 import {
+  getMonacoEditorLineHeight,
   readResolvedCodeFontFamily,
+  readResolvedEditorFontSize,
   readResolvedMonacoTheme,
 } from '@renderer/store/ui-preferences';
 import type { ReviewFileState } from '@renderer/store/use-workspace-review';
@@ -191,6 +193,7 @@ export const ReviewPanel = ({
     ensureMonacoSetup();
     ensureMonacoThemes();
     ensureMonacoLsp(workspacePath);
+    const fontSize = readResolvedEditorFontSize();
 
     const editor = monaco.editor.create(container, {
       value: '',
@@ -203,8 +206,8 @@ export const ReviewPanel = ({
       scrollBeyondLastLine: false,
       renderLineHighlight: 'none',
       wordWrap: 'off',
-      fontSize: 13,
-      lineHeight: 21,
+      fontSize,
+      lineHeight: getMonacoEditorLineHeight(fontSize),
       lineNumbersMinChars: 3,
       padding: {
         top: 12,
@@ -595,8 +598,11 @@ export const ReviewPanel = ({
       ensureMonacoSetup();
       ensureMonacoThemes();
       monaco.editor.setTheme(nextTheme);
+      const fontSize = readResolvedEditorFontSize();
       const nextOptions = {
         fontFamily: readResolvedCodeFontFamily(),
+        fontSize,
+        lineHeight: getMonacoEditorLineHeight(fontSize),
         'semanticHighlighting.enabled': true as const,
       };
       primaryEditorRef.current?.updateOptions(nextOptions);

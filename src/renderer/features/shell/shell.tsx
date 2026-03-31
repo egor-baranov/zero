@@ -52,6 +52,7 @@ import {
   writeStoredNotifications,
   type AppNotificationItem,
 } from '@renderer/store/browser-pushes';
+import { changeEditorFontSizePreference } from '@renderer/store/ui-preferences';
 import { useSidebarWidth } from '@renderer/store/use-sidebar-width';
 import { useRunConfigurations } from '@renderer/store/use-run-configurations';
 import { useShellState } from '@renderer/store/use-shell-state';
@@ -77,6 +78,25 @@ const TITLEBAR_ICON_CLASS = 'h-3.5 w-3.5';
 const TIMELINE_SNAPSHOT_STORAGE_KEY = 'zeroade.shell.timeline-snapshots.v1';
 const EXTERNAL_LINK_SCHEME_PATTERN = /^[a-z][a-z\d+\-.]*:/i;
 const WINDOWS_ABSOLUTE_PATH_PATTERN = /^[a-zA-Z]:\//;
+
+const isHTMLElement = (value: unknown): value is HTMLElement =>
+  typeof HTMLElement !== 'undefined' && value instanceof HTMLElement;
+
+const isMonacoEditorKeyboardContext = (target: EventTarget | null): boolean => {
+  const element = isHTMLElement(target)
+    ? target
+    : isHTMLElement(document.activeElement)
+      ? document.activeElement
+      : null;
+
+  return element?.closest('.monaco-editor') !== null;
+};
+
+const isEditorFontZoomInKey = (event: KeyboardEvent): boolean =>
+  event.key === '+' || event.key === '=' || event.code === 'NumpadAdd';
+
+const isEditorFontZoomOutKey = (event: KeyboardEvent): boolean =>
+  event.key === '-' || event.key === '_' || event.code === 'NumpadSubtract';
 
 const normalizeTranscriptFileHref = (href: string): string => {
   const trimmed = href.trim();
@@ -2704,9 +2724,26 @@ export const Shell = (): JSX.Element => {
     setStatusText(`Interrupt sent to ${activeRunExecution.configurationName}`);
   }, [activeRunExecution]);
 
+  const handleAdjustEditorFontSize = React.useCallback((delta: number) => {
+    const nextEditorFontSize = changeEditorFontSizePreference(delta);
+    setStatusText(`Editor font ${nextEditorFontSize}px`);
+  }, []);
+
   React.useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const isMod = event.metaKey || event.ctrlKey;
+      if (
+        isMod &&
+        !event.altKey &&
+        isMonacoEditorKeyboardContext(event.target) &&
+        (isEditorFontZoomInKey(event) || isEditorFontZoomOutKey(event))
+      ) {
+        event.preventDefault();
+        handleAdjustEditorFontSize(isEditorFontZoomInKey(event) ? 1 : -1);
+        lastShiftTapAtRef.current = 0;
+        return;
+      }
+
       if (isMod && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setIsFileSearchOpen(false);
@@ -2753,7 +2790,7 @@ export const Shell = (): JSX.Element => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, []);
+  }, [handleAdjustEditorFontSize]);
 
   const commandPaletteItems = React.useMemo<CommandPaletteItem[]>(() => {
     const workspaceItems: CommandPaletteItem[] = recentWorkspaces.map((workspace) => ({
@@ -3383,7 +3420,7 @@ export const Shell = (): JSX.Element => {
             <div className="drag-region flex h-full min-w-0">
               <div
                 className={cn(
-                  'shrink-0 overflow-hidden border-r border-stone-200/65 bg-[rgba(249,250,252,0.09)] backdrop-blur-[2px] backdrop-saturate-125',
+                  'shrink-0 overflow-hidden border-r border-r-[var(--zeroade-shell-divider)] bg-[rgba(249,250,252,0.09)] backdrop-blur-[2px] backdrop-saturate-125',
                   !isResizing && 'transition-[width] duration-200 ease-out',
                 )}
                 style={{ width: activeSidebarWidth }}
@@ -3661,7 +3698,7 @@ export const Shell = (): JSX.Element => {
                       {isReviewPanelOpen ? (
                         <div
                           className={cn(
-                            'relative min-w-0 shrink-0 border-r border-stone-200/80 bg-[#fdfdff]',
+                            'relative min-w-0 shrink-0 border-r border-r-[var(--zeroade-shell-divider)] bg-[#fdfdff]',
                             'transition-[width] duration-150 ease-out',
                             isReviewPanelResizing && 'transition-none',
                           )}

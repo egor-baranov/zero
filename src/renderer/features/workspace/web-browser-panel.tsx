@@ -1178,9 +1178,9 @@ export const WebBrowserPanel = ({
       ref={panelRef}
       style={{ width: open ? panelWidth : 0 }}
       className={cn(
-        'relative h-full shrink-0 overflow-hidden border-l border-stone-200 bg-[#fdfdfff2] backdrop-blur-xl transition-[width] duration-200 ease-out',
+        'relative h-full shrink-0 overflow-hidden border-l border-l-[var(--zeroade-shell-divider)] bg-[#fdfdfff2] backdrop-blur-xl transition-[width] duration-200 ease-out',
         isResizing && 'transition-none',
-        !open && 'border-l-transparent',
+        !open && 'border-l-0',
       )}
     >
       <button
