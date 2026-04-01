@@ -6,6 +6,7 @@ import '@renderer/styles/globals.css';
 
 const THEME_PREFERENCE_KEY = 'zeroade.ui.theme.v1';
 const ACCENT_COLOR_KEY = 'zeroade.ui.accent-color.v1';
+const MONOCHROME_LANGUAGE_ICONS_KEY = 'zeroade.ui.monochrome-language-icons.v1';
 const EDITOR_THEMES_KEY = 'zeroade.ui.editor-themes.v1';
 const EDITOR_FONT_SIZE_KEY = 'zeroade.ui.editor-font-size.v1';
 
@@ -33,6 +34,7 @@ window.addEventListener('storage', (event) => {
   if (
     event.key === THEME_PREFERENCE_KEY ||
     event.key === ACCENT_COLOR_KEY ||
+    event.key === MONOCHROME_LANGUAGE_ICONS_KEY ||
     event.key === EDITOR_THEMES_KEY ||
     event.key === EDITOR_FONT_SIZE_KEY
   ) {

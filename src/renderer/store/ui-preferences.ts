@@ -106,12 +106,14 @@ export interface EditorThemeSettings {
 export interface UiPreferences {
   theme: ThemePreference;
   accentColor: AccentColorPreference;
+  monochromeLanguageIcons: boolean;
   editorThemes: Record<EditorThemeMode, EditorThemeSettings>;
   editorFontSize: number;
 }
 
 const THEME_PREFERENCE_KEY = 'zeroade.ui.theme.v1';
 const ACCENT_COLOR_KEY = 'zeroade.ui.accent-color.v1';
+const MONOCHROME_LANGUAGE_ICONS_KEY = 'zeroade.ui.monochrome-language-icons.v1';
 const EDITOR_THEMES_KEY = 'zeroade.ui.editor-themes.v1';
 const EDITOR_FONT_SIZE_KEY = 'zeroade.ui.editor-font-size.v1';
 const LEGACY_ACCENT_ENABLED_KEY = 'zeroade.ui.accent-enabled.v1';
@@ -209,6 +211,14 @@ const parseAccentColorPreference = (value: string | null): AccentColorPreference
   }
 
   return null;
+};
+
+const parseMonochromeLanguageIconsPreference = (value: string | null): boolean => {
+  if (value === '0' || value === 'false') {
+    return false;
+  }
+
+  return true;
 };
 
 const parseEditorThemePreset = (value: unknown): EditorThemePreset | null => {
@@ -555,6 +565,7 @@ const normalizeEditorThemeSettings = (
 const DEFAULT_PREFERENCES: UiPreferences = {
   theme: 'system',
   accentColor: 'default',
+  monochromeLanguageIcons: true,
   editorThemes: {
     light: getEditorThemePresetDefaults('light', 'zero'),
     dark: getEditorThemePresetDefaults('dark', 'zero'),
@@ -595,6 +606,9 @@ const readEditorFontSizePreference = (): number => {
 export const readUiPreferences = (): UiPreferences => {
   const theme = parseThemePreference(window.localStorage.getItem(THEME_PREFERENCE_KEY));
   const parsedAccentColor = parseAccentColorPreference(window.localStorage.getItem(ACCENT_COLOR_KEY));
+  const monochromeLanguageIcons = parseMonochromeLanguageIconsPreference(
+    window.localStorage.getItem(MONOCHROME_LANGUAGE_ICONS_KEY),
+  );
   const legacyAccentEnabled = window.localStorage.getItem(LEGACY_ACCENT_ENABLED_KEY) === '1';
   const accentColor =
     parsedAccentColor ?? (legacyAccentEnabled ? 'orange' : DEFAULT_PREFERENCES.accentColor);
@@ -602,6 +616,7 @@ export const readUiPreferences = (): UiPreferences => {
   return {
     theme,
     accentColor,
+    monochromeLanguageIcons,
     editorThemes: readEditorThemesPreference(),
     editorFontSize: readEditorFontSizePreference(),
   };
@@ -613,6 +628,15 @@ export const writeThemePreference = (theme: ThemePreference): void => {
 
 export const writeAccentColorPreference = (accentColor: AccentColorPreference): void => {
   window.localStorage.setItem(ACCENT_COLOR_KEY, accentColor);
+};
+
+export const writeMonochromeLanguageIconsPreference = (
+  monochromeLanguageIcons: boolean,
+): void => {
+  window.localStorage.setItem(
+    MONOCHROME_LANGUAGE_ICONS_KEY,
+    monochromeLanguageIcons ? '1' : '0',
+  );
 };
 
 export const writeEditorThemesPreference = (
@@ -1274,6 +1298,9 @@ export const applyUiPreferences = (preferences: UiPreferences): void => {
   root.dataset.zeroadeMonacoTheme =
     resolvedTheme === 'dark' ? 'zeroade-editor-dark' : 'zeroade-editor-light';
   root.dataset.zeroadeAccent = preferences.accentColor;
+  root.dataset.zeroadeMonochromeLanguageIcons = preferences.monochromeLanguageIcons
+    ? 'true'
+    : 'false';
   root.dataset.zeroadeOpaqueWindows = resolvedEditorTheme.opaqueWindows ? 'true' : 'false';
   root.style.colorScheme = resolvedTheme;
   root.style.setProperty('--zeroade-code-font-family', getCodeFontFamily(resolvedEditorTheme.codeFont));

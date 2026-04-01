@@ -426,6 +426,10 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
   box-shadow: none !important;
 }
 
+:root[data-zeroade-monochrome-language-icons='false'] .zeroade-language-icon {
+  color: var(--zeroade-language-icon-color);
+}
+
 :root[data-zeroade-theme='dark'] .thinking-shimmer {
   color: #b1b1bb;
 }

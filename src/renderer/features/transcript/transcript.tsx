@@ -3,6 +3,7 @@ import {
   ArrowDown,
   Check,
   ChevronDown,
+  Copy,
   FileText,
   Folder,
   FolderPlus,
@@ -305,6 +306,26 @@ const syntaxHighlighterCustomStyle: React.CSSProperties = {
 const syntaxHighlighterCodeTagStyle: React.CSSProperties = {
   fontFamily:
     'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace',
+};
+
+const COPY_FEEDBACK_DURATION_MS = 1800;
+
+const writeTextToClipboard = async (value: string): Promise<void> => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textArea = document.createElement('textarea');
+  textArea.value = value;
+  textArea.setAttribute('readonly', 'true');
+  textArea.style.position = 'fixed';
+  textArea.style.left = '-9999px';
+  textArea.style.opacity = '0';
+  document.body.appendChild(textArea);
+  textArea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textArea);
 };
 
 const linkExpression = /^\[([^\]]+)\]\(([^)\s]+)\)$/;
@@ -3046,40 +3067,103 @@ const AssistantMessage = ({
         }
 
         return (
-          <div
+          <AssistantCodeBlock
             key={`assistant-code-${index}`}
-            className="overflow-hidden rounded-xl"
-            style={{
-              backgroundColor: isDarkTheme ? '#17171c' : 'rgba(244, 244, 245, 0.9)',
-            }}
-          >
-            {segment.language ? (() => {
-              const languagePresentation = toLanguagePresentation(segment.language);
-              const LanguageIcon = languagePresentation.Icon;
-
-              return (
-                <div className="flex items-center gap-1.5 px-3 pb-2 pt-1 text-[13px] font-medium text-stone-600">
-                  <LanguageIcon className="h-3.5 w-3.5 text-stone-500" />
-                  <span>{languagePresentation.label}</span>
-                </div>
-              );
-            })() : null}
-            <div className="overflow-x-auto">
-              <SyntaxHighlighter
-                language={segment.language ?? 'text'}
-                style={isDarkTheme ? coldarkDark : coldarkCold}
-                customStyle={syntaxHighlighterCustomStyle}
-                codeTagProps={{
-                  style: syntaxHighlighterCodeTagStyle,
-                }}
-                PreTag="div"
-              >
-                {segment.code}
-              </SyntaxHighlighter>
-            </div>
-          </div>
+            code={segment.code}
+            language={segment.language}
+            isDarkTheme={isDarkTheme}
+          />
         );
       })}
+    </div>
+  );
+};
+
+const AssistantCodeBlock = ({
+  code,
+  language,
+  isDarkTheme,
+}: {
+  code: string;
+  language?: string;
+  isDarkTheme: boolean;
+}): JSX.Element => {
+  const [isCopied, setIsCopied] = React.useState(false);
+  const resetTimeoutRef = React.useRef<number | null>(null);
+
+  const languagePresentation = React.useMemo(
+    () => (language ? toLanguagePresentation(language) : null),
+    [language],
+  );
+
+  React.useEffect(() => {
+    return () => {
+      if (resetTimeoutRef.current !== null) {
+        window.clearTimeout(resetTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopy = React.useCallback(async (): Promise<void> => {
+    await writeTextToClipboard(code);
+    setIsCopied(true);
+    if (resetTimeoutRef.current !== null) {
+      window.clearTimeout(resetTimeoutRef.current);
+    }
+    resetTimeoutRef.current = window.setTimeout(() => {
+      setIsCopied(false);
+      resetTimeoutRef.current = null;
+    }, COPY_FEEDBACK_DURATION_MS);
+  }, [code]);
+
+  const LanguageIcon = languagePresentation?.Icon ?? null;
+
+  return (
+    <div
+      className="overflow-hidden rounded-xl"
+      style={{
+        backgroundColor: isDarkTheme ? '#17171c' : 'rgba(244, 244, 245, 0.9)',
+      }}
+    >
+      <div className="flex items-center justify-between gap-3 px-3 pb-2 pt-2">
+        {languagePresentation && LanguageIcon ? (
+          <div className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-stone-600">
+            <LanguageIcon className="h-3.5 w-3.5 shrink-0 text-stone-500" />
+            <span>{languagePresentation.label}</span>
+          </div>
+        ) : (
+          <div />
+        )}
+        <button
+          type="button"
+          className={cn(
+            'no-drag inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+            isDarkTheme
+              ? 'text-stone-400 hover:bg-white/10 hover:text-stone-100'
+              : 'text-stone-500 hover:bg-white/70 hover:text-stone-700',
+          )}
+          aria-label={isCopied ? 'Code copied' : 'Copy code'}
+          title={isCopied ? 'Code copied' : 'Copy code'}
+          onClick={() => {
+            void handleCopy();
+          }}
+        >
+          {isCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+        </button>
+      </div>
+      <div className="overflow-x-auto">
+        <SyntaxHighlighter
+          language={language ?? 'text'}
+          style={isDarkTheme ? coldarkDark : coldarkCold}
+          customStyle={syntaxHighlighterCustomStyle}
+          codeTagProps={{
+            style: syntaxHighlighterCodeTagStyle,
+          }}
+          PreTag="div"
+        >
+          {code}
+        </SyntaxHighlighter>
+      </div>
     </div>
   );
 };

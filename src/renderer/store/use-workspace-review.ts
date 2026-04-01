@@ -30,7 +30,11 @@ interface UseWorkspaceReviewResult {
   openDiff: (path: string) => Promise<void>;
   setActiveReviewFile: (path: string) => void;
   closeReviewFile: (path: string) => void;
-  reorderReviewFiles: (sourcePath: string, targetPath: string) => void;
+  reorderReviewFiles: (
+    sourcePath: string,
+    targetPath: string,
+    placement?: 'before' | 'after',
+  ) => void;
   revealReviewFile: () => Promise<void>;
   refreshReviewFile: () => Promise<void>;
   refreshReviewPath: (path: string) => Promise<void>;
@@ -276,7 +280,11 @@ export const useWorkspaceReview = (
     setIsReviewPanelVisible((previous) => !previous);
   }, []);
 
-  const reorderReviewFiles = React.useCallback((sourcePath: string, targetPath: string) => {
+  const reorderReviewFiles = React.useCallback((
+    sourcePath: string,
+    targetPath: string,
+    placement: 'before' | 'after' = 'before',
+  ) => {
     if (sourcePath === targetPath) {
       return;
     }
@@ -291,8 +299,21 @@ export const useWorkspaceReview = (
 
       const next = [...previous];
       const [moved] = next.splice(sourceIndex, 1);
-      next.splice(targetIndex, 0, moved);
-      return next;
+      if (!moved) {
+        return previous;
+      }
+
+      const targetIndexAfterRemoval = next.findIndex((file) => file.id === targetPath);
+      if (targetIndexAfterRemoval < 0) {
+        return previous;
+      }
+
+      const insertionIndex =
+        placement === 'after' ? targetIndexAfterRemoval + 1 : targetIndexAfterRemoval;
+      next.splice(insertionIndex, 0, moved);
+
+      const isUnchanged = next.every((file, index) => file.id === previous[index]?.id);
+      return isUnchanged ? previous : next;
     });
   }, []);
 

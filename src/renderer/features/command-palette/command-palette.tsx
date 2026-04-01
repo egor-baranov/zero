@@ -42,15 +42,32 @@ export const CommandPalette = ({
   sectionOrder = defaultSectionOrder,
 }: CommandPaletteProps): JSX.Element => {
   const [uncontrolledQuery, setUncontrolledQuery] = React.useState('');
-  const [activeItemId, setActiveItemId] = React.useState<string | null>(null);
+  const [selectedItemId, setSelectedItemId] = React.useState<string | null>(null);
+  const [hoveredItemId, setHoveredItemId] = React.useState<string | null>(null);
+  const [isDarkTheme, setIsDarkTheme] = React.useState(
+    document.documentElement.dataset.zeroadeTheme === 'dark',
+  );
   const itemButtonByIdRef = React.useRef(new Map<string, HTMLButtonElement>());
   const suppressNextPreviewRef = React.useRef(false);
   const query = controlledQuery ?? uncontrolledQuery;
+  const activeItemId = hoveredItemId ?? selectedItemId;
+
+  React.useEffect(() => {
+    const handleThemeChange = (): void => {
+      setIsDarkTheme(document.documentElement.dataset.zeroadeTheme === 'dark');
+    };
+
+    window.addEventListener('zeroade-ui-preferences-changed', handleThemeChange);
+    return () => {
+      window.removeEventListener('zeroade-ui-preferences-changed', handleThemeChange);
+    };
+  }, []);
 
   React.useEffect(() => {
     if (!open) {
       setUncontrolledQuery('');
-      setActiveItemId(null);
+      setSelectedItemId(null);
+      setHoveredItemId(null);
       suppressNextPreviewRef.current = false;
       onQueryChange?.('');
     }
@@ -112,12 +129,13 @@ export const CommandPalette = ({
 
   React.useEffect(() => {
     if (orderedItems.length === 0) {
-      setActiveItemId(null);
+      setSelectedItemId(null);
+      setHoveredItemId(null);
       suppressNextPreviewRef.current = false;
       return;
     }
 
-    setActiveItemId((previous) => {
+    setSelectedItemId((previous) => {
       if (previous && orderedItems.some((item) => item.id === previous)) {
         return previous;
       }
@@ -125,6 +143,9 @@ export const CommandPalette = ({
       suppressNextPreviewRef.current = true;
       return orderedItems[0].id;
     });
+    setHoveredItemId((previous) =>
+      previous && orderedItems.some((item) => item.id === previous) ? previous : null,
+    );
   }, [orderedItems]);
 
   React.useEffect(() => {
@@ -164,7 +185,8 @@ export const CommandPalette = ({
         return;
       }
 
-      setActiveItemId((previous) => {
+      setHoveredItemId(null);
+      setSelectedItemId((previous) => {
         const currentIndex = previous
           ? orderedItems.findIndex((item) => item.id === previous)
           : -1;
@@ -217,26 +239,53 @@ export const CommandPalette = ({
         showCloseButton={false}
         className="no-drag max-w-[620px] border-0 bg-transparent p-0 shadow-none"
       >
-        <div className="relative max-h-[76vh] overflow-hidden rounded-[22px] border border-stone-200/85 bg-white/24 shadow-[0_30px_90px_-42px_rgba(15,23,42,0.45),0_1px_0_rgba(255,255,255,0.65)_inset,0_20px_34px_-28px_rgba(255,255,255,0.78)_inset] backdrop-blur-[30px] backdrop-saturate-150">
+        <div
+          className={cn(
+            'relative max-h-[76vh] overflow-hidden rounded-[22px] backdrop-blur-[30px] backdrop-saturate-150',
+            isDarkTheme
+              ? 'border border-white/10 bg-[#111215]/72 text-stone-100 shadow-[0_34px_90px_-42px_rgba(0,0,0,0.82),0_1px_0_rgba(255,255,255,0.06)_inset,0_22px_38px_-30px_rgba(255,255,255,0.03)_inset]'
+              : 'border border-stone-200/85 bg-white/32 shadow-[0_30px_90px_-42px_rgba(15,23,42,0.45),0_1px_0_rgba(255,255,255,0.65)_inset,0_20px_34px_-28px_rgba(255,255,255,0.78)_inset]',
+          )}
+        >
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-[linear-gradient(180deg,rgba(255,255,255,0.76),rgba(255,255,255,0.24),transparent)]"
+            className={cn(
+              'pointer-events-none absolute inset-x-0 top-0 h-24',
+              isDarkTheme
+                ? 'bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.015),transparent)]'
+                : 'bg-[linear-gradient(180deg,rgba(255,255,255,0.76),rgba(255,255,255,0.24),transparent)]',
+            )}
           />
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-8 top-0 h-px bg-white/80"
+            className={cn(
+              'pointer-events-none absolute inset-x-8 top-0 h-px',
+              isDarkTheme ? 'bg-transparent' : 'bg-white/80',
+            )}
           />
 
           <div className="relative p-3">
-            <label className="flex items-center gap-2 rounded-xl border border-white/80 bg-white px-3 py-2 shadow-[0_1px_0_rgba(255,255,255,0.82)_inset,0_10px_24px_-20px_rgba(15,23,42,0.18)]">
-              <Search className="h-4 w-4 text-stone-500" />
+            <label
+              className={cn(
+                'flex items-center gap-2 rounded-xl px-3 py-2',
+                isDarkTheme
+                  ? 'border border-white/10 bg-black/26 shadow-[0_1px_0_rgba(255,255,255,0.05)_inset]'
+                  : 'border border-white/80 bg-white shadow-[0_1px_0_rgba(255,255,255,0.82)_inset,0_10px_24px_-20px_rgba(15,23,42,0.18)]',
+              )}
+            >
+              <Search className={cn('h-4 w-4', isDarkTheme ? 'text-stone-400' : 'text-stone-500')} />
               <input
                 autoFocus
                 value={query}
                 onChange={(event) => handleQueryChange(event.target.value)}
                 onKeyDown={handleInputKeyDown}
                 placeholder={placeholder}
-                className="w-full bg-transparent text-sm text-stone-700 placeholder:text-stone-500 focus:outline-none"
+                className={cn(
+                  'w-full bg-transparent text-sm focus:outline-none',
+                  isDarkTheme
+                    ? 'text-stone-100 placeholder:text-stone-500'
+                    : 'text-stone-700 placeholder:text-stone-500',
+                )}
               />
             </label>
           </div>
@@ -247,16 +296,31 @@ export const CommandPalette = ({
               filterItems ? 'max-h-[56vh]' : 'h-[52vh] min-h-[280px] max-h-[56vh]',
             )}
           >
-            <div className="space-y-5 pb-2">
+            <div
+              className="space-y-5 pb-2"
+              onMouseLeave={() => {
+                setHoveredItemId(null);
+              }}
+            >
               {groupedItems.length === 0 && (
-                <div className="rounded-xl bg-white/18 px-3 py-2 text-sm text-stone-500 backdrop-blur-md">
+                <div
+                  className={cn(
+                    'rounded-xl px-3 py-2 text-sm backdrop-blur-md',
+                    isDarkTheme ? 'bg-white/6 text-stone-400' : 'bg-white/18 text-stone-500',
+                  )}
+                >
                   {loading ? 'Searching…' : emptyMessage}
                 </div>
               )}
 
               {groupedItems.map((group) => (
                 <section key={group.section} className="space-y-2.5">
-                  <h3 className="px-1 text-[13px] font-medium text-stone-600/90">
+                  <h3
+                    className={cn(
+                      'px-1 text-[13px] font-medium',
+                      isDarkTheme ? 'text-stone-400' : 'text-stone-600/90',
+                    )}
+                  >
                     {group.section}
                   </h3>
 
@@ -277,19 +341,25 @@ export const CommandPalette = ({
                         className={cn(
                           'no-drag flex w-full items-start gap-2 rounded-xl border border-transparent px-2.5 py-2 text-left',
                           activeItemId === item.id &&
-                            'border-stone-300/80 bg-stone-200/95',
+                            (isDarkTheme ? 'bg-white/10' : 'bg-stone-200'),
                         )}
                         onMouseEnter={() => {
                           suppressNextPreviewRef.current = false;
-                          setActiveItemId(item.id);
+                          setHoveredItemId(item.id);
                         }}
                         onFocus={() => {
                           suppressNextPreviewRef.current = false;
-                          setActiveItemId(item.id);
+                          setSelectedItemId(item.id);
+                          setHoveredItemId(null);
                         }}
                         onClick={() => selectItem(item)}
                       >
-                        <span className="mt-0.5 p-1 text-stone-500">
+                        <span
+                          className={cn(
+                            'mt-0.5 p-1',
+                            isDarkTheme ? 'text-stone-400' : 'text-stone-500',
+                          )}
+                        >
                           {item.icon === 'folder' ? (
                             <FolderOpen className="h-3.5 w-3.5" />
                           ) : item.icon === 'file' ? (
@@ -300,11 +370,21 @@ export const CommandPalette = ({
                         </span>
 
                         <span className="min-w-0">
-                          <span className="block truncate text-sm font-normal text-stone-700">
+                          <span
+                            className={cn(
+                              'block truncate text-sm font-normal',
+                              isDarkTheme ? 'text-stone-100' : 'text-stone-700',
+                            )}
+                          >
                             {item.title}
                           </span>
                           {item.subtitle ? (
-                            <span className="block truncate text-xs text-stone-500">
+                            <span
+                              className={cn(
+                                'block truncate text-xs',
+                                isDarkTheme ? 'text-stone-500' : 'text-stone-500',
+                              )}
+                            >
                               {item.subtitle}
                             </span>
                           ) : null}

@@ -43,7 +43,11 @@ interface ReviewPanelProps {
   } | null;
   onSelectTab: (path: string) => void;
   onCloseTab: (path: string) => void;
-  onReorderTabs: (sourcePath: string, targetPath: string) => void;
+  onReorderTabs: (
+    sourcePath: string,
+    targetPath: string,
+    placement?: 'before' | 'after',
+  ) => void;
   onRefreshPath: (path: string) => Promise<void>;
   onStatusText?: (text: string) => void;
 }
@@ -89,6 +93,18 @@ interface FileTypeIconProps {
 const FileTypeIcon = ({ fileName }: FileTypeIconProps): JSX.Element => {
   const Icon = toFileIconComponent(fileName);
   return <Icon className="h-4 w-4 text-stone-500" />;
+};
+
+const isWithinReviewTabBar = (target: EventTarget | null): boolean =>
+  target instanceof Element &&
+  Boolean(target.closest('[data-review-tab-bar="true"]'));
+
+const getTabInsertPlacement = (
+  clientX: number,
+  element: HTMLElement,
+): 'before' | 'after' => {
+  const bounds = element.getBoundingClientRect();
+  return clientX <= bounds.left + bounds.width / 2 ? 'before' : 'after';
 };
 
 export const ReviewPanel = ({
@@ -473,6 +489,11 @@ export const ReviewPanel = ({
         return;
       }
 
+      if (isWithinReviewTabBar(event.target)) {
+        setDropSide(null);
+        return;
+      }
+
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
       setDropSide(getDropSideFromClientX(event.clientX));
@@ -486,6 +507,10 @@ export const ReviewPanel = ({
         return;
       }
 
+      if (isWithinReviewTabBar(event.target)) {
+        return;
+      }
+
       event.preventDefault();
       const side = getDropSideFromClientX(event.clientX);
       handleDropInPane(side, draggingTabPath);
@@ -495,6 +520,12 @@ export const ReviewPanel = ({
     },
     [draggingTabPath, getDropSideFromClientX, handleDropInPane],
   );
+
+  const handleEditorDragLeave = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setDropSide(null);
+    }
+  }, []);
 
   React.useEffect(() => {
     if (activeTab?.kind === 'diff' && isSplitView) {
@@ -810,7 +841,7 @@ export const ReviewPanel = ({
     showOptions: boolean,
     scrollerRef: React.RefObject<HTMLDivElement | null>,
   ): JSX.Element => (
-    <div className="flex min-h-10 items-center bg-white/90">
+    <div data-review-tab-bar="true" className="flex min-h-10 items-center bg-white/90">
       <div
         ref={scrollerRef}
         className="min-w-0 flex-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
@@ -848,18 +879,29 @@ export const ReviewPanel = ({
                 }}
                 onDragOver={(event) => {
                   event.preventDefault();
+                  event.stopPropagation();
                   if (draggingTabPath && draggingTabPath !== tab.id) {
                     setDragOverTabPath(tab.id);
+                    onReorderTabs(
+                      draggingTabPath,
+                      tab.id,
+                      getTabInsertPlacement(event.clientX, event.currentTarget),
+                    );
                   }
                 }}
                 onDrop={(event) => {
                   event.preventDefault();
+                  event.stopPropagation();
                   const sourcePath = draggingTabPath ?? event.dataTransfer.getData('text/plain');
                   if (!sourcePath || sourcePath === tab.id) {
                     return;
                   }
 
-                  onReorderTabs(sourcePath, tab.id);
+                  onReorderTabs(
+                    sourcePath,
+                    tab.id,
+                    getTabInsertPlacement(event.clientX, event.currentTarget),
+                  );
                 }}
                 onDragEnd={() => {
                   setDraggingTabPath(null);
@@ -908,17 +950,7 @@ export const ReviewPanel = ({
     <section className="flex h-full w-full min-w-0 flex-col">
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#fdfdff]">
         <div className="relative min-h-0 flex-1 bg-[#fdfdff] px-2 pb-2 pt-0">
-          <div
-            ref={editorsContainerRef}
-            className="flex h-full w-full min-w-0"
-            onDragOver={handleEditorDragOver}
-            onDrop={handleEditorDrop}
-            onDragLeave={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                setDropSide(null);
-              }
-            }}
-          >
+          <div ref={editorsContainerRef} className="flex h-full w-full min-w-0">
             <div
               className="flex min-h-0 shrink-0 flex-col overflow-hidden bg-[#fdfdff]"
               style={{
@@ -980,19 +1012,30 @@ export const ReviewPanel = ({
           </div>
 
           {draggingTabPath ? (
-            <div className="no-drag pointer-events-none absolute inset-2 z-20 grid grid-cols-2 gap-2">
-              <div
-                className={cn(
-                  'rounded-lg border-2 border-dashed border-stone-300/75 bg-stone-100/35',
-                  dropSide === 'left' && 'border-stone-500/75 bg-stone-200/45',
-                )}
-              />
-              <div
-                className={cn(
-                  'rounded-lg border-2 border-dashed border-stone-300/75 bg-stone-100/35',
-                  dropSide === 'right' && 'border-stone-500/75 bg-stone-200/45',
-                )}
-              />
+            <div
+              className="no-drag absolute inset-x-2 bottom-2 top-12 z-20"
+              onDragOver={handleEditorDragOver}
+              onDrop={handleEditorDrop}
+              onDragLeave={handleEditorDragLeave}
+            >
+              {dropSide ? (
+                <div className="pointer-events-none grid h-full grid-cols-2 gap-2">
+                  <div
+                    className={cn(
+                      'rounded-[16px] border border-solid border-stone-300/65 bg-white/20 backdrop-blur-[1px]',
+                      dropSide === 'left' &&
+                        'border-stone-400/90 bg-stone-100/45 shadow-[0_0_0_1px_rgba(255,255,255,0.48)_inset]',
+                    )}
+                  />
+                  <div
+                    className={cn(
+                      'rounded-[16px] border border-solid border-stone-300/65 bg-white/20 backdrop-blur-[1px]',
+                      dropSide === 'right' &&
+                        'border-stone-400/90 bg-stone-100/45 shadow-[0_0_0_1px_rgba(255,255,255,0.48)_inset]',
+                    )}
+                  />
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>

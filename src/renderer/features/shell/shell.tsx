@@ -4139,7 +4139,7 @@ export const Shell = (): JSX.Element => {
             </p>
 
             <div className="mt-4 space-y-3">
-              <label className="block text-[11px] font-normal uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Command
                 <input
                   value={welcomeCustomCommand}
@@ -4149,7 +4149,7 @@ export const Shell = (): JSX.Element => {
                 />
               </label>
 
-              <label className="block text-[11px] font-normal uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Arguments
                 <input
                   value={welcomeCustomArgs}
@@ -4159,7 +4159,7 @@ export const Shell = (): JSX.Element => {
                 />
               </label>
 
-              <label className="block text-[11px] font-normal uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Working directory (optional)
                 <input
                   value={welcomeCustomCwd}
@@ -4169,7 +4169,7 @@ export const Shell = (): JSX.Element => {
                 />
               </label>
 
-              <label className="block text-[11px] font-normal uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Environment (optional)
                 <textarea
                   value={welcomeCustomEnv}

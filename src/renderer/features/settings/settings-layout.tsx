@@ -62,6 +62,7 @@ import {
   writeAccentColorPreference,
   writeEditorFontSizePreference,
   writeEditorThemesPreference,
+  writeMonochromeLanguageIconsPreference,
   writeThemePreference,
 } from '@renderer/store/ui-preferences';
 import { McpSettingsSection } from '@renderer/features/settings/mcp-settings-section';
@@ -876,6 +877,7 @@ export const SettingsLayout = ({
   React.useEffect(() => {
     writeThemePreference(uiPreferences.theme);
     writeAccentColorPreference(uiPreferences.accentColor);
+    writeMonochromeLanguageIconsPreference(uiPreferences.monochromeLanguageIcons);
     writeEditorFontSizePreference(uiPreferences.editorFontSize);
     writeEditorThemesPreference(uiPreferences.editorThemes);
     applyUiPreferences(uiPreferences);
@@ -1478,7 +1480,7 @@ export const SettingsLayout = ({
               </div>
             }
           />
-          <div className="border-t border-stone-200/75 p-3">
+          <div>
             <EditorThemePreview
               lightTheme={uiPreferences.editorThemes.light}
               darkTheme={uiPreferences.editorThemes.dark}
@@ -1630,8 +1632,9 @@ export const SettingsLayout = ({
             title="Font ligatures"
             description="Enables programming ligatures in Monaco editors for both light and dark themes."
             control={
-              <EditorLigaturesSwitch
+              <SettingsSwitch
                 checked={sharedFontLigatures}
+                ariaLabel="Toggle editor font ligatures"
                 onCheckedChange={updateSharedFontLigatures}
               />
             }
@@ -1651,6 +1654,22 @@ export const SettingsLayout = ({
                   setUiPreferences((previous) => ({
                     ...previous,
                     accentColor,
+                  }));
+                }}
+              />
+            }
+          />
+          <SettingRow
+            title="Monochrome language icons"
+            description="Keeps programming language and code file icons neutral across the app. Turn it off to show language colors."
+            control={
+              <SettingsSwitch
+                checked={uiPreferences.monochromeLanguageIcons}
+                ariaLabel="Toggle monochrome language icons"
+                onCheckedChange={(monochromeLanguageIcons) => {
+                  setUiPreferences((previous) => ({
+                    ...previous,
+                    monochromeLanguageIcons,
                   }));
                 }}
               />
@@ -2394,7 +2413,7 @@ const EditorThemePreview = ({
   lightTheme,
   darkTheme,
 }: EditorThemePreviewProps): JSX.Element => (
-  <div className="overflow-hidden rounded-[20px] border border-stone-200/80 bg-stone-50">
+  <div className="overflow-hidden bg-stone-50">
     <div className="grid gap-px bg-stone-200/80 md:grid-cols-2">
       <EditorThemePreviewPane mode="light" theme={lightTheme} />
       <EditorThemePreviewPane mode="dark" theme={darkTheme} />
@@ -2895,8 +2914,9 @@ interface CodeFontSelectProps {
   onSelect: (value: CodeFontPreference) => void;
 }
 
-interface EditorLigaturesSwitchProps {
+interface SettingsSwitchProps {
   checked: boolean;
+  ariaLabel: string;
   onCheckedChange: (checked: boolean) => void;
 }
 
@@ -2979,15 +2999,16 @@ const CodeFontSelect = ({ value, onSelect }: CodeFontSelectProps): JSX.Element =
   );
 };
 
-const EditorLigaturesSwitch = ({
+const SettingsSwitch = ({
   checked,
+  ariaLabel,
   onCheckedChange,
-}: EditorLigaturesSwitchProps): JSX.Element => (
+}: SettingsSwitchProps): JSX.Element => (
   <button
     type="button"
     role="switch"
     aria-checked={checked}
-    aria-label="Toggle editor font ligatures"
+    aria-label={ariaLabel}
     data-state={checked ? 'checked' : 'unchecked'}
     className={cn(
       'relative inline-flex h-6 w-10 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--zeroade-selection)]',
@@ -3734,7 +3755,7 @@ const AgentsSettingsSection = ({
             </p>
 
             <div className="mt-4 space-y-3">
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Command
                 <input
                   value={editorState?.command ?? ''}
@@ -3753,7 +3774,7 @@ const AgentsSettingsSection = ({
                 />
               </label>
 
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Arguments
                 <input
                   value={editorState?.args ?? ''}
@@ -3772,7 +3793,7 @@ const AgentsSettingsSection = ({
                 />
               </label>
 
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Working directory (optional)
                 <input
                   value={editorState?.cwd ?? ''}
@@ -3791,7 +3812,7 @@ const AgentsSettingsSection = ({
                 />
               </label>
 
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Environment (optional)
                 <textarea
                   value={editorState?.env ?? ''}

@@ -285,7 +285,7 @@ export const desktopApi: DesktopApi = {
   },
   skillsList: () => ipcRenderer.invoke(IPC_CHANNELS.skillsList),
   skillsCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.skillsCatalog),
-  skillsCatalogDetail: (request: SkillsCatalogDetailRequest): Promise<SkillsCatalogDetailResult> =>
+  skillsCatalogDetail: (request: SkillsглавCatalogDetailRequest): Promise<SkillsCatalogDetailResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.skillsCatalogDetail, request),
   skillsRead: (request: SkillsReadRequest): Promise<SkillsReadResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.skillsRead, request),
