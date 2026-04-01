@@ -41,6 +41,19 @@ import {
 } from '@renderer/components/ui/tooltip';
 import { Avatar, AvatarFallback, AvatarImage } from '@renderer/components/ui/avatar';
 import { cn } from '@renderer/lib/cn';
+import {
+  type AttachmentMentionMatch,
+  collectAttachmentMentionMatches,
+  collectMentionedAttachmentPaths,
+  getActiveAttachmentQuery,
+  getFileName,
+  hasAttachmentMention,
+  insertAttachmentMentions,
+  joinWorkspaceFilePath,
+  normalizePath,
+  searchWorkspaceFiles,
+} from '@renderer/lib/attachment-mentions';
+import { toFileIconComponent } from '@renderer/lib/code-language-icons';
 import type {
   AcpCustomAgentConfig,
   AcpPromptAudioContent,
@@ -96,6 +109,14 @@ interface ComposerAttachment {
   absolutePath: string;
   displayPath: string;
   relativePath?: string;
+}
+
+interface ComposerAttachmentSearchItem {
+  absolutePath: string;
+  relativePath: string;
+  displayPath: string;
+  fileName: string;
+  directoryPath: string;
 }
 
 interface ComposerControlOption {
@@ -902,6 +923,181 @@ const toBranchSummary = (result: WorkspaceGitStatusResult): BranchSummary => ({
 
 const formatFileCount = (count: number): string => `${count.toLocaleString()} file${count === 1 ? '' : 's'}`;
 
+const toComposerAttachmentLabel = (attachment: ComposerAttachment | AttachmentMentionMatch['attachment']): string =>
+  attachment.displayPath ?? attachment.relativePath ?? getFileName(attachment.absolutePath);
+
+const removeMessageRange = (
+  text: string,
+  start: number,
+  end: number,
+): {
+  text: string;
+  selectionStart: number;
+  selectionEnd: number;
+} => {
+  let prefix = text.slice(0, start);
+  let suffix = text.slice(end);
+
+  if (prefix.endsWith(' ') && suffix.startsWith(' ')) {
+    suffix = suffix.slice(1);
+  } else if (!prefix && suffix.startsWith(' ')) {
+    suffix = suffix.slice(1);
+  } else if (!suffix && prefix.endsWith(' ')) {
+    prefix = prefix.slice(0, -1);
+  }
+
+  const nextCursor = prefix.length;
+  return {
+    text: `${prefix}${suffix}`,
+    selectionStart: nextCursor,
+    selectionEnd: nextCursor,
+  };
+};
+
+const getInlineAttachmentDeletionEdit = ({
+  text,
+  matches,
+  selectionStart,
+  selectionEnd,
+  direction,
+}: {
+  text: string;
+  matches: AttachmentMentionMatch[];
+  selectionStart: number;
+  selectionEnd: number;
+  direction: 'backward' | 'forward';
+}): {
+  text: string;
+  selectionStart: number;
+  selectionEnd: number;
+} | null => {
+  if (matches.length === 0) {
+    return null;
+  }
+
+  if (selectionStart !== selectionEnd) {
+    const overlappingMatches = matches.filter(
+      (match) => selectionStart < match.end && selectionEnd > match.start,
+    );
+    if (overlappingMatches.length === 0) {
+      return null;
+    }
+
+    const start = Math.min(selectionStart, overlappingMatches[0].start);
+    const end = Math.max(selectionEnd, overlappingMatches.at(-1)?.end ?? selectionEnd);
+    return removeMessageRange(text, start, end);
+  }
+
+  const cursor = selectionStart;
+  if (direction === 'backward') {
+    const target = matches.find((match) => {
+      if (cursor > match.start && cursor <= match.end) {
+        return true;
+      }
+
+      return cursor === match.end + 1 && text.charAt(match.end) === ' ';
+    });
+    if (!target) {
+      return null;
+    }
+
+    const end =
+      cursor === target.end + 1 && text.charAt(target.end) === ' ' ? cursor : target.end;
+    return removeMessageRange(text, target.start, end);
+  }
+
+  const target = matches.find(
+    (match) => cursor >= match.start && cursor < match.end,
+  );
+  if (!target) {
+    return null;
+  }
+
+  return removeMessageRange(text, target.start, target.end);
+};
+
+const getInlineAttachmentVisualEnd = (
+  text: string,
+  match: AttachmentMentionMatch,
+): number => (text.charAt(match.end) === ' ' ? match.end + 1 : match.end);
+
+const getInlineAttachmentCursorJump = ({
+  text,
+  matches,
+  selectionStart,
+  selectionEnd,
+  direction,
+}: {
+  text: string;
+  matches: AttachmentMentionMatch[];
+  selectionStart: number;
+  selectionEnd: number;
+  direction: 'left' | 'right';
+}): number | null => {
+  if (selectionStart !== selectionEnd) {
+    return null;
+  }
+
+  const cursor = selectionStart;
+  if (direction === 'left') {
+    return (
+      matches.find(
+        (match) => cursor > match.start && cursor <= getInlineAttachmentVisualEnd(text, match),
+      )?.start ?? null
+    );
+  }
+
+  const target = matches.find(
+    (match) => cursor >= match.start && cursor < getInlineAttachmentVisualEnd(text, match),
+  );
+  if (!target) {
+    return null;
+  }
+
+  return getInlineAttachmentVisualEnd(text, target);
+};
+
+const getNormalizedInlineAttachmentSelection = ({
+  text,
+  matches,
+  selectionStart,
+  selectionEnd,
+}: {
+  text: string;
+  matches: AttachmentMentionMatch[];
+  selectionStart: number;
+  selectionEnd: number;
+}): {
+  start: number;
+  end: number;
+} => {
+  if (selectionStart !== selectionEnd) {
+    return {
+      start: selectionStart,
+      end: selectionEnd,
+    };
+  }
+
+  const target = matches.find((match) => {
+    const visualEnd = getInlineAttachmentVisualEnd(text, match);
+    return selectionStart > match.start && selectionStart < visualEnd;
+  });
+  if (!target) {
+    return {
+      start: selectionStart,
+      end: selectionEnd,
+    };
+  }
+
+  const visualEnd = getInlineAttachmentVisualEnd(text, target);
+  const midpoint = target.start + (visualEnd - target.start) / 2;
+  const nextCursor = selectionStart < midpoint ? target.start : visualEnd;
+  return {
+    start: nextCursor,
+    end: nextCursor,
+  };
+};
+
 export const Composer = ({
   workspacePath,
   disabled = false,
@@ -931,6 +1127,7 @@ export const Composer = ({
   const currentPlatform = window.desktop?.platform ?? 'darwin';
   const [message, setMessage] = React.useState('');
   const [attachments, setAttachments] = React.useState<ComposerAttachment[]>([]);
+  const [legacyAttachmentPaths, setLegacyAttachmentPaths] = React.useState<string[]>([]);
   const [isAgentMenuOpen, setIsAgentMenuOpen] = React.useState(false);
   const [isAgentDialogOpen, setIsAgentDialogOpen] = React.useState(false);
   const [isRegistryDialogOpen, setIsRegistryDialogOpen] = React.useState(false);
@@ -977,6 +1174,17 @@ export const Composer = ({
   const [voiceError, setVoiceError] = React.useState<string | null>(null);
   const [pendingVoicePrompt, setPendingVoicePrompt] =
     React.useState<AcpPromptAudioContent | null>(null);
+  const [workspaceFiles, setWorkspaceFiles] = React.useState<string[]>([]);
+  const [isWorkspaceFilesLoading, setIsWorkspaceFilesLoading] = React.useState(false);
+  const [hasLoadedWorkspaceFiles, setHasLoadedWorkspaceFiles] = React.useState(false);
+  const [workspaceFilesError, setWorkspaceFilesError] = React.useState<string | null>(null);
+  const [messageSelection, setMessageSelection] = React.useState({
+    start: 0,
+    end: 0,
+  });
+  const [activeAttachmentResultIndex, setActiveAttachmentResultIndex] = React.useState(0);
+  const [dismissedAttachmentQueryKey, setDismissedAttachmentQueryKey] =
+    React.useState<string | null>(null);
   const [recordingDurationMs, setRecordingDurationMs] = React.useState(0);
   const [voiceVisualizerBars, setVoiceVisualizerBars] = React.useState<number[]>(
     () => createIdleVoiceVisualizerBars(VOICE_VISUALIZER_DEFAULT_BAR_COUNT),
@@ -984,6 +1192,9 @@ export const Composer = ({
   const [draggingQueuedPromptId, setDraggingQueuedPromptId] = React.useState<string | null>(null);
   const [dragOverQueuedPromptId, setDragOverQueuedPromptId] = React.useState<string | null>(null);
   const messageInputRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const messageMirrorRef = React.useRef<HTMLDivElement | null>(null);
+  const attachmentSearchListRef = React.useRef<HTMLDivElement | null>(null);
+  const activeAttachmentItemRef = React.useRef<HTMLButtonElement | null>(null);
   const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
   const mediaStreamRef = React.useRef<MediaStream | null>(null);
   const recordedVoiceChunksRef = React.useRef<Blob[]>([]);
@@ -1002,8 +1213,216 @@ export const Composer = ({
   const voiceVisualizerTrackRef = React.useRef<HTMLDivElement | null>(null);
   const voiceVisualizerBarCountRef = React.useRef(VOICE_VISUALIZER_DEFAULT_BAR_COUNT);
   const previousVoiceErrorRef = React.useRef<string | null>(null);
+  const legacyAttachmentPathSet = React.useMemo(
+    () => new Set(legacyAttachmentPaths),
+    [legacyAttachmentPaths],
+  );
+  const legacyAttachments = React.useMemo(
+    () =>
+      attachments.filter((attachment) =>
+        legacyAttachmentPathSet.has(attachment.absolutePath),
+      ),
+    [attachments, legacyAttachmentPathSet],
+  );
 
-  const canSend = !disabled && (message.trim().length > 0 || pendingVoicePrompt !== null);
+  const canSend =
+    !disabled &&
+    (message.trim().length > 0 || attachments.length > 0 || pendingVoicePrompt !== null);
+  const hasWorkspace = workspacePath.trim().length > 0 && workspacePath !== '/';
+  const composerInlineAttachmentMatches = React.useMemo(
+    () => collectAttachmentMentionMatches(message, attachments),
+    [attachments, message],
+  );
+
+  const setComposerSelection = React.useCallback((start: number, end: number): void => {
+    const textarea = messageInputRef.current;
+    if (textarea && (textarea.selectionStart !== start || textarea.selectionEnd !== end)) {
+      textarea.setSelectionRange(start, end);
+    }
+
+    setMessageSelection({
+      start,
+      end,
+    });
+  }, []);
+
+  const syncMessageSelection = React.useCallback((): void => {
+    const textarea = messageInputRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    const normalizedSelection = getNormalizedInlineAttachmentSelection({
+      text: message,
+      matches: composerInlineAttachmentMatches,
+      selectionStart: textarea.selectionStart ?? 0,
+      selectionEnd: textarea.selectionEnd ?? 0,
+    });
+    setComposerSelection(normalizedSelection.start, normalizedSelection.end);
+  }, [composerInlineAttachmentMatches, message, setComposerSelection]);
+
+  const loadWorkspaceFiles = React.useCallback(async (): Promise<void> => {
+    if (!hasWorkspace || isWorkspaceFilesLoading) {
+      return;
+    }
+
+    setIsWorkspaceFilesLoading(true);
+    setWorkspaceFilesError(null);
+
+    try {
+      const result = await window.desktop.workspaceListFiles({ workspacePath });
+      setWorkspaceFiles(result.files.map((filePath) => filePath.replaceAll('\\', '/')));
+      setHasLoadedWorkspaceFiles(true);
+    } catch {
+      setWorkspaceFiles([]);
+      setWorkspaceFilesError('Unable to load project files.');
+    } finally {
+      setIsWorkspaceFilesLoading(false);
+    }
+  }, [hasWorkspace, isWorkspaceFilesLoading, workspacePath]);
+
+  const activeAttachmentQuery = React.useMemo(
+    () => getActiveAttachmentQuery(message, messageSelection.start, messageSelection.end),
+    [message, messageSelection.end, messageSelection.start],
+  );
+  const activeAttachmentQueryKey = activeAttachmentQuery
+    ? `${activeAttachmentQuery.start}:${activeAttachmentQuery.end}:${activeAttachmentQuery.query}`
+    : null;
+  const isAttachmentMenuVisible = Boolean(
+    activeAttachmentQuery &&
+      hasWorkspace &&
+      activeAttachmentQueryKey !== dismissedAttachmentQueryKey,
+  );
+  const attachmentSearchResults = React.useMemo<ComposerAttachmentSearchItem[]>(() => {
+    if (!activeAttachmentQuery || workspaceFiles.length === 0) {
+      return [];
+    }
+
+    return searchWorkspaceFiles(workspaceFiles, activeAttachmentQuery.query, 7).map((entry) => ({
+      absolutePath: joinWorkspaceFilePath(workspacePath, entry.relativePath, currentPlatform),
+      relativePath: entry.relativePath,
+      displayPath: entry.relativePath,
+      fileName: entry.fileName,
+      directoryPath: entry.directoryPath,
+    }));
+  }, [activeAttachmentQuery, currentPlatform, workspaceFiles, workspacePath]);
+  const activeAttachmentSearchResult =
+    attachmentSearchResults[activeAttachmentResultIndex] ?? attachmentSearchResults[0] ?? null;
+  const setActiveAttachmentItemRef = React.useCallback((node: HTMLButtonElement | null) => {
+    activeAttachmentItemRef.current = node;
+  }, []);
+  const applyMessageEdit = React.useCallback(
+    (nextValue: {
+      text: string;
+      selectionStart: number;
+      selectionEnd: number;
+    }): void => {
+      setMessage(nextValue.text);
+
+      window.requestAnimationFrame(() => {
+        const nextTextarea = messageInputRef.current;
+        if (!nextTextarea || nextTextarea.disabled) {
+          return;
+        }
+
+        nextTextarea.focus();
+        setComposerSelection(nextValue.selectionStart, nextValue.selectionEnd);
+      });
+    },
+    [setComposerSelection],
+  );
+
+  React.useEffect(() => {
+    if (
+      !isAttachmentMenuVisible ||
+      hasLoadedWorkspaceFiles ||
+      isWorkspaceFilesLoading ||
+      workspaceFilesError
+    ) {
+      return;
+    }
+
+    void loadWorkspaceFiles();
+  }, [
+    hasLoadedWorkspaceFiles,
+    isAttachmentMenuVisible,
+    isWorkspaceFilesLoading,
+    loadWorkspaceFiles,
+    workspaceFilesError,
+  ]);
+
+  React.useEffect(() => {
+    if (activeAttachmentQueryKey === dismissedAttachmentQueryKey) {
+      return;
+    }
+
+    setDismissedAttachmentQueryKey(null);
+  }, [activeAttachmentQueryKey, dismissedAttachmentQueryKey]);
+
+  React.useEffect(() => {
+    setActiveAttachmentResultIndex((previous) => {
+      if (attachmentSearchResults.length === 0) {
+        return 0;
+      }
+
+      return Math.min(previous, attachmentSearchResults.length - 1);
+    });
+  }, [attachmentSearchResults]);
+
+  React.useEffect(() => {
+    setActiveAttachmentResultIndex(0);
+  }, [activeAttachmentQueryKey]);
+
+  React.useEffect(() => {
+    if (!isAttachmentMenuVisible) {
+      return;
+    }
+
+    const list = attachmentSearchListRef.current;
+    const item = activeAttachmentItemRef.current;
+    if (!list || !item) {
+      return;
+    }
+
+    const listRect = list.getBoundingClientRect();
+    const itemRect = item.getBoundingClientRect();
+    const scrollPadding = 8;
+
+    if (itemRect.top < listRect.top) {
+      list.scrollTop -= listRect.top - itemRect.top + scrollPadding;
+      return;
+    }
+
+    if (itemRect.bottom > listRect.bottom) {
+      list.scrollTop += itemRect.bottom - listRect.bottom + scrollPadding;
+    }
+  }, [activeAttachmentResultIndex, activeAttachmentSearchResult, isAttachmentMenuVisible]);
+
+  React.useEffect(() => {
+    if (attachments.length === 0) {
+      return;
+    }
+
+    const mentionedAttachmentPaths = collectMentionedAttachmentPaths(message, attachments);
+    const shouldKeepAttachment = (absolutePath: string): boolean =>
+      mentionedAttachmentPaths.has(absolutePath) ||
+      legacyAttachmentPathSet.has(absolutePath);
+    if (attachments.every((attachment) => shouldKeepAttachment(attachment.absolutePath))) {
+      return;
+    }
+
+    setAttachments((previous) =>
+      previous.filter((attachment) => shouldKeepAttachment(attachment.absolutePath)),
+    );
+  }, [attachments, legacyAttachmentPathSet, message]);
+
+  React.useEffect(() => {
+    setLegacyAttachmentPaths((previous) => {
+      const availablePaths = new Set(attachments.map((attachment) => attachment.absolutePath));
+      const next = previous.filter((absolutePath) => availablePaths.has(absolutePath));
+      return next.length === previous.length ? previous : next;
+    });
+  }, [attachments]);
 
   const setDictationModeEnabled = React.useCallback((enabled: boolean): void => {
     dictationModeEnabledRef.current = enabled;
@@ -1031,10 +1450,22 @@ export const Composer = ({
       textarea.focus();
       const cursorPosition = prefillRequest.text.length;
       textarea.setSelectionRange(cursorPosition, cursorPosition);
+      setMessageSelection({
+        start: cursorPosition,
+        end: cursorPosition,
+      });
     });
   }, [prefillRequest]);
 
-  const hasWorkspace = workspacePath.trim().length > 0 && workspacePath !== '/';
+  React.useEffect(() => {
+    setWorkspaceFiles([]);
+    setIsWorkspaceFilesLoading(false);
+    setHasLoadedWorkspaceFiles(false);
+    setWorkspaceFilesError(null);
+    setDismissedAttachmentQueryKey(null);
+    setActiveAttachmentResultIndex(0);
+  }, [workspacePath]);
+
   const isVoiceInputSupported = React.useMemo(
     () => hasVoiceCaptureSupport(),
     [],
@@ -1739,6 +2170,7 @@ export const Composer = ({
 
   React.useEffect(() => {
     setAttachments([]);
+    setLegacyAttachmentPaths([]);
   }, [workspacePath]);
 
   React.useEffect(() => {
@@ -1900,11 +2332,49 @@ export const Composer = ({
     });
   }, []);
 
-  const removeAttachment = React.useCallback((absolutePath: string) => {
-    setAttachments((previous) =>
-      previous.filter((item) => item.absolutePath !== absolutePath),
-    );
-  }, []);
+  const addLegacyAttachments = React.useCallback(
+    (nextItems: ComposerAttachment[]): void => {
+      if (nextItems.length === 0) {
+        return;
+      }
+
+      mergeAttachments(nextItems);
+      setLegacyAttachmentPaths((previous) => {
+        const next = new Set(previous);
+        nextItems.forEach((item) => {
+          next.add(item.absolutePath);
+        });
+        return Array.from(next);
+      });
+
+      window.requestAnimationFrame(() => {
+        const textarea = messageInputRef.current;
+        if (!textarea || textarea.disabled) {
+          return;
+        }
+
+        textarea.focus();
+      });
+    },
+    [mergeAttachments],
+  );
+
+  const removeLegacyAttachment = React.useCallback(
+    (absolutePath: string): void => {
+      setLegacyAttachmentPaths((previous) =>
+        previous.filter((path) => path !== absolutePath),
+      );
+      setAttachments((previous) => {
+        const attachment = previous.find((item) => item.absolutePath === absolutePath);
+        if (!attachment || hasAttachmentMention(message, attachment)) {
+          return previous;
+        }
+
+        return previous.filter((item) => item.absolutePath !== absolutePath);
+      });
+    },
+    [message],
+  );
 
   const resolveAttachmentFromAbsolutePath = React.useCallback(
     (absolutePath: string): ComposerAttachment | null => {
@@ -1936,15 +2406,73 @@ export const Composer = ({
     [workspacePath],
   );
 
+  const applyComposerAttachments = React.useCallback(
+    (
+      nextAttachments: ComposerAttachment[],
+      options?: {
+        replaceQuery?: boolean;
+      },
+    ): void => {
+      if (nextAttachments.length === 0) {
+        return;
+      }
+
+      mergeAttachments(nextAttachments);
+
+      const textarea = messageInputRef.current;
+      const selectionStart = textarea?.selectionStart ?? messageSelection.start ?? message.length;
+      const selectionEnd = textarea?.selectionEnd ?? messageSelection.end ?? message.length;
+      const replaceQuery = options?.replaceQuery === true && activeAttachmentQuery;
+      const nextValue = insertAttachmentMentions({
+        text: message,
+        selectionStart,
+        selectionEnd,
+        attachments: nextAttachments,
+        replaceStart: replaceQuery ? activeAttachmentQuery.start : selectionStart,
+        replaceEnd: replaceQuery ? activeAttachmentQuery.end : selectionEnd,
+      });
+
+      applyMessageEdit(nextValue);
+      setDismissedAttachmentQueryKey(null);
+    },
+    [
+      activeAttachmentQuery,
+      applyMessageEdit,
+      mergeAttachments,
+      message,
+      message.length,
+      messageSelection.end,
+      messageSelection.start,
+    ],
+  );
+
+  const handleSelectAttachmentSearchResult = React.useCallback(
+    (item: ComposerAttachmentSearchItem): void => {
+      applyComposerAttachments(
+        [
+          {
+            absolutePath: item.absolutePath,
+            relativePath: item.relativePath,
+            displayPath: item.displayPath,
+          },
+        ],
+        {
+          replaceQuery: true,
+        },
+      );
+    },
+    [applyComposerAttachments],
+  );
+
   const handleAddAttachmentPaths = React.useCallback(
     (paths: string[]) => {
       const next = paths
         .map((item) => resolveAttachmentFromAbsolutePath(item))
         .filter((item): item is ComposerAttachment => item !== null);
 
-      mergeAttachments(next);
+      applyComposerAttachments(next);
     },
-    [mergeAttachments, resolveAttachmentFromAbsolutePath],
+    [applyComposerAttachments, resolveAttachmentFromAbsolutePath],
   );
 
   const handlePickAttachment = React.useCallback(async () => {
@@ -1966,7 +2494,7 @@ export const Composer = ({
       return;
     }
 
-    mergeAttachments([
+    addLegacyAttachments([
       {
         ...nextAttachment,
         relativePath: result.relativePath ?? nextAttachment.relativePath,
@@ -1974,8 +2502,8 @@ export const Composer = ({
       },
     ]);
   }, [
+    addLegacyAttachments,
     hasWorkspace,
-    mergeAttachments,
     resolveAttachmentFromAbsolutePath,
     workspacePath,
   ]);
@@ -1983,7 +2511,7 @@ export const Composer = ({
   const handleSubmit = React.useCallback(async () => {
     const trimmed = message.trim();
     const normalizedAudio = normalizePromptAudioContent(pendingVoicePrompt);
-    if ((!trimmed && !normalizedAudio) || disabled) {
+    if ((!trimmed && attachments.length === 0 && !normalizedAudio) || disabled) {
       return;
     }
 
@@ -1995,6 +2523,7 @@ export const Composer = ({
 
     setMessage('');
     setAttachments([]);
+    setLegacyAttachmentPaths([]);
     setPendingVoicePrompt(null);
     await onSubmit(trimmed, promptAttachments, normalizedAudio);
   }, [attachments, disabled, message, onSubmit, pendingVoicePrompt]);
@@ -2615,6 +3144,45 @@ export const Composer = ({
     [handleAddAttachmentPaths],
   );
 
+  const moveActiveAttachmentResult = React.useCallback(
+    (direction: -1 | 1): void => {
+      if (attachmentSearchResults.length === 0) {
+        return;
+      }
+
+      setActiveAttachmentResultIndex((previous) => {
+        const nextIndex =
+          (previous + direction + attachmentSearchResults.length) %
+          attachmentSearchResults.length;
+        return nextIndex;
+      });
+    },
+    [attachmentSearchResults.length],
+  );
+
+  const dismissAttachmentMenu = React.useCallback((): void => {
+    if (!activeAttachmentQueryKey) {
+      return;
+    }
+
+    setDismissedAttachmentQueryKey(activeAttachmentQueryKey);
+  }, [activeAttachmentQueryKey]);
+
+  const syncMessageMirrorScroll = React.useCallback((): void => {
+    const textarea = messageInputRef.current;
+    const mirror = messageMirrorRef.current;
+    if (!textarea || !mirror) {
+      return;
+    }
+
+    mirror.scrollTop = textarea.scrollTop;
+    mirror.scrollLeft = textarea.scrollLeft;
+  }, []);
+
+  React.useEffect(() => {
+    syncMessageMirrorScroll();
+  }, [message, syncMessageMirrorScroll]);
+
   return (
     <div
       className="pb-0 pt-0"
@@ -2656,7 +3224,7 @@ export const Composer = ({
           handleDropDataTransfer(event.dataTransfer);
         }}
       >
-        {attachments.length > 0 || pendingVoicePrompt ? (
+        {pendingVoicePrompt || legacyAttachments.length > 0 ? (
           <div className="flex flex-wrap gap-2 px-3 pb-0.5 pt-2.5">
             {pendingVoicePrompt ? (
               <button
@@ -2670,16 +3238,18 @@ export const Composer = ({
                 <X className="h-3 w-3 shrink-0 text-stone-500" />
               </button>
             ) : null}
-            {attachments.map((attachment) => (
+            {legacyAttachments.map((attachment) => (
               <button
                 key={attachment.absolutePath}
                 type="button"
                 className="no-drag inline-flex h-8 max-w-full items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2.5 text-[12px] font-medium text-stone-800 transition-colors hover:bg-stone-50"
-                onClick={() => removeAttachment(attachment.absolutePath)}
+                onClick={() => removeLegacyAttachment(attachment.absolutePath)}
                 title="Remove attachment"
               >
                 <FileText className="h-3.5 w-3.5 shrink-0 text-stone-500" />
-                <span className="truncate">{attachment.displayPath}</span>
+                <span className="truncate">
+                  {attachment.displayPath ?? attachment.relativePath ?? getFileName(attachment.absolutePath)}
+                </span>
                 <X className="h-3 w-3 shrink-0 text-stone-500" />
               </button>
             ))}
@@ -2762,42 +3332,209 @@ export const Composer = ({
           </div>
         ) : null}
 
+        {isAttachmentMenuVisible ? (
+          <div className="p-2">
+            <div
+              ref={attachmentSearchListRef}
+              className="max-h-[224px] space-y-0.5 overflow-y-auto"
+            >
+              {attachmentSearchResults.map((item, index) => {
+                const Icon = toFileIconComponent(item.fileName);
+                const isActive = index === activeAttachmentResultIndex;
+                const isAlreadyAttached = attachments.some(
+                  (attachment) => attachment.absolutePath === item.absolutePath,
+                );
+                const isAlreadyMentioned = hasAttachmentMention(message, item);
+
+                return (
+                  <button
+                    key={item.absolutePath}
+                    ref={isActive ? setActiveAttachmentItemRef : null}
+                    type="button"
+                    className={cn(
+                      'no-drag flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left transition-colors focus-visible:outline-none',
+                      isActive ? 'bg-stone-100/90' : 'bg-transparent',
+                    )}
+                    onMouseEnter={() => setActiveAttachmentResultIndex(index)}
+                    onClick={() => handleSelectAttachmentSearchResult(item)}
+                  >
+                    <span
+                      className={cn(
+                        'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-stone-500',
+                        isActive && 'text-stone-700',
+                      )}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate leading-5">
+                        <span className="text-[13px] font-medium text-stone-700">
+                          {item.fileName}
+                        </span>
+                        {item.directoryPath ? (
+                          <span className="ml-1.5 text-[11px] text-stone-400">
+                            {item.directoryPath}
+                          </span>
+                        ) : null}
+                      </span>
+                    </span>
+                    {isAlreadyAttached || isAlreadyMentioned ? (
+                      <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-stone-500">
+                        <Check className="h-3.5 w-3.5" />
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+
+              {attachmentSearchResults.length === 0 ? (
+                <div className="rounded-xl border border-stone-200 bg-stone-50/80 px-2.5 py-2 text-[12px] text-stone-500">
+                  {isWorkspaceFilesLoading
+                    ? 'Loading project files...'
+                    : workspaceFilesError ?? 'No matching project files.'}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
         <div className="px-3 pb-0 pt-2.5">
-          <AutosizeTextarea
-            ref={messageInputRef}
-            minRows={1}
-            maxRows={8}
-            placeholder={composerPlaceholder}
-            value={message}
-            disabled={disabled}
-            className="text-[15px] leading-6 text-stone-700 placeholder:text-stone-400"
-            onChange={(event) => setMessage(event.target.value)}
-            onDragOver={(event) => {
-              if (!dataTransferHasFiles(event.dataTransfer)) {
-                return;
-              }
+          <div className="relative">
+            <div
+              ref={messageMirrorRef}
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 overflow-hidden text-[15px] leading-6"
+            >
+              <div className="min-h-[24px] whitespace-pre-wrap break-words text-stone-700">
+                {message.length > 0 ? (
+                  <ComposerInputMirror
+                    text={message}
+                    matches={composerInlineAttachmentMatches}
+                  />
+                ) : (
+                  <span className="text-stone-400">{composerPlaceholder}</span>
+                )}
+              </div>
+            </div>
 
-              event.preventDefault();
-              event.dataTransfer.dropEffect = 'copy';
-              setIsDropTargetActive(true);
-            }}
-            onDrop={(event) => {
-              if (!dataTransferHasFiles(event.dataTransfer)) {
-                return;
-              }
+            <AutosizeTextarea
+              ref={messageInputRef}
+              minRows={1}
+              maxRows={8}
+              placeholder={composerPlaceholder}
+              value={message}
+              disabled={disabled}
+              className="relative z-10 text-transparent caret-stone-700 placeholder:text-transparent selection:bg-stone-200/75 selection:text-transparent"
+              onChange={(event) => {
+                setMessage(event.target.value);
+                setDismissedAttachmentQueryKey(null);
+                window.requestAnimationFrame(() => {
+                  syncMessageSelection();
+                });
+              }}
+              onSelect={syncMessageSelection}
+              onClick={syncMessageSelection}
+              onKeyUp={syncMessageSelection}
+              onScroll={syncMessageMirrorScroll}
+              onDragOver={(event) => {
+                if (!dataTransferHasFiles(event.dataTransfer)) {
+                  return;
+                }
 
-              event.preventDefault();
-              event.stopPropagation();
-              setIsDropTargetActive(false);
-              handleDropDataTransfer(event.dataTransfer);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
-                void handleSubmit();
-              }
-            }}
-          />
+                event.dataTransfer.dropEffect = 'copy';
+                setIsDropTargetActive(true);
+              }}
+              onDrop={(event) => {
+                if (!dataTransferHasFiles(event.dataTransfer)) {
+                  return;
+                }
+
+                event.preventDefault();
+                event.stopPropagation();
+                setIsDropTargetActive(false);
+                handleDropDataTransfer(event.dataTransfer);
+              }}
+              onKeyDown={(event) => {
+                if (
+                  (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+                  !event.metaKey &&
+                  !event.ctrlKey &&
+                  !event.altKey
+                ) {
+                  const nextCursor = getInlineAttachmentCursorJump({
+                    text: message,
+                    matches: composerInlineAttachmentMatches,
+                    selectionStart: event.currentTarget.selectionStart ?? 0,
+                    selectionEnd:
+                      event.currentTarget.selectionEnd ?? event.currentTarget.selectionStart ?? 0,
+                    direction: event.key === 'ArrowLeft' ? 'left' : 'right',
+                  });
+
+                  if (nextCursor !== null) {
+                    event.preventDefault();
+                    setComposerSelection(nextCursor, nextCursor);
+                    return;
+                  }
+                }
+
+                if (
+                  (event.key === 'Backspace' || event.key === 'Delete') &&
+                  !event.metaKey &&
+                  !event.ctrlKey &&
+                  !event.altKey
+                ) {
+                  const deletionEdit = getInlineAttachmentDeletionEdit({
+                    text: message,
+                    matches: composerInlineAttachmentMatches,
+                    selectionStart: event.currentTarget.selectionStart ?? 0,
+                    selectionEnd:
+                      event.currentTarget.selectionEnd ?? event.currentTarget.selectionStart ?? 0,
+                    direction: event.key === 'Backspace' ? 'backward' : 'forward',
+                  });
+
+                  if (deletionEdit) {
+                    event.preventDefault();
+                    applyMessageEdit(deletionEdit);
+                    return;
+                  }
+                }
+
+                if (isAttachmentMenuVisible && event.key === 'ArrowDown') {
+                  event.preventDefault();
+                  moveActiveAttachmentResult(1);
+                  return;
+                }
+
+                if (isAttachmentMenuVisible && event.key === 'ArrowUp') {
+                  event.preventDefault();
+                  moveActiveAttachmentResult(-1);
+                  return;
+                }
+
+                if (
+                  isAttachmentMenuVisible &&
+                  (event.key === 'Enter' || event.key === 'Tab') &&
+                  activeAttachmentSearchResult
+                ) {
+                  event.preventDefault();
+                  handleSelectAttachmentSearchResult(activeAttachmentSearchResult);
+                  return;
+                }
+
+                if (isAttachmentMenuVisible && event.key === 'Escape') {
+                  event.preventDefault();
+                  dismissAttachmentMenu();
+                  return;
+                }
+
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  void handleSubmit();
+                }
+              }}
+            />
+          </div>
         </div>
 
         {isVoiceRecordingSurfaceVisible ? (
@@ -3111,7 +3848,7 @@ export const Composer = ({
                       </button>
                       <button
                         type="button"
-                        className="no-drag inline-flex h-5 w-5 items-center justify-center rounded-md text-stone-400 opacity-0 transition-opacity hover:bg-rose-100 hover:text-rose-700 group-hover/item:opacity-100 group-data-[highlighted]:opacity-100"
+                        className="zeroade-danger-hover no-drag inline-flex h-5 w-5 items-center justify-center rounded-md text-stone-400 opacity-0 transition-opacity group-hover/item:opacity-100 group-data-[highlighted]:opacity-100"
                         title="Remove agent"
                         aria-label={`Remove ${entry.label}`}
                         onClick={(event) => {
@@ -3381,7 +4118,7 @@ export const Composer = ({
             </a>
 
             <div className="mt-4 space-y-3">
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Agent
                 <select
                   value={editingAgentPreset}
@@ -3405,7 +4142,7 @@ export const Composer = ({
 
               {editingAgentPreset === 'custom' ? (
                 <div>
-                  <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+                  <label className="block text-[13px] font-medium text-stone-600">
                     Custom Agent
                     <select
                       value={editingCustomAgentId}
@@ -3432,7 +4169,7 @@ export const Composer = ({
                 </div>
               ) : null}
 
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Command
                 <input
                   value={customCommand}
@@ -3442,7 +4179,7 @@ export const Composer = ({
                 />
               </label>
 
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Arguments
                 <input
                   value={customArgs}
@@ -3452,7 +4189,7 @@ export const Composer = ({
                 />
               </label>
 
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Working directory (optional)
                 <input
                   value={customCwd}
@@ -3462,7 +4199,7 @@ export const Composer = ({
                 />
               </label>
 
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-stone-500">
+              <label className="block text-[13px] font-medium text-stone-600">
                 Environment (optional)
                 <textarea
                   value={customEnv}
@@ -3495,7 +4232,7 @@ export const Composer = ({
       </Dialog>
 
       <Dialog open={isRegistryDialogOpen} onOpenChange={setIsRegistryDialogOpen}>
-        <DialogContent className="max-w-[980px] rounded-[28px] p-0">
+        <DialogContent className="max-w-[980px] rounded-[28px] border-0 shadow-none p-0">
           <div className="px-5 pb-5 pt-5">
             <h2 className="text-[24px] font-semibold leading-none tracking-[-0.015em] text-[var(--zeroade-text-strong,_#1c1917)]">
               Add from registry
@@ -3540,13 +4277,11 @@ export const Composer = ({
                       role={canAutoConfigure ? 'button' : undefined}
                       tabIndex={canAutoConfigure ? 0 : -1}
                       className={cn(
-                        'group relative flex h-full min-h-[132px] flex-col rounded-[28px] border px-5 py-4 text-left',
-                        'border-[var(--zeroade-border,_rgba(214,211,209,0.78))]',
-                        'bg-[var(--zeroade-bg-elev,_rgba(248,248,247,0.96))]',
-                        'text-[var(--zeroade-text,_#44403c)] shadow-[0_20px_44px_-34px_rgba(15,15,15,0.55)]',
-                        'transition-[border-color] duration-150',
+                        'group relative flex h-full min-h-[132px] flex-col rounded-[28px] px-5 py-4 text-left',
+                        'bg-[var(--zeroade-bg-panel,_rgba(248,248,247,0.82))]',
+                        'text-[var(--zeroade-text,_#44403c)] transition-colors duration-150',
                         canAutoConfigure &&
-                          'cursor-pointer focus-visible:outline-none focus-visible:border-[var(--zeroade-border-strong,_rgba(168,162,158,0.88))]',
+                          'cursor-pointer focus-visible:outline-none hover:bg-[var(--zeroade-bg-soft,_rgba(242,241,239,0.96))] focus-visible:bg-[var(--zeroade-bg-soft,_rgba(242,241,239,0.96))]',
                         !canAutoConfigure && 'cursor-not-allowed opacity-60',
                       )}
                       onClick={addAgent}
@@ -3609,13 +4344,70 @@ export const Composer = ({
   );
 };
 
-const getFileName = (path: string): string => {
-  const normalized = path.replaceAll('\\', '/');
-  const segments = normalized.split('/').filter(Boolean);
-  return segments.at(-1) ?? path;
+const ComposerInputMirror = ({
+  text,
+  matches,
+}: {
+  text: string;
+  matches: AttachmentMentionMatch[];
+}): JSX.Element => {
+  if (matches.length === 0) {
+    return <>{text}</>;
+  }
+
+  const segments: Array<string | JSX.Element> = [];
+  let cursor = 0;
+
+  matches.forEach((match, index) => {
+    if (match.start > cursor) {
+      segments.push(text.slice(cursor, match.start));
+    }
+
+    const hasTrailingSpace = text.charAt(match.end) === ' ';
+    const rawTextEnd = hasTrailingSpace ? match.end + 1 : match.end;
+    segments.push(
+      <ComposerInlineAttachmentMirrorChip
+        key={`${match.attachment.absolutePath}-${index}`}
+        attachment={match.attachment}
+        rawText={text.slice(match.start, rawTextEnd)}
+      />,
+    );
+
+    if (hasTrailingSpace) {
+      cursor = rawTextEnd;
+      return;
+    }
+
+    cursor = match.end;
+  });
+
+  if (cursor < text.length) {
+    segments.push(text.slice(cursor));
+  }
+
+  return <>{segments}</>;
 };
 
-const normalizePath = (value: string): string => value.replaceAll('\\', '/').replace(/\/+$/, '');
+const ComposerInlineAttachmentMirrorChip = ({
+  attachment,
+  rawText,
+}: {
+  attachment: AttachmentMentionMatch['attachment'];
+  rawText: string;
+}): JSX.Element => {
+  const label = toComposerAttachmentLabel(attachment);
+  const Icon = toFileIconComponent(label);
+
+  return (
+    <span className="relative inline-block align-baseline">
+      <span className="invisible whitespace-pre">{rawText}</span>
+      <span className="absolute inset-0 box-border flex items-center gap-[5px] overflow-hidden rounded-full border border-stone-200 bg-white px-1.5 py-0.5 text-[12px] font-medium text-stone-800">
+        <Icon className="h-3.5 w-3.5 shrink-0 text-stone-500" />
+        <span className="whitespace-nowrap">{label}</span>
+      </span>
+    </span>
+  );
+};
 
 const decodeFileUriPath = (value: string): string => {
   try {

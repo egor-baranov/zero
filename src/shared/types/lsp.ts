@@ -10,6 +10,10 @@ export interface LspRange {
 
 export type LspServerStatus = 'ready' | 'starting' | 'unsupported' | 'error';
 
+export type LspManagedServerSource = 'managed' | 'system' | 'development' | null;
+
+export type LspManagedServerInstallKind = 'npm' | 'download' | 'toolchain' | 'manual';
+
 export const LSP_SEMANTIC_TOKEN_TYPES = [
   'namespace',
   'type',
@@ -139,6 +143,36 @@ export interface LspCompletionItem {
 export interface LspCompletionResult {
   items: LspCompletionItem[];
   isIncomplete: boolean;
+}
+
+export interface LspServerCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  languages: string[];
+  installKind: LspManagedServerInstallKind;
+  source: LspManagedServerSource;
+  installed: boolean;
+  canInstall: boolean;
+  canDelete: boolean;
+  detail: string | null;
+}
+
+export interface LspListServersResult {
+  servers: LspServerCatalogEntry[];
+}
+
+export interface LspInstallServerRequest {
+  serverId: string;
+}
+
+export interface LspDeleteServerRequest {
+  serverId: string;
+}
+
+export interface LspServerMutationResult {
+  ok: boolean;
+  detail: string;
 }
 
 export type LspDiagnosticSeverity = 'error' | 'warning' | 'information' | 'hint';

@@ -35,6 +35,17 @@ const SUPPRESS_UPDATED_AT_AFTER_LOAD_MS = 5_000;
 const DEFAULT_PROMPT_CAPABILITIES: AcpPromptCapabilities = {
   audio: false,
 };
+const FILE_MUTATION_TOOL_KIND_TOKENS = [
+  'edit',
+  'write',
+  'create',
+  'delete',
+  'remove',
+  'rename',
+  'move',
+  'patch',
+  'replace',
+] as const;
 
 export type AcpAgentPreset = 'mock' | 'codex' | 'claude' | 'custom';
 
@@ -49,6 +60,16 @@ interface TimelineItemBase {
   id: string;
   createdAtMs: number;
   updatedAtMs: number;
+}
+
+export interface TimelineToolCallFileState {
+  exists: boolean;
+  content: string | null;
+}
+
+export interface TimelineToolCallLocationSnapshots {
+  before?: TimelineToolCallFileState;
+  after?: TimelineToolCallFileState;
 }
 
 export type TimelineItem =
@@ -77,6 +98,7 @@ export type TimelineItem =
       locations: string[];
       rawInput?: string;
       rawOutput?: string;
+      fileSnapshotsByLocation?: Record<string, TimelineToolCallLocationSnapshots>;
     });
 
 interface SessionTimeline {
@@ -463,6 +485,105 @@ const defaultTimeline = (): SessionTimeline => ({
   isPrompting: false,
 });
 
+const isFileMutationToolKind = (toolKind: string): boolean => {
+  const normalizedToolKind = toolKind.trim().toLowerCase();
+  return FILE_MUTATION_TOOL_KIND_TOKENS.some((token) => normalizedToolKind.includes(token));
+};
+
+const isMissingWorkspaceFileError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+  return (
+    message.includes('ENOENT') ||
+    normalized.includes('no such file') ||
+    normalized.includes('path is not a file')
+  );
+};
+
+const areFileSnapshotStatesEqual = (
+  left: TimelineToolCallFileState | undefined,
+  right: TimelineToolCallFileState | undefined,
+): boolean =>
+  left?.exists === right?.exists &&
+  left?.content === right?.content;
+
+const readWorkspaceFileSnapshot = async (
+  workspacePath: string,
+  filePath: string,
+): Promise<TimelineToolCallFileState> => {
+  try {
+    const result = await window.desktop.workspaceReadFile({
+      workspacePath,
+      filePath,
+    });
+
+    return {
+      exists: true,
+      content: result.content,
+    };
+  } catch (error) {
+    if (isMissingWorkspaceFileError(error)) {
+      return {
+        exists: false,
+        content: null,
+      };
+    }
+
+    throw error;
+  }
+};
+
+const withToolCallFileSnapshots = (
+  items: TimelineItem[],
+  toolCallId: string,
+  snapshotsByLocation: Record<string, TimelineToolCallFileState>,
+  phase: 'before' | 'after',
+): TimelineItem[] => {
+  const index = items.findIndex(
+    (item) => item.kind === 'tool-call' && item.toolCallId === toolCallId,
+  );
+  if (index < 0) {
+    return items;
+  }
+
+  const existing = items[index];
+  if (existing.kind !== 'tool-call') {
+    return items;
+  }
+
+  let changed = false;
+  const nextSnapshotsByLocation = { ...(existing.fileSnapshotsByLocation ?? {}) };
+
+  for (const [locationPath, snapshot] of Object.entries(snapshotsByLocation)) {
+    const existingEntry = nextSnapshotsByLocation[locationPath] ?? {};
+    const nextEntry =
+      phase === 'before'
+        ? { ...existingEntry, before: existingEntry.before ?? snapshot }
+        : { ...existingEntry, after: snapshot };
+
+    if (
+      areFileSnapshotStatesEqual(existingEntry.before, nextEntry.before) &&
+      areFileSnapshotStatesEqual(existingEntry.after, nextEntry.after)
+    ) {
+      continue;
+    }
+
+    nextSnapshotsByLocation[locationPath] = nextEntry;
+    changed = true;
+  }
+
+  if (!changed) {
+    return items;
+  }
+
+  const nextToolItem: TimelineItem = {
+    ...existing,
+    fileSnapshotsByLocation: nextSnapshotsByLocation,
+  };
+
+  return [...items.slice(0, index), nextToolItem, ...items.slice(index + 1)];
+};
+
 const nextId = (prefix: string): string =>
   `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -504,9 +625,6 @@ const matchesHistoryMessage = (incomingText: string, historyText: string): boole
     normalizedIncoming.startsWith(`${normalizedHistory} @`)
   );
 };
-
-const escapeRegExp = (value: string): string =>
-  value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const decodeFileUriPath = (value: string): string => {
   try {
@@ -613,32 +731,6 @@ const areAttachmentListsEqual = (
   }
 
   return true;
-};
-
-const stripInlineAttachmentMentions = (
-  text: string,
-  attachments: AcpPromptAttachment[] | undefined,
-): string => {
-  if (!attachments || attachments.length === 0 || text.length === 0) {
-    return text;
-  }
-
-  let strippedText = text;
-
-  for (const attachment of attachments) {
-    const candidates = [
-      attachment.displayPath?.trim(),
-      attachment.relativePath?.trim(),
-      attachment.absolutePath.replaceAll('\\', '/').split('/').filter(Boolean).at(-1),
-    ].filter((candidate): candidate is string => Boolean(candidate));
-
-    for (const candidate of candidates) {
-      const mentionPattern = new RegExp(`\\s*@${escapeRegExp(candidate)}`, 'gi');
-      strippedText = strippedText.replace(mentionPattern, '');
-    }
-  }
-
-  return strippedText;
 };
 
 const extractAttachmentFromUserChunk = (
@@ -778,10 +870,7 @@ const withMessageChunk = (
         normalizedAttachments,
       );
       const mergedHasAudio = Boolean(last.hasAudio || hasAudio);
-      const mergedText = stripInlineAttachmentMentions(
-        `${last.text}${text}`,
-        mergedAttachments,
-      );
+      const mergedText = `${last.text}${text}`;
 
       const mergedUserMessage: TimelineItem = {
         ...last,
@@ -807,7 +896,6 @@ const withMessageChunk = (
 
   if (role === 'user-message') {
     const mergedAttachments = mergePromptAttachments(undefined, normalizedAttachments);
-    const normalizedText = stripInlineAttachmentMentions(text, mergedAttachments);
 
     return [
       ...items,
@@ -816,7 +904,7 @@ const withMessageChunk = (
         id: nextId('user'),
         createdAtMs: nowMs,
         updatedAtMs: nowMs,
-        text: normalizedText,
+        text,
         attachments: mergedAttachments,
         hasAudio: hasAudio || undefined,
       },
@@ -878,6 +966,10 @@ const withToolCall = (
     rawOutput:
       stringifyPayload(update.rawOutput) ??
       (existing && existing.kind === 'tool-call' ? existing.rawOutput : undefined),
+    fileSnapshotsByLocation:
+      existing && existing.kind === 'tool-call'
+        ? existing.fileSnapshotsByLocation
+        : undefined,
   };
 
   if (index >= 0) {
@@ -1008,6 +1100,8 @@ export const useAcp = (): UseAcpResult => {
   const threadSessionMapRef = React.useRef<ThreadSessionMap>(threadSessionMap);
   const threadAttachmentHistoryMapRef =
     React.useRef<ThreadAttachmentHistoryMap>(threadAttachmentHistoryMap);
+  const sessionTimelinesRef = React.useRef<Record<string, SessionTimeline>>(sessionTimelines);
+  const sessionCwdByIdRef = React.useRef<Record<string, string>>({});
   const activeSessionIdRef = React.useRef<string | null>(activeSessionId);
   const attachmentReplayCursorBySessionIdRef =
     React.useRef<Record<string, number>>({});
@@ -1022,6 +1116,105 @@ export const useAcp = (): UseAcpResult => {
       setActiveSessionId(nextSessionId);
     },
     [],
+  );
+
+  const updateSessionTimelines = React.useCallback(
+    (
+      updater: (
+        previous: Record<string, SessionTimeline>,
+      ) => Record<string, SessionTimeline>,
+    ): void => {
+      setSessionTimelines((previous) => {
+        const next = updater(previous);
+        sessionTimelinesRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
+  const rememberSessionCwd = React.useCallback((sessionId: string, cwd: string): void => {
+    const normalizedSessionId = sessionId.trim();
+    const normalizedCwd = cwd.trim();
+    if (!normalizedSessionId || !normalizedCwd) {
+      return;
+    }
+
+    sessionCwdByIdRef.current[normalizedSessionId] = normalizedCwd;
+  }, []);
+
+  const captureToolCallSnapshots = React.useCallback(
+    async (
+      sessionId: string,
+      toolCallId: string,
+      phase: 'before' | 'after',
+      toolCallItem: Extract<TimelineItem, { kind: 'tool-call' }>,
+    ): Promise<void> => {
+      if (!isFileMutationToolKind(toolCallItem.toolKind) || toolCallItem.locations.length === 0) {
+        return;
+      }
+
+      const workspacePath = sessionCwdByIdRef.current[sessionId];
+      if (!workspacePath) {
+        return;
+      }
+
+      const entries = await Promise.all(
+        toolCallItem.locations.map(async (locationPath) => {
+          const normalizedLocationPath = locationPath.trim();
+          if (!normalizedLocationPath) {
+            return null;
+          }
+
+          try {
+            return [
+              normalizedLocationPath,
+              await readWorkspaceFileSnapshot(workspacePath, normalizedLocationPath),
+            ] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
+
+      const snapshotsByLocation = Object.fromEntries(
+        entries.filter(
+          (
+            entry,
+          ): entry is readonly [string, TimelineToolCallFileState] => entry !== null,
+        ),
+      );
+
+      if (Object.keys(snapshotsByLocation).length === 0) {
+        return;
+      }
+
+      updateSessionTimelines((previous) => {
+        const current = previous[sessionId];
+        if (!current) {
+          return previous;
+        }
+
+        const nextItems = withToolCallFileSnapshots(
+          current.items,
+          toolCallId,
+          snapshotsByLocation,
+          phase,
+        );
+        if (nextItems === current.items) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          [sessionId]: {
+            ...current,
+            items: nextItems,
+          },
+        };
+      });
+    },
+    [updateSessionTimelines],
   );
 
   React.useEffect(() => {
@@ -1045,6 +1238,10 @@ export const useAcp = (): UseAcpResult => {
   React.useEffect(() => {
     threadAttachmentHistoryMapRef.current = threadAttachmentHistoryMap;
   }, [threadAttachmentHistoryMap]);
+
+  React.useEffect(() => {
+    sessionTimelinesRef.current = sessionTimelines;
+  }, [sessionTimelines]);
 
   React.useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -1087,6 +1284,7 @@ export const useAcp = (): UseAcpResult => {
         hydratedSessionIdsRef.current.add(event.sessionId);
         let userAttachmentsFromHistoryOrChunk: AcpPromptAttachment[] | undefined;
         let userTextOverride: string | undefined;
+        let nextToolCallItemForSnapshots: Extract<TimelineItem, { kind: 'tool-call' }> | null = null;
 
         if (event.update.sessionUpdate === 'user_message_chunk') {
           const directAttachments = extractAttachmentFromUserChunk(event.update);
@@ -1176,7 +1374,20 @@ export const useAcp = (): UseAcpResult => {
           // Ignore session_info_update.updatedAt because some adapters bump it on focus/load.
           // Recency in UI is driven by actual message chunks only.
         }
-        setSessionTimelines((previous) => {
+        if (
+          event.update.sessionUpdate === 'tool_call' ||
+          event.update.sessionUpdate === 'tool_call_update'
+        ) {
+          const currentTimeline = sessionTimelinesRef.current[event.sessionId] ?? defaultTimeline();
+          nextToolCallItemForSnapshots =
+            withToolCall(currentTimeline.items, event.update).find(
+              (item) =>
+                item.kind === 'tool-call' &&
+                item.toolCallId === event.update.toolCallId,
+            ) ?? null;
+        }
+
+        updateSessionTimelines((previous) => {
           const current = previous[event.sessionId] ?? defaultTimeline();
           return {
             ...previous,
@@ -1198,6 +1409,31 @@ export const useAcp = (): UseAcpResult => {
             [event.sessionId]: updated,
           };
         });
+
+        if (
+          nextToolCallItemForSnapshots &&
+          event.update.sessionUpdate === 'tool_call'
+        ) {
+          void captureToolCallSnapshots(
+            event.sessionId,
+            nextToolCallItemForSnapshots.toolCallId,
+            'before',
+            nextToolCallItemForSnapshots,
+          );
+        }
+
+        if (
+          nextToolCallItemForSnapshots &&
+          event.update.sessionUpdate === 'tool_call_update' &&
+          (event.update.status === 'completed' || event.update.status === 'failed')
+        ) {
+          void captureToolCallSnapshots(
+            event.sessionId,
+            nextToolCallItemForSnapshots.toolCallId,
+            'after',
+            nextToolCallItemForSnapshots,
+          );
+        }
         return;
       }
 
@@ -1213,7 +1449,7 @@ export const useAcp = (): UseAcpResult => {
     });
 
     return unsubscribe;
-  }, []);
+  }, [captureToolCallSnapshots, updateSessionTimelines]);
 
   const resetRuntimeState = React.useCallback(() => {
     initializePromiseRef.current = null;
@@ -1223,6 +1459,7 @@ export const useAcp = (): UseAcpResult => {
     recencyEligibleSessionIdsRef.current.clear();
     suppressUpdatedAtUntilBySessionIdRef.current = {};
     attachmentReplayCursorBySessionIdRef.current = {};
+    sessionCwdByIdRef.current = {};
     setConnectionState('disconnected');
     setConnectionMessage(null);
     setLoadSessionSupported(false);
@@ -1390,7 +1627,7 @@ export const useAcp = (): UseAcpResult => {
   }, [getCurrentAgentConfig]);
 
   const ensureTimelineExists = React.useCallback((sessionId: string) => {
-    setSessionTimelines((previous) => {
+    updateSessionTimelines((previous) => {
       if (previous[sessionId]) {
         return previous;
       }
@@ -1400,7 +1637,7 @@ export const useAcp = (): UseAcpResult => {
         [sessionId]: defaultTimeline(),
       };
     });
-  }, []);
+  }, [updateSessionTimelines]);
 
   const ensureSessionForThread = React.useCallback(
     async (threadId: string, cwd: string): Promise<void> => {
@@ -1417,6 +1654,7 @@ export const useAcp = (): UseAcpResult => {
 
       if (!normalizedThreadId) {
         if (activeSessionIdRef.current) {
+          rememberSessionCwd(activeSessionIdRef.current, normalizedCwd);
           ensureTimelineExists(activeSessionIdRef.current);
           return;
         }
@@ -1438,6 +1676,7 @@ export const useAcp = (): UseAcpResult => {
         }
 
         hydratedSessionIdsRef.current.add(created.sessionId);
+        rememberSessionCwd(created.sessionId, normalizedCwd);
         recencyEligibleSessionIdsRef.current.delete(created.sessionId);
         if (created.controls) {
           setSessionControlsBySessionId((previous) => ({
@@ -1472,6 +1711,7 @@ export const useAcp = (): UseAcpResult => {
       if (existingSessionId) {
         if (loadSupported) {
           if (hydratedSessionIdsRef.current.has(existingSessionId)) {
+            rememberSessionCwd(existingSessionId, normalizedCwd);
             setActiveSessionIdSafely(existingSessionId);
             ensureTimelineExists(existingSessionId);
             return;
@@ -1492,6 +1732,7 @@ export const useAcp = (): UseAcpResult => {
 
             if (result.loaded) {
               hydratedSessionIdsRef.current.add(existingSessionId);
+              rememberSessionCwd(existingSessionId, normalizedCwd);
               if (result.controls) {
                 setSessionControlsBySessionId((previous) => ({
                   ...previous,
@@ -1524,7 +1765,9 @@ export const useAcp = (): UseAcpResult => {
           });
           hydratedSessionIdsRef.current.delete(existingSessionId);
           recencyEligibleSessionIdsRef.current.delete(existingSessionId);
+          delete sessionCwdByIdRef.current[existingSessionId];
         } else {
+          rememberSessionCwd(existingSessionId, normalizedCwd);
           setActiveSessionIdSafely(existingSessionId);
           ensureTimelineExists(existingSessionId);
           return;
@@ -1534,7 +1777,7 @@ export const useAcp = (): UseAcpResult => {
           setActiveSessionIdSafely(null);
         }
 
-        setSessionTimelines((previous) => {
+        updateSessionTimelines((previous) => {
           if (!(existingSessionId in previous)) {
             return previous;
           }
@@ -1598,6 +1841,7 @@ export const useAcp = (): UseAcpResult => {
       });
 
       hydratedSessionIdsRef.current.add(created.sessionId);
+      rememberSessionCwd(created.sessionId, normalizedCwd);
       recencyEligibleSessionIdsRef.current.delete(created.sessionId);
       if (created.controls) {
         setSessionControlsBySessionId((previous) => ({
@@ -1631,13 +1875,14 @@ export const useAcp = (): UseAcpResult => {
       getCurrentAgentConfig,
       getCurrentMcpServers,
       initialize,
+      rememberSessionCwd,
       setActiveSessionIdSafely,
       threadSessionMap,
     ],
   );
 
   const setSessionPrompting = React.useCallback((sessionId: string, isPrompting: boolean) => {
-    setSessionTimelines((previous) => {
+    updateSessionTimelines((previous) => {
       const current = previous[sessionId] ?? defaultTimeline();
       return {
         ...previous,
@@ -1647,7 +1892,7 @@ export const useAcp = (): UseAcpResult => {
         },
       };
     });
-  }, []);
+  }, [updateSessionTimelines]);
 
   const rememberThreadAttachmentHistory = React.useCallback(
     (sessionId: string, text: string, attachments: AcpPromptAttachment[]): void => {
@@ -1704,7 +1949,10 @@ export const useAcp = (): UseAcpResult => {
       const normalizedAudio = normalizePromptAudio(audio);
       const hasAudio = normalizedAudio !== null;
 
-      if (!sessionId || (trimmed.length === 0 && !hasAudio)) {
+      if (
+        !sessionId ||
+        (trimmed.length === 0 && normalizedAttachments.length === 0 && !hasAudio)
+      ) {
         return;
       }
 
@@ -1713,7 +1961,7 @@ export const useAcp = (): UseAcpResult => {
         rememberThreadAttachmentHistory(sessionId, trimmed, normalizedAttachments);
       }
 
-      setSessionTimelines((previous) => {
+      updateSessionTimelines((previous) => {
         const current = previous[sessionId] ?? defaultTimeline();
         return {
           ...previous,
@@ -1739,7 +1987,7 @@ export const useAcp = (): UseAcpResult => {
           audio: normalizedAudio,
         });
 
-        setSessionTimelines((previous) => {
+        updateSessionTimelines((previous) => {
           const current = previous[sessionId] ?? defaultTimeline();
           return {
             ...previous,
@@ -1945,12 +2193,13 @@ export const useAcp = (): UseAcpResult => {
       recencyEligibleSessionIdsRef.current.delete(sessionId);
       delete suppressUpdatedAtUntilBySessionIdRef.current[sessionId];
       delete attachmentReplayCursorBySessionIdRef.current[sessionId];
+      delete sessionCwdByIdRef.current[sessionId];
 
       if (activeSessionIdRef.current === sessionId) {
         setActiveSessionIdSafely(null);
       }
 
-      setSessionTimelines((previous) => {
+      updateSessionTimelines((previous) => {
         if (!(sessionId in previous)) {
           return previous;
         }

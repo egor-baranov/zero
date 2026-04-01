@@ -10,6 +10,8 @@ import {
   ListChecks,
   MessageSquare,
   Mic,
+  RotateCcw,
+  RotateCw,
 } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { coldarkCold, coldarkDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -17,6 +19,11 @@ import type { AcpPermissionRequestEvent, AcpPromptAttachment } from '@shared/typ
 import type { TimelineItem } from '@renderer/store/use-acp';
 import type { WorkspaceGitFileStat } from '@shared/types/workspace';
 import { cn } from '@renderer/lib/cn';
+import {
+  collectAttachmentMentionMatches,
+  collectMentionedAttachmentPaths,
+  toAttachmentMentionLabel,
+} from '@renderer/lib/attachment-mentions';
 import { toFileIconComponent, toLanguagePresentation } from '@renderer/lib/code-language-icons';
 import { InlineMonacoDiffEditor } from '@renderer/features/transcript/inline-monaco-diff-editor';
 import zeroLogo from '@renderer/assets/zero-logo.png';
@@ -104,6 +111,74 @@ interface ChangedFileEntry {
   previewPatch: string | null;
 }
 
+interface UnifiedDiffLine {
+  kind: 'context' | 'add' | 'remove';
+  text: string;
+}
+
+interface UnifiedDiffHunk {
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  lines: UnifiedDiffLine[];
+}
+
+interface UnifiedDiffFilePatch {
+  oldPath: string | null;
+  newPath: string | null;
+  hunks: UnifiedDiffHunk[];
+}
+
+interface ApplyPatchHunk {
+  lines: UnifiedDiffLine[];
+}
+
+type ApplyPatchFileOperation =
+  | {
+      kind: 'add';
+      path: string;
+      lines: string[];
+    }
+  | {
+      kind: 'update';
+      path: string;
+      nextPath: string | null;
+      hunks: ApplyPatchHunk[];
+    }
+  | {
+      kind: 'delete';
+      path: string;
+    };
+
+type ReversibleBlockMutation =
+  | {
+      kind: 'unified-diff';
+      locationPath: string;
+      patch: UnifiedDiffFilePatch;
+    }
+  | {
+      kind: 'apply-patch';
+      locationPath: string;
+      operation: Exclude<ApplyPatchFileOperation, { kind: 'delete' }>;
+    };
+
+interface FileSnapshotState {
+  exists: boolean;
+  content: string | null;
+}
+
+interface FileSnapshotMutation {
+  before: FileSnapshotState;
+  after: FileSnapshotState;
+}
+
+interface BlockFileMutation {
+  locationPath: string;
+  preciseMutations: ReversibleBlockMutation[] | null;
+  snapshot: FileSnapshotMutation | null;
+}
+
 interface InlineDiffPreviewState {
   isLoading: boolean;
   patch: string | null;
@@ -123,6 +198,7 @@ type TranscriptRenderBlock =
       finalMessage: AssistantTimelineItem | null;
       durationMs: number | null;
       changedFiles: ChangedFileEntry[];
+      fileMutations: BlockFileMutation[];
       isComplete: boolean;
     };
 
@@ -171,19 +247,8 @@ const IMAGE_ATTACHMENT_EXTENSIONS = new Set([
   'heif',
 ]);
 
-const toAttachmentLabel = (attachment: AcpPromptAttachment): string => {
-  if (attachment.displayPath?.trim()) {
-    return attachment.displayPath.trim();
-  }
-
-  if (attachment.relativePath?.trim()) {
-    return attachment.relativePath.trim();
-  }
-
-  const normalizedPath = attachment.absolutePath.replaceAll('\\', '/');
-  const segments = normalizedPath.split('/').filter(Boolean);
-  return segments.at(-1) ?? attachment.absolutePath;
-};
+const toAttachmentLabel = (attachment: AcpPromptAttachment): string =>
+  toAttachmentMentionLabel(attachment);
 
 const toAttachmentFileUrl = (absolutePath: string): string => {
   if (absolutePath.startsWith('file://')) {
@@ -326,6 +391,74 @@ const renderInlineMarkdown = (
 
   return result;
 };
+
+const renderInlineTextWithAttachmentMentions = (
+  text: string,
+  keyPrefix: string,
+  attachments: AcpPromptAttachment[] | undefined,
+  onOpenFile: ((path: string) => void) | undefined,
+): Array<string | JSX.Element> => {
+  if (!attachments || attachments.length === 0 || !onOpenFile) {
+    return [text];
+  }
+
+  const matches = collectAttachmentMentionMatches(text, attachments);
+  if (matches.length === 0) {
+    return [text];
+  }
+
+  const result: Array<string | JSX.Element> = [];
+  let cursor = 0;
+
+  matches.forEach((match, index) => {
+    if (match.start > cursor) {
+      result.push(text.slice(cursor, match.start));
+    }
+
+    const attachmentLabel = toAttachmentLabel(match.attachment);
+    const Icon = toFileIconComponent(attachmentLabel);
+
+    result.push(
+      <button
+        key={`${keyPrefix}-attachment-${index}`}
+        type="button"
+        className="no-drag mx-0.5 inline-flex max-w-full items-center gap-1 rounded-full border border-stone-300/80 bg-white px-2 py-0.5 align-baseline text-[12px] font-medium text-stone-700 transition-colors hover:bg-stone-100"
+        title={match.attachment.absolutePath}
+        onClick={() => onOpenFile(match.attachment.absolutePath)}
+      >
+        <Icon className="h-3.5 w-3.5 shrink-0 text-stone-500" />
+        <span className="truncate">{attachmentLabel}</span>
+      </button>,
+    );
+    cursor = match.end;
+  });
+
+  if (cursor < text.length) {
+    result.push(text.slice(cursor));
+  }
+
+  return result;
+};
+
+const renderInlineMarkdownWithAttachments = (
+  text: string,
+  keyPrefix: string,
+  onOpenLink: (url: string) => void,
+  attachments: AcpPromptAttachment[] | undefined,
+  onOpenFile: ((path: string) => void) | undefined,
+): Array<string | JSX.Element> =>
+  renderInlineMarkdown(text, keyPrefix, onOpenLink).flatMap((segment, index) => {
+    if (typeof segment !== 'string') {
+      return [segment];
+    }
+
+    return renderInlineTextWithAttachmentMentions(
+      segment,
+      `${keyPrefix}-segment-${index}`,
+      attachments,
+      onOpenFile,
+    );
+  });
 
 const parseMarkdownBlocks = (value: string): MarkdownBlock[] => {
   const lines = value.replace(/\r\n?/g, '\n').split('\n');
@@ -575,16 +708,26 @@ const MarkdownText = ({
   className,
   keyPrefix,
   onOpenLink,
+  attachments,
+  onOpenFile,
 }: {
   text: string;
   className?: string;
   keyPrefix: string;
   onOpenLink: (url: string) => void;
+  attachments?: AcpPromptAttachment[];
+  onOpenFile?: (path: string) => void;
 }): JSX.Element => {
   const blocks = React.useMemo(() => parseMarkdownBlocks(text), [text]);
 
   const renderHeading = (level: number, value: string, key: string): JSX.Element => {
-    const headingContent = renderInlineMarkdown(value, key, onOpenLink);
+    const headingContent = renderInlineMarkdownWithAttachments(
+      value,
+      key,
+      onOpenLink,
+      attachments,
+      onOpenFile,
+    );
     if (level === 1) {
       return (
         <h1 key={key} className="text-[1.3em] font-semibold leading-8 text-stone-900">
@@ -640,7 +783,13 @@ const MarkdownText = ({
             <ol key={`${keyPrefix}-ordered-${index}`} className="list-decimal space-y-1 pl-6">
               {block.items.map((item, itemIndex) => (
                 <li key={`${keyPrefix}-ordered-item-${index}-${itemIndex}`} className="leading-7">
-                  {renderInlineMarkdown(item, `${keyPrefix}-ordered-inline-${index}-${itemIndex}`, onOpenLink)}
+                  {renderInlineMarkdownWithAttachments(
+                    item,
+                    `${keyPrefix}-ordered-inline-${index}-${itemIndex}`,
+                    onOpenLink,
+                    attachments,
+                    onOpenFile,
+                  )}
                 </li>
               ))}
             </ol>
@@ -652,7 +801,13 @@ const MarkdownText = ({
             <ul key={`${keyPrefix}-unordered-${index}`} className="list-disc space-y-1 pl-6">
               {block.items.map((item, itemIndex) => (
                 <li key={`${keyPrefix}-unordered-item-${index}-${itemIndex}`} className="leading-7">
-                  {renderInlineMarkdown(item, `${keyPrefix}-unordered-inline-${index}-${itemIndex}`, onOpenLink)}
+                  {renderInlineMarkdownWithAttachments(
+                    item,
+                    `${keyPrefix}-unordered-inline-${index}-${itemIndex}`,
+                    onOpenLink,
+                    attachments,
+                    onOpenFile,
+                  )}
                 </li>
               ))}
             </ul>
@@ -661,7 +816,13 @@ const MarkdownText = ({
 
         return (
           <p key={`${keyPrefix}-paragraph-${index}`} className="whitespace-pre-wrap">
-            {renderInlineMarkdown(block.text, `${keyPrefix}-paragraph-inline-${index}`, onOpenLink)}
+            {renderInlineMarkdownWithAttachments(
+              block.text,
+              `${keyPrefix}-paragraph-inline-${index}`,
+              onOpenLink,
+              attachments,
+              onOpenFile,
+            )}
           </p>
         );
       })}
@@ -796,6 +957,10 @@ const isFinalAssistantMessage = (item: TimelineItem): item is AssistantTimelineI
   item.noticeKind !== 'agent-change' &&
   !isAgentChangedNotice(item.text);
 
+const isAgentChangedTimelineItem = (item: TimelineItem): item is AssistantTimelineItem =>
+  item.kind === 'assistant-message' &&
+  (item.noticeKind === 'agent-change' || isAgentChangedNotice(item.text));
+
 const normalizeLocationLabel = (path: string): string => {
   const normalized = path.replaceAll('\\', '/');
   if (normalized.startsWith('/workspace/')) {
@@ -921,6 +1086,23 @@ const buildSyntheticAddedFilePatch = (fileLabel: string, content: string): strin
   return [...header, ...lines.map((line) => `+${line}`)].join('\n');
 };
 
+const buildSyntheticDeletedFilePatch = (fileLabel: string, content: string): string => {
+  const lines = toTextLines(content);
+  const header = [
+    `diff --git a/${fileLabel} b/${fileLabel}`,
+    'deleted file mode 100644',
+    `--- a/${fileLabel}`,
+    '+++ /dev/null',
+    `@@ -1,${lines.length} +0,0 @@`,
+  ];
+
+  if (lines.length === 0) {
+    return header.join('\n');
+  }
+
+  return [...header, ...lines.map((line) => `-${line}`)].join('\n');
+};
+
 const buildSyntheticReplacementPatch = (
   fileLabel: string,
   previousValue: string,
@@ -940,6 +1122,913 @@ const buildSyntheticReplacementPatch = (
     ...previousLines.map((line) => `-${line}`),
     ...nextLines.map((line) => `+${line}`),
   ].join('\n');
+};
+
+const normalizePatchPath = (value: string): string | null => {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '/dev/null') {
+    return null;
+  }
+
+  if (trimmed.startsWith('a/') || trimmed.startsWith('b/')) {
+    return trimmed.slice(2);
+  }
+
+  return trimmed;
+};
+
+const parseUnifiedDiffHunkHeader = (
+  value: string,
+): { oldStart: number; oldCount: number; newStart: number; newCount: number } | null => {
+  const match = value.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    oldStart: Number.parseInt(match[1], 10),
+    oldCount: match[2] ? Number.parseInt(match[2], 10) : 1,
+    newStart: Number.parseInt(match[3], 10),
+    newCount: match[4] ? Number.parseInt(match[4], 10) : 1,
+  };
+};
+
+const parseUnifiedDiffSections = (patch: string): UnifiedDiffFilePatch[] => {
+  const lines = patch.replace(/\r\n?/g, '\n').split('\n');
+  const sections: UnifiedDiffFilePatch[] = [];
+  let index = 0;
+
+  const parseSection = (startIndex: number, hasDiffHeader: boolean): [UnifiedDiffFilePatch, number] | null => {
+    let currentIndex = startIndex;
+    let oldPath: string | null = null;
+    let newPath: string | null = null;
+
+    if (hasDiffHeader) {
+      const headerMatch = lines[currentIndex]?.match(/^diff --git a\/(.+) b\/(.+)$/);
+      if (headerMatch) {
+        oldPath = normalizePatchPath(`a/${headerMatch[1]}`);
+        newPath = normalizePatchPath(`b/${headerMatch[2]}`);
+      }
+      currentIndex += 1;
+    }
+
+    const hunks: UnifiedDiffHunk[] = [];
+
+    while (currentIndex < lines.length) {
+      const line = lines[currentIndex];
+      if (hasDiffHeader && line.startsWith('diff --git ')) {
+        break;
+      }
+
+      if (line.startsWith('rename from ')) {
+        oldPath = normalizePatchPath(line.slice('rename from '.length));
+        currentIndex += 1;
+        continue;
+      }
+
+      if (line.startsWith('rename to ')) {
+        newPath = normalizePatchPath(line.slice('rename to '.length));
+        currentIndex += 1;
+        continue;
+      }
+
+      if (line.startsWith('--- ')) {
+        oldPath = normalizePatchPath(line.slice(4));
+        currentIndex += 1;
+        continue;
+      }
+
+      if (line.startsWith('+++ ')) {
+        newPath = normalizePatchPath(line.slice(4));
+        currentIndex += 1;
+        continue;
+      }
+
+      const hunkHeader = parseUnifiedDiffHunkHeader(line);
+      if (!hunkHeader) {
+        currentIndex += 1;
+        continue;
+      }
+
+      currentIndex += 1;
+      const hunkLines: UnifiedDiffLine[] = [];
+
+      while (currentIndex < lines.length) {
+        const hunkLine = lines[currentIndex];
+        if (
+          (hasDiffHeader && hunkLine.startsWith('diff --git ')) ||
+          hunkLine.startsWith('@@ ')
+        ) {
+          break;
+        }
+
+        if (hunkLine === '\\ No newline at end of file') {
+          currentIndex += 1;
+          continue;
+        }
+
+        const marker = hunkLine.charAt(0);
+        if (marker === ' ' || marker === '+' || marker === '-') {
+          hunkLines.push({
+            kind:
+              marker === ' '
+                ? 'context'
+                : marker === '+'
+                  ? 'add'
+                  : 'remove',
+            text: hunkLine.slice(1),
+          });
+          currentIndex += 1;
+          continue;
+        }
+
+        break;
+      }
+
+      hunks.push({
+        ...hunkHeader,
+        lines: hunkLines,
+      });
+    }
+
+    if (!oldPath && !newPath) {
+      return null;
+    }
+
+    return [
+      {
+        oldPath,
+        newPath,
+        hunks,
+      },
+      currentIndex,
+    ];
+  };
+
+  while (index < lines.length) {
+    if (lines[index].startsWith('diff --git ')) {
+      const parsed = parseSection(index, true);
+      if (parsed) {
+        sections.push(parsed[0]);
+        index = parsed[1];
+        continue;
+      }
+    } else if (lines[index].startsWith('--- ')) {
+      const parsed = parseSection(index, false);
+      if (parsed) {
+        sections.push(parsed[0]);
+        index = parsed[1];
+        continue;
+      }
+    }
+
+    index += 1;
+  }
+
+  return sections;
+};
+
+const parseApplyPatchOperations = (patch: string): ApplyPatchFileOperation[] => {
+  const lines = patch.replace(/\r\n?/g, '\n').split('\n');
+  if (lines[0] !== '*** Begin Patch') {
+    return [];
+  }
+
+  const operations: ApplyPatchFileOperation[] = [];
+  let index = 1;
+
+  const isOperationBoundary = (value: string): boolean =>
+    value.startsWith('*** Add File: ') ||
+    value.startsWith('*** Delete File: ') ||
+    value.startsWith('*** Update File: ') ||
+    value === '*** End Patch';
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line === '*** End Patch') {
+      break;
+    }
+
+    if (line.startsWith('*** Add File: ')) {
+      const path = line.slice('*** Add File: '.length).trim();
+      index += 1;
+      const addedLines: string[] = [];
+
+      while (index < lines.length && !isOperationBoundary(lines[index])) {
+        if (lines[index].startsWith('+')) {
+          addedLines.push(lines[index].slice(1));
+        }
+        index += 1;
+      }
+
+      operations.push({
+        kind: 'add',
+        path,
+        lines: addedLines,
+      });
+      continue;
+    }
+
+    if (line.startsWith('*** Delete File: ')) {
+      operations.push({
+        kind: 'delete',
+        path: line.slice('*** Delete File: '.length).trim(),
+      });
+      index += 1;
+      continue;
+    }
+
+    if (line.startsWith('*** Update File: ')) {
+      const path = line.slice('*** Update File: '.length).trim();
+      index += 1;
+      let nextPath: string | null = null;
+
+      if (index < lines.length && lines[index].startsWith('*** Move to: ')) {
+        nextPath = lines[index].slice('*** Move to: '.length).trim();
+        index += 1;
+      }
+
+      const hunks: ApplyPatchHunk[] = [];
+      while (index < lines.length && !isOperationBoundary(lines[index])) {
+        if (lines[index].startsWith('@@')) {
+          index += 1;
+          const hunkLines: UnifiedDiffLine[] = [];
+
+          while (index < lines.length) {
+            const hunkLine = lines[index];
+            if (hunkLine === '*** End of File') {
+              index += 1;
+              continue;
+            }
+            if (hunkLine.startsWith('@@') || isOperationBoundary(hunkLine)) {
+              break;
+            }
+
+            const marker = hunkLine.charAt(0);
+            if (marker === ' ' || marker === '+' || marker === '-') {
+              hunkLines.push({
+                kind:
+                  marker === ' '
+                    ? 'context'
+                    : marker === '+'
+                      ? 'add'
+                      : 'remove',
+                text: hunkLine.slice(1),
+              });
+            }
+            index += 1;
+          }
+
+          hunks.push({ lines: hunkLines });
+          continue;
+        }
+
+        if (lines[index] === '*** End of File') {
+          index += 1;
+          continue;
+        }
+
+        index += 1;
+      }
+
+      operations.push({
+        kind: 'update',
+        path,
+        nextPath,
+        hunks,
+      });
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return operations;
+};
+
+const matchesPatchLocation = (
+  oldPath: string | null,
+  newPath: string | null,
+  locationPath: string,
+): boolean =>
+  [oldPath, newPath].some((value) => value !== null && matchesPayloadLocation(value, locationPath));
+
+const findUnifiedDiffPatchForLocation = (
+  patch: string,
+  locationPath: string,
+): UnifiedDiffFilePatch | null =>
+  parseUnifiedDiffSections(patch).find((entry) =>
+    matchesPatchLocation(entry.oldPath, entry.newPath, locationPath),
+  ) ?? null;
+
+const findApplyPatchOperationForLocation = (
+  patch: string,
+  locationPath: string,
+): ApplyPatchFileOperation | null =>
+  parseApplyPatchOperations(patch).find((entry) =>
+    entry.kind === 'update'
+      ? matchesPatchLocation(entry.path, entry.nextPath, locationPath)
+      : matchesPatchLocation(entry.path, null, locationPath),
+  ) ?? null;
+
+const findLineSequenceIndex = (
+  source: string[],
+  target: string[],
+  startIndex: number,
+): number => {
+  if (target.length === 0) {
+    return startIndex;
+  }
+
+  for (let index = startIndex; index <= source.length - target.length; index += 1) {
+    let matches = true;
+    for (let offset = 0; offset < target.length; offset += 1) {
+      if (source[index + offset] !== target[offset]) {
+        matches = false;
+        break;
+      }
+    }
+
+    if (matches) {
+      return index;
+    }
+  }
+
+  return -1;
+};
+
+const applyUnifiedDiffToContent = (
+  content: string,
+  patch: UnifiedDiffFilePatch,
+  reverse: boolean,
+): string => {
+  const currentLines = toTextLines(content);
+  const nextLines: string[] = [];
+  let cursor = 0;
+
+  for (const hunk of patch.hunks) {
+    const hunkStart = Math.max(0, (reverse ? hunk.newStart : hunk.oldStart) - 1);
+    if (hunkStart < cursor) {
+      throw new Error('Patch hunks overlap in an unsupported way.');
+    }
+
+    nextLines.push(...currentLines.slice(cursor, hunkStart));
+    let hunkCursor = hunkStart;
+
+    for (const line of hunk.lines) {
+      if (line.kind === 'context') {
+        if (currentLines[hunkCursor] !== line.text) {
+          throw new Error('Current file contents do not match the expected patch context.');
+        }
+
+        nextLines.push(line.text);
+        hunkCursor += 1;
+        continue;
+      }
+
+      if (line.kind === 'remove') {
+        if (reverse) {
+          nextLines.push(line.text);
+          continue;
+        }
+
+        if (currentLines[hunkCursor] !== line.text) {
+          throw new Error('Current file contents do not match the expected removed lines.');
+        }
+
+        hunkCursor += 1;
+        continue;
+      }
+
+      if (reverse) {
+        if (currentLines[hunkCursor] !== line.text) {
+          throw new Error('Current file contents do not match the expected added lines.');
+        }
+
+        hunkCursor += 1;
+        continue;
+      }
+
+      nextLines.push(line.text);
+    }
+
+    cursor = hunkCursor;
+  }
+
+  nextLines.push(...currentLines.slice(cursor));
+  return nextLines.join('\n');
+};
+
+const applyStructuredPatchToContent = (
+  content: string,
+  operation: Extract<ApplyPatchFileOperation, { kind: 'update' }>,
+  reverse: boolean,
+): string => {
+  if (operation.hunks.length === 0) {
+    return content;
+  }
+
+  const currentLines = toTextLines(content);
+  const nextLines: string[] = [];
+  let cursor = 0;
+
+  for (const hunk of operation.hunks) {
+    const sourceLines = hunk.lines
+      .filter((line) => line.kind === 'context' || line.kind === (reverse ? 'add' : 'remove'))
+      .map((line) => line.text);
+    const targetLines = hunk.lines
+      .filter((line) => line.kind === 'context' || line.kind === (reverse ? 'remove' : 'add'))
+      .map((line) => line.text);
+    const matchIndex = findLineSequenceIndex(currentLines, sourceLines, cursor);
+
+    if (matchIndex < 0) {
+      throw new Error('Current file contents do not match the expected patch context.');
+    }
+
+    nextLines.push(...currentLines.slice(cursor, matchIndex));
+    nextLines.push(...targetLines);
+    cursor = matchIndex + sourceLines.length;
+  }
+
+  nextLines.push(...currentLines.slice(cursor));
+  return nextLines.join('\n');
+};
+
+const readWorkspaceFileState = async (
+  workspacePath: string,
+  filePath: string,
+): Promise<{ exists: boolean; content: string | null }> => {
+  try {
+    const result = await window.desktop.workspaceReadFile({
+      workspacePath,
+      filePath,
+    });
+
+    return {
+      exists: true,
+      content: result.content,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      message.includes('ENOENT') ||
+      message.toLowerCase().includes('no such file') ||
+      message.toLowerCase().includes('path is not a file')
+    ) {
+      return {
+        exists: false,
+        content: null,
+      };
+    }
+
+    throw error;
+  }
+};
+
+const writeWorkspaceFileContent = async (
+  workspacePath: string,
+  filePath: string,
+  content: string,
+): Promise<void> => {
+  await window.desktop.workspaceWriteFile({
+    workspacePath,
+    filePath,
+    content,
+  });
+};
+
+const deleteWorkspaceFile = async (
+  workspacePath: string,
+  filePath: string,
+): Promise<void> => {
+  await window.desktop.workspaceDeleteEntry({
+    workspacePath,
+    targetPath: filePath,
+  });
+};
+
+interface PlannedWorkspaceAction {
+  kind: 'write' | 'delete';
+  workspacePath: string;
+  filePath: string;
+  content?: string;
+}
+
+interface WorkspaceMutationPlanState {
+  files: Map<string, { exists: boolean; content: string | null }>;
+  actions: PlannedWorkspaceAction[];
+}
+
+const getWorkspaceMutationPlanKey = (workspacePath: string, filePath: string): string =>
+  `${workspacePath}::${filePath}`;
+
+const cloneWorkspaceMutationPlanState = (
+  state: WorkspaceMutationPlanState,
+): WorkspaceMutationPlanState => ({
+  files: new Map(
+    Array.from(state.files.entries(), ([key, value]) => [
+      key,
+      {
+        exists: value.exists,
+        content: value.content,
+      },
+    ]),
+  ),
+  actions: [...state.actions],
+});
+
+const readPlannedWorkspaceFileState = async (
+  state: WorkspaceMutationPlanState,
+  workspacePath: string,
+  filePath: string,
+): Promise<{ exists: boolean; content: string | null }> => {
+  const key = getWorkspaceMutationPlanKey(workspacePath, filePath);
+  const cached = state.files.get(key);
+  if (cached) {
+    return cached;
+  }
+
+  const nextState = await readWorkspaceFileState(workspacePath, filePath);
+  state.files.set(key, nextState);
+  return nextState;
+};
+
+const stageWorkspaceFileContent = (
+  state: WorkspaceMutationPlanState,
+  workspacePath: string,
+  filePath: string,
+  content: string,
+): void => {
+  state.files.set(getWorkspaceMutationPlanKey(workspacePath, filePath), {
+    exists: true,
+    content,
+  });
+  state.actions.push({
+    kind: 'write',
+    workspacePath,
+    filePath,
+    content,
+  });
+};
+
+const stageWorkspaceDelete = (
+  state: WorkspaceMutationPlanState,
+  workspacePath: string,
+  filePath: string,
+): void => {
+  state.files.set(getWorkspaceMutationPlanKey(workspacePath, filePath), {
+    exists: false,
+    content: null,
+  });
+  state.actions.push({
+    kind: 'delete',
+    workspacePath,
+    filePath,
+  });
+};
+
+const commitWorkspaceMutationPlan = async (
+  state: WorkspaceMutationPlanState,
+): Promise<void> => {
+  for (const action of state.actions) {
+    if (action.kind === 'write') {
+      await writeWorkspaceFileContent(
+        action.workspacePath,
+        action.filePath,
+        action.content ?? '',
+      );
+      continue;
+    }
+
+    await deleteWorkspaceFile(action.workspacePath, action.filePath);
+  }
+};
+
+const stageUnifiedDiffMutation = async (
+  mutation: Extract<ReversibleBlockMutation, { kind: 'unified-diff' }>,
+  direction: 'undo' | 'redo',
+  workspacePath: string,
+  state: WorkspaceMutationPlanState,
+): Promise<void> => {
+  const beforePath = mutation.patch.oldPath;
+  const afterPath = mutation.patch.newPath;
+  const readPath = direction === 'redo' ? beforePath : afterPath;
+  const writePath = direction === 'redo' ? afterPath : beforePath;
+  const removePath = direction === 'redo' ? beforePath : afterPath;
+  const shouldDeleteWrittenPath = (direction === 'redo' && afterPath === null) || (direction === 'undo' && beforePath === null);
+
+  if (beforePath && afterPath && beforePath !== afterPath) {
+    const collisionPath = direction === 'redo' ? afterPath : beforePath;
+    const collisionState = await readPlannedWorkspaceFileState(
+      state,
+      workspacePath,
+      collisionPath,
+    );
+    if (collisionState.exists) {
+      throw new Error(`Cannot ${direction} because ${normalizeLocationLabel(collisionPath)} already exists.`);
+    }
+  }
+
+  const baseState =
+    readPath === null
+      ? { exists: false, content: '' }
+      : await readPlannedWorkspaceFileState(state, workspacePath, readPath);
+
+  if (readPath !== null && !baseState.exists) {
+    throw new Error(`Cannot ${direction} because ${normalizeLocationLabel(readPath)} is missing.`);
+  }
+
+  const nextContent = applyUnifiedDiffToContent(baseState.content ?? '', mutation.patch, direction === 'undo');
+
+  if (writePath !== null && !shouldDeleteWrittenPath) {
+    stageWorkspaceFileContent(state, workspacePath, writePath, nextContent);
+  }
+
+  if (removePath !== null && (shouldDeleteWrittenPath || (beforePath && afterPath && beforePath !== afterPath))) {
+    stageWorkspaceDelete(state, workspacePath, removePath);
+  }
+};
+
+const stageApplyPatchMutation = async (
+  mutation: Extract<ReversibleBlockMutation, { kind: 'apply-patch' }>,
+  direction: 'undo' | 'redo',
+  workspacePath: string,
+  state: WorkspaceMutationPlanState,
+): Promise<void> => {
+  if (mutation.operation.kind === 'add') {
+    const currentState = await readPlannedWorkspaceFileState(
+      state,
+      workspacePath,
+      mutation.operation.path,
+    );
+    const addedContent = mutation.operation.lines.join('\n');
+
+    if (direction === 'undo') {
+      if (!currentState.exists) {
+        throw new Error(`Cannot undo because ${normalizeLocationLabel(mutation.operation.path)} is missing.`);
+      }
+
+      if ((currentState.content ?? '') !== addedContent) {
+        throw new Error('Cannot undo because the current file no longer matches the agent-added content.');
+      }
+
+      stageWorkspaceDelete(state, workspacePath, mutation.operation.path);
+      return;
+    }
+
+    if (currentState.exists) {
+      throw new Error(`Cannot redo because ${normalizeLocationLabel(mutation.operation.path)} already exists.`);
+    }
+
+    stageWorkspaceFileContent(
+      state,
+      workspacePath,
+      mutation.operation.path,
+      addedContent,
+    );
+    return;
+  }
+
+  const beforePath = mutation.operation.path;
+  const afterPath = mutation.operation.nextPath ?? mutation.operation.path;
+
+  if (beforePath !== afterPath) {
+    const collisionPath = direction === 'redo' ? afterPath : beforePath;
+    const collisionState = await readPlannedWorkspaceFileState(
+      state,
+      workspacePath,
+      collisionPath,
+    );
+    if (collisionState.exists) {
+      throw new Error(`Cannot ${direction} because ${normalizeLocationLabel(collisionPath)} already exists.`);
+    }
+  }
+
+  const readPath = direction === 'redo' ? beforePath : afterPath;
+  const baseState = await readPlannedWorkspaceFileState(state, workspacePath, readPath);
+  if (!baseState.exists) {
+    throw new Error(`Cannot ${direction} because ${normalizeLocationLabel(readPath)} is missing.`);
+  }
+
+  const nextContent = applyStructuredPatchToContent(
+    baseState.content ?? '',
+    mutation.operation,
+    direction === 'undo',
+  );
+  const writePath = direction === 'redo' ? afterPath : beforePath;
+
+  stageWorkspaceFileContent(state, workspacePath, writePath, nextContent);
+
+  if (beforePath !== afterPath) {
+    stageWorkspaceDelete(state, workspacePath, readPath);
+  }
+};
+
+const stagePreciseMutationSequence = async (
+  mutations: ReversibleBlockMutation[],
+  direction: 'undo' | 'redo',
+  workspacePath: string,
+  state: WorkspaceMutationPlanState,
+): Promise<void> => {
+  const orderedMutations = direction === 'undo' ? [...mutations].reverse() : mutations;
+
+  for (const mutation of orderedMutations) {
+    if (mutation.kind === 'unified-diff') {
+      await stageUnifiedDiffMutation(mutation, direction, workspacePath, state);
+    } else {
+      await stageApplyPatchMutation(mutation, direction, workspacePath, state);
+    }
+  }
+};
+
+const deriveSnapshotFromWorkspaceDiffResult = (
+  locationPath: string,
+  result: {
+    patch: string;
+    hasDiff: boolean;
+    originalContent: string;
+    modifiedContent: string;
+  },
+): FileSnapshotMutation | null => {
+  if (result.patch.trim()) {
+    const filePatch = findUnifiedDiffPatchForLocation(result.patch, locationPath);
+    if (filePatch) {
+      return {
+        before: {
+          exists: filePatch.oldPath !== null,
+          content: filePatch.oldPath !== null ? result.originalContent : null,
+        },
+        after: {
+          exists: filePatch.newPath !== null,
+          content: filePatch.newPath !== null ? result.modifiedContent : null,
+        },
+      };
+    }
+  }
+
+  if (!result.hasDiff) {
+    return null;
+  }
+
+  return {
+    before: {
+      exists: true,
+      content: result.originalContent,
+    },
+    after: {
+      exists: true,
+      content: result.modifiedContent,
+    },
+  };
+};
+
+const stageSnapshotMutation = async (
+  locationPath: string,
+  snapshot: FileSnapshotMutation,
+  direction: 'undo' | 'redo',
+  workspacePath: string,
+  state: WorkspaceMutationPlanState,
+): Promise<void> => {
+  const currentState = await readPlannedWorkspaceFileState(state, workspacePath, locationPath);
+  const expectedState = direction === 'undo' ? snapshot.after : snapshot.before;
+  const targetState = direction === 'undo' ? snapshot.before : snapshot.after;
+
+  if (currentState.exists !== expectedState.exists) {
+    throw new Error(
+      `Cannot ${direction} because ${normalizeLocationLabel(locationPath)} no longer matches the expected file state.`,
+    );
+  }
+
+  if (
+    expectedState.exists &&
+    (currentState.content ?? '') !== (expectedState.content ?? '')
+  ) {
+    throw new Error(
+      `Cannot ${direction} because ${normalizeLocationLabel(locationPath)} no longer matches the expected file contents.`,
+    );
+  }
+
+  if (!targetState.exists) {
+    if (currentState.exists) {
+      stageWorkspaceDelete(state, workspacePath, locationPath);
+    }
+    return;
+  }
+
+  stageWorkspaceFileContent(state, workspacePath, locationPath, targetState.content ?? '');
+};
+
+const resolveWorkspaceSnapshotMutation = async (
+  locationPath: string,
+  workspacePath: string,
+): Promise<FileSnapshotMutation | null> => {
+  const result = await window.desktop.workspaceDiffFile({
+    workspacePath,
+    filePath: locationPath,
+  });
+
+  return deriveSnapshotFromWorkspaceDiffResult(locationPath, result);
+};
+
+const executeBlockFileMutationPlan = async (
+  fileMutations: BlockFileMutation[],
+  snapshotsByPath: Record<string, FileSnapshotMutation>,
+  direction: 'undo' | 'redo',
+  workspacePath: string,
+  projectPaths: string[],
+): Promise<Record<string, FileSnapshotMutation>> => {
+  const orderedFileMutations = direction === 'undo' ? [...fileMutations].reverse() : fileMutations;
+  let planState: WorkspaceMutationPlanState = {
+    files: new Map(),
+    actions: [],
+  };
+  const resolvedSnapshotsByPath = { ...snapshotsByPath };
+
+  for (const fileMutation of orderedFileMutations) {
+    const candidates = resolveWorkspacePathCandidatesForFile(
+      fileMutation.locationPath,
+      workspacePath,
+      projectPaths,
+    );
+    let lastError: unknown = null;
+    let nextPlanState: WorkspaceMutationPlanState | null = null;
+
+    for (const candidate of candidates) {
+      const trialPlanState = cloneWorkspaceMutationPlanState(planState);
+
+      try {
+        if (!fileMutation.preciseMutations || fileMutation.preciseMutations.length === 0) {
+          throw new Error('No precise patch replay is available for this file.');
+        }
+
+        await stagePreciseMutationSequence(
+          fileMutation.preciseMutations,
+          direction,
+          candidate,
+          trialPlanState,
+        );
+
+        nextPlanState = trialPlanState;
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+
+        try {
+          let resolvedSnapshot =
+            resolvedSnapshotsByPath[fileMutation.locationPath] ?? fileMutation.snapshot;
+
+          if (!resolvedSnapshot) {
+            if (direction === 'redo') {
+              throw new Error(
+                `Cannot redo because ${normalizeLocationLabel(fileMutation.locationPath)} has no captured snapshot to restore.`,
+              );
+            }
+
+            resolvedSnapshot = await resolveWorkspaceSnapshotMutation(
+              fileMutation.locationPath,
+              candidate,
+            );
+          }
+
+          if (!resolvedSnapshot) {
+            throw new Error(
+              `Cannot determine the previous version of ${normalizeLocationLabel(fileMutation.locationPath)}.`,
+            );
+          }
+
+          await stageSnapshotMutation(
+            fileMutation.locationPath,
+            resolvedSnapshot,
+            direction,
+            candidate,
+            trialPlanState,
+          );
+
+          nextPlanState = trialPlanState;
+          lastError = null;
+          resolvedSnapshotsByPath[fileMutation.locationPath] = resolvedSnapshot;
+          break;
+        } catch (snapshotError) {
+          lastError = snapshotError ?? error;
+        }
+      }
+    }
+
+    if (nextPlanState) {
+      planState = nextPlanState;
+      continue;
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+
+    throw new Error(`Unable to ${direction} this block.`);
+  }
+
+  await commitWorkspaceMutationPlan(planState);
+  return resolvedSnapshotsByPath;
 };
 
 const CHANGE_STATS_PATH_KEYS = [
@@ -1015,6 +2104,14 @@ const isWriteLikeToolKind = (toolKind: string): boolean => {
   return normalizedToolKind.includes('write') || normalizedToolKind.includes('create');
 };
 
+const isCreateLikeToolKind = (toolKind: string): boolean =>
+  toolKind.trim().toLowerCase().includes('create');
+
+const isDeleteLikeToolKind = (toolKind: string): boolean => {
+  const normalizedToolKind = toolKind.trim().toLowerCase();
+  return normalizedToolKind.includes('delete') || normalizedToolKind.includes('remove');
+};
+
 const looksLikePatchText = (value: string): boolean =>
   value.includes('*** Begin Patch') ||
   value.includes('diff --git') ||
@@ -1068,6 +2165,17 @@ const deriveChangeStatsFromPayload = (
         return {
           additions: countTextLines(value[key] as string),
           deletions: 0,
+        };
+      }
+    }
+  }
+
+  if (isDeleteLikeToolKind(toolKind)) {
+    for (const key of CHANGE_STATS_CONTENT_KEYS) {
+      if (typeof value[key] === 'string') {
+        return {
+          additions: 0,
+          deletions: countTextLines(value[key] as string),
         };
       }
     }
@@ -1134,8 +2242,90 @@ const deriveChangePreviewFromPayload = (
     }
   }
 
+  if (isDeleteLikeToolKind(toolKind)) {
+    for (const key of CHANGE_STATS_CONTENT_KEYS) {
+      if (typeof value[key] === 'string') {
+        return buildSyntheticDeletedFilePatch(fileLabel, value[key] as string);
+      }
+    }
+  }
+
   for (const entry of Object.values(value)) {
     const preview = deriveChangePreviewFromPayload(entry, locationPath, toolKind);
+    if (preview) {
+      return preview;
+    }
+  }
+
+  return null;
+};
+
+const derivePreciseChangePreviewFromPayload = (
+  value: unknown,
+  locationPath: string,
+  toolKind: string,
+): string | null => {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const preview = derivePreciseChangePreviewFromPayload(entry, locationPath, toolKind);
+      if (preview) {
+        return preview;
+      }
+    }
+    return null;
+  }
+
+  if (!isStructuredPayload(value)) {
+    return null;
+  }
+
+  const scopedPathCandidate = CHANGE_STATS_PATH_KEYS.find(
+    (key) => typeof value[key] === 'string',
+  );
+  if (
+    scopedPathCandidate &&
+    typeof value[scopedPathCandidate] === 'string' &&
+    !matchesPayloadLocation(value[scopedPathCandidate] as string, locationPath)
+  ) {
+    return null;
+  }
+
+  const fileLabel = normalizeLocationLabel(locationPath);
+
+  for (const [oldKey, newKey] of CHANGE_STATS_STRING_PAIRS) {
+    if (typeof value[oldKey] === 'string' && typeof value[newKey] === 'string') {
+      return buildSyntheticReplacementPatch(
+        fileLabel,
+        value[oldKey] as string,
+        value[newKey] as string,
+      );
+    }
+  }
+
+  for (const key of CHANGE_STATS_PATCH_KEYS) {
+    if (typeof value[key] === 'string' && looksLikePatchText(value[key] as string)) {
+      return value[key] as string;
+    }
+  }
+
+  if (isCreateLikeToolKind(toolKind)) {
+    for (const key of CHANGE_STATS_CONTENT_KEYS) {
+      if (typeof value[key] === 'string') {
+        return buildSyntheticAddedFilePatch(fileLabel, value[key] as string);
+      }
+    }
+  }
+
+  if (isDeleteLikeToolKind(toolKind)) {
+    for (const key of CHANGE_STATS_CONTENT_KEYS) {
+      if (typeof value[key] === 'string') {
+        return buildSyntheticDeletedFilePatch(fileLabel, value[key] as string);
+      }
+    }
+  }
+
+  for (const entry of Object.values(value)) {
+    const preview = derivePreciseChangePreviewFromPayload(entry, locationPath, toolKind);
     if (preview) {
       return preview;
     }
@@ -1167,6 +2357,19 @@ const deriveToolCallPreviewPatch = (
   return (
     deriveChangePreviewFromPayload(inputPayload, locationPath, item.toolKind) ??
     deriveChangePreviewFromPayload(outputPayload, locationPath, item.toolKind)
+  );
+};
+
+const derivePreciseToolCallPreviewPatch = (
+  item: Extract<TimelineItem, { kind: 'tool-call' }>,
+  locationPath: string,
+): string | null => {
+  const inputPayload = parseRawPayload(item.rawInput);
+  const outputPayload = parseRawPayload(item.rawOutput);
+
+  return (
+    derivePreciseChangePreviewFromPayload(inputPayload, locationPath, item.toolKind) ??
+    derivePreciseChangePreviewFromPayload(outputPayload, locationPath, item.toolKind)
   );
 };
 
@@ -1245,6 +2448,318 @@ const collectChangedFiles = (
   }
 
   return Array.from(fileMap.values());
+};
+
+const deriveSnapshotFromPreviewPatch = (
+  previewPatch: string,
+  locationPath: string,
+): FileSnapshotMutation | null => {
+  if (!previewPatch.trim()) {
+    return null;
+  }
+
+  if (previewPatch.includes('*** Begin Patch')) {
+    const operation = findApplyPatchOperationForLocation(previewPatch, locationPath);
+    if (!operation || operation.kind !== 'add') {
+      return null;
+    }
+
+    return {
+      before: {
+        exists: false,
+        content: null,
+      },
+      after: {
+        exists: true,
+        content: operation.lines.join('\n'),
+      },
+    };
+  }
+
+  const patch = findUnifiedDiffPatchForLocation(previewPatch, locationPath);
+  if (!patch) {
+    return null;
+  }
+
+  if (patch.oldPath === null && patch.newPath !== null) {
+    return {
+      before: {
+        exists: false,
+        content: null,
+      },
+      after: {
+        exists: true,
+        content: applyUnifiedDiffToContent('', patch, false),
+      },
+    };
+  }
+
+  if (patch.oldPath !== null && patch.newPath === null) {
+    return {
+      before: {
+        exists: true,
+        content: applyUnifiedDiffToContent('', patch, true),
+      },
+      after: {
+        exists: false,
+        content: null,
+      },
+    };
+  }
+
+  return null;
+};
+
+const deriveSnapshotFromPayload = (
+  value: unknown,
+  locationPath: string,
+  toolKind: string,
+): FileSnapshotMutation | null => {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const snapshot = deriveSnapshotFromPayload(entry, locationPath, toolKind);
+      if (snapshot) {
+        return snapshot;
+      }
+    }
+
+    return null;
+  }
+
+  if (!isStructuredPayload(value)) {
+    return null;
+  }
+
+  const scopedPathCandidate = CHANGE_STATS_PATH_KEYS.find(
+    (key) => typeof value[key] === 'string',
+  );
+  if (
+    scopedPathCandidate &&
+    typeof value[scopedPathCandidate] === 'string' &&
+    !matchesPayloadLocation(value[scopedPathCandidate] as string, locationPath)
+  ) {
+    return null;
+  }
+
+  for (const [oldKey, newKey] of CHANGE_STATS_STRING_PAIRS) {
+    if (typeof value[oldKey] === 'string' && typeof value[newKey] === 'string') {
+      return {
+        before: {
+          exists: true,
+          content: value[oldKey] as string,
+        },
+        after: {
+          exists: true,
+          content: value[newKey] as string,
+        },
+      };
+    }
+  }
+
+  for (const key of CHANGE_STATS_PATCH_KEYS) {
+    if (typeof value[key] === 'string' && looksLikePatchText(value[key] as string)) {
+      const snapshot = deriveSnapshotFromPreviewPatch(value[key] as string, locationPath);
+      if (snapshot) {
+        return snapshot;
+      }
+    }
+  }
+
+  if (isCreateLikeToolKind(toolKind)) {
+    for (const key of CHANGE_STATS_CONTENT_KEYS) {
+      if (typeof value[key] === 'string') {
+        return {
+          before: {
+            exists: false,
+            content: null,
+          },
+          after: {
+            exists: true,
+            content: value[key] as string,
+          },
+        };
+      }
+    }
+  }
+
+  if (isDeleteLikeToolKind(toolKind)) {
+    for (const key of CHANGE_STATS_CONTENT_KEYS) {
+      if (typeof value[key] === 'string') {
+        return {
+          before: {
+            exists: true,
+            content: value[key] as string,
+          },
+          after: {
+            exists: false,
+            content: null,
+          },
+        };
+      }
+    }
+  }
+
+  for (const entry of Object.values(value)) {
+    const snapshot = deriveSnapshotFromPayload(entry, locationPath, toolKind);
+    if (snapshot) {
+      return snapshot;
+    }
+  }
+
+  return null;
+};
+
+const deriveToolCallSnapshotMutation = (
+  item: Extract<TimelineItem, { kind: 'tool-call' }>,
+  locationPath: string,
+): FileSnapshotMutation | null => {
+  const capturedSnapshotEntry = Object.entries(item.fileSnapshotsByLocation ?? {}).find(
+    ([candidatePath]) => matchesPayloadLocation(candidatePath, locationPath),
+  )?.[1];
+  if (capturedSnapshotEntry?.before && capturedSnapshotEntry.after) {
+    return {
+      before: {
+        exists: capturedSnapshotEntry.before.exists,
+        content: capturedSnapshotEntry.before.content,
+      },
+      after: {
+        exists: capturedSnapshotEntry.after.exists,
+        content: capturedSnapshotEntry.after.content,
+      },
+    };
+  }
+
+  const inputPayload = parseRawPayload(item.rawInput);
+  const outputPayload = parseRawPayload(item.rawOutput);
+  const previewPatch = deriveToolCallPreviewPatch(item, locationPath);
+
+  return (
+    deriveSnapshotFromPayload(inputPayload, locationPath, item.toolKind) ??
+    deriveSnapshotFromPayload(outputPayload, locationPath, item.toolKind) ??
+    (previewPatch ? deriveSnapshotFromPreviewPatch(previewPatch, locationPath) : null)
+  );
+};
+
+const composeSnapshotMutations = (
+  snapshots: FileSnapshotMutation[],
+): FileSnapshotMutation | null => {
+  if (snapshots.length === 0) {
+    return null;
+  }
+
+  const [firstSnapshot, ...remainingSnapshots] = snapshots;
+  const composed: FileSnapshotMutation = {
+    before: { ...firstSnapshot.before },
+    after: { ...firstSnapshot.after },
+  };
+
+  for (const snapshot of remainingSnapshots) {
+    const statesAlign =
+      composed.after.exists === snapshot.before.exists &&
+      (!composed.after.exists || composed.after.content === snapshot.before.content);
+
+    if (!statesAlign) {
+      return null;
+    }
+
+    composed.after = { ...snapshot.after };
+  }
+
+  return composed;
+};
+
+const derivePreciseMutation = (
+  item: Extract<TimelineItem, { kind: 'tool-call' }>,
+  locationPath: string,
+): ReversibleBlockMutation | null => {
+  const previewPatch = derivePreciseToolCallPreviewPatch(item, locationPath);
+  if (!previewPatch?.trim()) {
+    return null;
+  }
+
+  if (previewPatch.includes('*** Begin Patch')) {
+    const operation = findApplyPatchOperationForLocation(previewPatch, locationPath);
+    if (!operation || operation.kind === 'delete') {
+      return null;
+    }
+
+    return {
+      kind: 'apply-patch',
+      locationPath,
+      operation,
+    };
+  }
+
+  const patch = findUnifiedDiffPatchForLocation(previewPatch, locationPath);
+  if (!patch) {
+    return null;
+  }
+
+  return {
+    kind: 'unified-diff',
+    locationPath,
+    patch,
+  };
+};
+
+const collectBlockFileMutations = (
+  items: TimelineItem[],
+  files: ChangedFileEntry[],
+): BlockFileMutation[] => {
+  const toolCallsByPath = new Map<
+    string,
+    Array<Extract<TimelineItem, { kind: 'tool-call' }>>
+  >();
+
+  for (const item of items) {
+    if (!isFileMutationToolCall(item)) {
+      continue;
+    }
+
+    for (const locationPath of item.locations) {
+      if (!locationPath) {
+        continue;
+      }
+
+      const existing = toolCallsByPath.get(locationPath);
+      if (existing) {
+        existing.push(item);
+        continue;
+      }
+
+      toolCallsByPath.set(locationPath, [item]);
+    }
+  }
+
+  return files.map((file) => {
+    const relevantToolCalls = toolCallsByPath.get(file.path) ?? [];
+    const preciseMutations: ReversibleBlockMutation[] = [];
+    const snapshots: FileSnapshotMutation[] = [];
+    let hasCompletePreciseSequence = relevantToolCalls.length > 0;
+
+    for (const toolCall of relevantToolCalls) {
+      const preciseMutation = derivePreciseMutation(toolCall, file.path);
+      if (preciseMutation) {
+        preciseMutations.push(preciseMutation);
+      } else {
+        hasCompletePreciseSequence = false;
+      }
+
+      const snapshot = deriveToolCallSnapshotMutation(toolCall, file.path);
+      if (snapshot) {
+        snapshots.push(snapshot);
+      }
+    }
+
+    return {
+      locationPath: file.path,
+      preciseMutations:
+        hasCompletePreciseSequence && preciseMutations.length > 0
+          ? preciseMutations
+          : null,
+      snapshot: composeSnapshotMutations(snapshots),
+    };
+  });
 };
 
 const formatWorkedDuration = (durationMs: number | null): string => {
@@ -1388,6 +2903,7 @@ const buildTranscriptBlocks = (
     const durationMs =
       startedAtMs && endAtMs && endAtMs >= startedAtMs ? endAtMs - startedAtMs : null;
     const isComplete = finalMessage !== null && (!isFinalFlush || !options.isThinking);
+    const changedFiles = collectChangedFiles(currentTurnItems, options.gitFileStatsByPath);
 
     blocks.push({
       kind: 'assistant-turn',
@@ -1396,7 +2912,8 @@ const buildTranscriptBlocks = (
       activities,
       finalMessage,
       durationMs,
-      changedFiles: collectChangedFiles(currentTurnItems, options.gitFileStatsByPath),
+      changedFiles,
+      fileMutations: collectBlockFileMutations(currentTurnItems, changedFiles),
       isComplete,
     });
 
@@ -1854,11 +3371,13 @@ const TranscriptToolCall = ({
 
 const TranscriptChangedFilesPanel = ({
   files,
+  fileMutations,
   workspacePath,
   projectPaths,
   onOpenFile,
 }: {
   files: ChangedFileEntry[];
+  fileMutations: BlockFileMutation[];
   workspacePath: string;
   projectPaths: string[];
   onOpenFile: (path: string) => void;
@@ -1870,16 +3389,28 @@ const TranscriptChangedFilesPanel = ({
   const [inlineDiffsByPath, setInlineDiffsByPath] = React.useState<
     Record<string, InlineDiffPreviewState>
   >({});
+  const [mutationState, setMutationState] = React.useState<'applied' | 'undone'>('applied');
+  const [isApplyingMutation, setIsApplyingMutation] = React.useState(false);
+  const [mutationError, setMutationError] = React.useState<string | null>(null);
+  const [mutationRevision, setMutationRevision] = React.useState(0);
+  const [resolvedSnapshotsByPath, setResolvedSnapshotsByPath] = React.useState<
+    Record<string, FileSnapshotMutation>
+  >({});
+  const canToggleMutations = files.length > 0;
+  const allowHeuristicFallback = mutationRevision === 0;
 
   React.useEffect(() => {
     let cancelled = false;
 
-    const filesNeedingFallback = files.filter(
-      (file) =>
-        typeof file.additions !== 'number' ||
-        typeof file.deletions !== 'number' ||
-        hasZeroChangeCounts(file),
-    );
+    const filesNeedingFallback =
+      mutationRevision > 0
+        ? files
+        : files.filter(
+            (file) =>
+              typeof file.additions !== 'number' ||
+              typeof file.deletions !== 'number' ||
+              hasZeroChangeCounts(file),
+          );
 
     if (filesNeedingFallback.length === 0) {
       setDiffStatsByPath({});
@@ -1911,6 +3442,10 @@ const TranscriptChangedFilesPanel = ({
               }
             }
 
+            if (!allowHeuristicFallback) {
+              return [file.path, { additions: 0, deletions: 0 }] as const;
+            }
+
             return [
               file.path,
               await buildBestEffortFallbackStats(file, workspacePathCandidates),
@@ -1931,7 +3466,7 @@ const TranscriptChangedFilesPanel = ({
     return () => {
       cancelled = true;
     };
-  }, [files, projectPaths, workspacePath]);
+  }, [allowHeuristicFallback, files, mutationRevision, projectPaths, workspacePath]);
 
   const resolvedFiles = React.useMemo(
     () =>
@@ -1940,6 +3475,7 @@ const TranscriptChangedFilesPanel = ({
         const shouldUseFallback =
           Boolean(fallback) &&
           (
+            mutationRevision > 0 ||
             typeof file.additions !== 'number' ||
             typeof file.deletions !== 'number' ||
             (hasZeroChangeCounts(file) &&
@@ -2009,7 +3545,9 @@ const TranscriptChangedFilesPanel = ({
         }
 
         if (!patch) {
-          patch = await buildBestEffortFallbackPatch(file, workspacePathCandidates);
+          if (allowHeuristicFallback) {
+            patch = await buildBestEffortFallbackPatch(file, workspacePathCandidates);
+          }
         }
 
         setInlineDiffsByPath((previous) => ({
@@ -2017,7 +3555,7 @@ const TranscriptChangedFilesPanel = ({
           [file.path]: {
             isLoading: false,
             patch: patch || null,
-            error: patch ? null : 'No inline diff available.',
+            error: patch ? null : allowHeuristicFallback ? 'No inline diff available.' : 'No current diff available.',
           },
         }));
       } catch {
@@ -2031,7 +3569,7 @@ const TranscriptChangedFilesPanel = ({
         }));
       }
     },
-    [projectPaths, workspacePath],
+    [allowHeuristicFallback, projectPaths, workspacePath],
   );
 
   const toggleInlineDiffPreview = React.useCallback(
@@ -2049,6 +3587,48 @@ const TranscriptChangedFilesPanel = ({
     [expandedDiffsByPath, loadInlineDiffPreview],
   );
 
+  const handleToggleMutations = React.useCallback(async (): Promise<void> => {
+    if (!canToggleMutations || isApplyingMutation) {
+      return;
+    }
+
+    setIsApplyingMutation(true);
+    setMutationError(null);
+
+    try {
+      const nextResolvedSnapshots = await executeBlockFileMutationPlan(
+        fileMutations,
+        resolvedSnapshotsByPath,
+        mutationState === 'applied' ? 'undo' : 'redo',
+        workspacePath,
+        projectPaths,
+      );
+
+      setResolvedSnapshotsByPath(nextResolvedSnapshots);
+      setMutationState((previous) => (previous === 'applied' ? 'undone' : 'applied'));
+      setMutationRevision((previous) => previous + 1);
+      setExpandedDiffsByPath({});
+      setInlineDiffsByPath({});
+      setDiffStatsByPath({});
+    } catch (error) {
+      const fallback =
+        mutationState === 'applied'
+          ? 'Unable to undo this block safely.'
+          : 'Unable to redo this block safely.';
+      setMutationError(error instanceof Error ? error.message : fallback);
+    } finally {
+      setIsApplyingMutation(false);
+    }
+  }, [
+    canToggleMutations,
+    fileMutations,
+    isApplyingMutation,
+    mutationState,
+    projectPaths,
+    resolvedSnapshotsByPath,
+    workspacePath,
+  ]);
+
   const totalAdditions = resolvedFiles.reduce(
     (sum, file) => sum + (typeof file.additions === 'number' ? file.additions : 0),
     0,
@@ -2063,23 +3643,52 @@ const TranscriptChangedFilesPanel = ({
   const showHeaderTotals = files.length > 1 && showTotals;
 
   return (
-    <div className="overflow-hidden rounded-2xl bg-stone-100/80">
+    <div className="overflow-hidden rounded-2xl bg-stone-200/70">
       <div className="px-4 py-2">
-        <div className="flex items-center gap-2 text-[14px] font-medium text-stone-800">
-          <span>
-            {files.length} file{files.length === 1 ? '' : 's'} changed
-          </span>
-          {showHeaderTotals ? (
-            <>
-              <span className="text-emerald-600">
-                {formatSignedChangeCount(totalAdditions, '+')}
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-[14px] font-medium text-stone-800">
+            <span>
+              {files.length} file{files.length === 1 ? '' : 's'} changed
+            </span>
+            {showHeaderTotals ? (
+              <>
+                <span className="text-emerald-600">
+                  {formatSignedChangeCount(totalAdditions, '+')}
+                </span>
+                <span className="-ml-1 text-rose-600">
+                  {formatSignedChangeCount(totalDeletions, '-')}
+                </span>
+              </>
+            ) : null}
+          </div>
+
+          {canToggleMutations ? (
+            <button
+              type="button"
+              className="no-drag inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[13px] font-medium text-stone-700 transition-colors hover:bg-stone-200/70 disabled:cursor-wait disabled:opacity-60"
+              onClick={() => {
+                void handleToggleMutations();
+              }}
+              disabled={isApplyingMutation}
+            >
+              <span>
+                {isApplyingMutation
+                  ? mutationState === 'applied'
+                    ? 'Undoing…'
+                    : 'Redoing…'
+                  : mutationState === 'applied'
+                    ? 'Undo'
+                    : 'Redo'}
               </span>
-              <span className="-ml-1 text-rose-600">
-                {formatSignedChangeCount(totalDeletions, '-')}
-              </span>
-            </>
+              {mutationState === 'applied' ? (
+                <RotateCcw className="h-3.5 w-3.5" />
+              ) : (
+                <RotateCw className="h-3.5 w-3.5" />
+              )}
+            </button>
           ) : null}
         </div>
+        {mutationError ? <p className="mt-1 text-[12px] text-rose-600">{mutationError}</p> : null}
       </div>
       <div>
         {resolvedFiles.map((file, index) => {
@@ -2135,7 +3744,7 @@ const TranscriptChangedFilesPanel = ({
                       'h-7 w-7',
                       isExpanded
                         ? 'bg-stone-100/80 text-stone-700 opacity-100'
-                        : 'opacity-0 group-hover/file-row:opacity-100 group-focus-within/file-row:opacity-100',
+                        : 'opacity-0 group-hover/file-row:opacity-100 focus-visible:opacity-100',
                     )}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -2544,11 +4153,17 @@ export const Transcript = ({
 
                 if (item.kind === 'user-message') {
                   const attachments = item.attachments ?? [];
+                  const mentionedAttachmentPaths = collectMentionedAttachmentPaths(
+                    item.text,
+                    attachments,
+                  );
                   const imageAttachments = attachments.filter((attachment) =>
                     isImageAttachment(attachment),
                   );
                   const fileAttachments = attachments.filter(
-                    (attachment) => !isImageAttachment(attachment),
+                    (attachment) =>
+                      !isImageAttachment(attachment) &&
+                      !mentionedAttachmentPaths.has(attachment.absolutePath),
                   );
                   const hasText = item.text.trim().length > 0;
                   const hasAudio = item.hasAudio === true;
@@ -2570,6 +4185,8 @@ export const Transcript = ({
                               text={item.text}
                               keyPrefix={`user-inline-${item.id}`}
                               onOpenLink={onOpenLink}
+                              attachments={attachments}
+                              onOpenFile={onOpenFile}
                             />
                           </div>
                         ) : null}
@@ -2600,9 +4217,16 @@ export const Transcript = ({
               }
 
               if (!block.isComplete || !block.finalMessage) {
+                const visibleItems = block.items.filter(
+                  (activity) => !isAgentChangedTimelineItem(activity),
+                );
+                if (visibleItems.length === 0) {
+                  return null;
+                }
+
                 return (
                   <div key={block.key} className="space-y-5">
-                    {block.items.map((activity) => (
+                    {visibleItems.map((activity) => (
                       <div key={activity.id}>
                         {renderAgentTimelineItem(
                           activity as Exclude<TimelineItem, { kind: 'user-message' }>,
@@ -2613,7 +4237,10 @@ export const Transcript = ({
                 );
               }
 
-              const hasWorkedSection = block.activities.length > 0;
+              const workedActivities = block.activities.filter(
+                (activity) => !isAgentChangedTimelineItem(activity),
+              );
+              const hasWorkedSection = workedActivities.length > 0;
               const isWorkedExpanded = expandedWorkedSections[block.key] ?? false;
 
               return (
@@ -2629,7 +4256,7 @@ export const Transcript = ({
 
                       {isWorkedExpanded ? (
                         <div className="space-y-5">
-                          {block.activities.map((activity) => (
+                          {workedActivities.map((activity) => (
                             <div key={activity.id}>
                               {renderAgentTimelineItem(
                                 activity as Exclude<TimelineItem, { kind: 'user-message' }>,
@@ -2656,6 +4283,7 @@ export const Transcript = ({
                   {block.finalMessage && block.changedFiles.length > 0 ? (
                     <TranscriptChangedFilesPanel
                       files={block.changedFiles}
+                      fileMutations={block.fileMutations}
                       workspacePath={workspacePath}
                       projectPaths={projectPaths}
                       onOpenFile={onOpenFile}

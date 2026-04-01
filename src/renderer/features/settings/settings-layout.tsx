@@ -8,6 +8,7 @@ import {
   ExternalLink,
   FolderSearch,
   GitBranch,
+  Languages,
   Loader2,
   Palette,
   Pencil,
@@ -25,8 +26,11 @@ import { Avatar, AvatarFallback, AvatarImage } from '@renderer/components/ui/ava
 import { Dialog, DialogContent } from '@renderer/components/ui/dialog';
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@renderer/components/ui/dropdown-menu';
 import {
@@ -36,7 +40,9 @@ import {
 } from '@renderer/store/browser-pushes';
 import type { AcpAgentPreset } from '@renderer/store/use-acp';
 import type { AgentPresetSelection } from '@renderer/features/composer/composer';
+import type { WorkspaceRecord } from '@renderer/store/use-shell-state';
 import { useRunConfigurations } from '@renderer/store/use-run-configurations';
+import { toLanguagePresentation } from '@renderer/lib/code-language-icons';
 import {
   applyUiPreferences,
   getCodeFontFamily,
@@ -59,6 +65,7 @@ import {
   writeThemePreference,
 } from '@renderer/store/ui-preferences';
 import { McpSettingsSection } from '@renderer/features/settings/mcp-settings-section';
+import { RunConfigurationDialog } from '@renderer/features/toolbar/run-configuration-dialog';
 import { resolveEditorThemeVisuals } from '@renderer/lib/monaco-theme';
 import type { AcpCustomAgentConfig } from '@shared/types/acp';
 import type {
@@ -68,6 +75,7 @@ import type {
   SkillSummary,
   SkillsListResult,
 } from '@shared/types/skills';
+import type { LspManagedServerSource, LspServerCatalogEntry } from '@shared/types/lsp';
 import type { WorkspaceGitStatusResult } from '@shared/types/workspace';
 
 interface SettingsLayoutProps {
@@ -77,10 +85,12 @@ interface SettingsLayoutProps {
   showResizeHandle: boolean;
   onStartResizing: () => void;
   workspacePath: string;
+  selectedWorkspaceId: string;
+  recentWorkspaces: WorkspaceRecord[];
   agentPreset: AcpAgentPreset;
-  codexAgentConfig: AcpCustomAgentConfig | null;
-  claudeAgentConfig: AcpCustomAgentConfig | null;
   customAgentConfig: AcpCustomAgentConfig | null;
+  onSelectWorkspace: (workspaceId: string) => void;
+  onOpenWorkspaceFromPath: (folderPath: string) => void;
   onSelectAgentPreset: (selection: AgentPresetSelection) => void;
 }
 
@@ -89,6 +99,7 @@ const sections = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'agents', label: 'Agents', icon: Bot },
   { id: 'skills', label: 'Skills', icon: Sparkles },
+  { id: 'lsp', label: 'LSP', icon: Languages },
   { id: 'mcp', label: 'MCP servers', icon: Plug },
   { id: 'git', label: 'Git', icon: GitBranch },
 ] as const;
@@ -289,6 +300,8 @@ const getEditorThemePresetOption = (
 const codeFontOptions: CodeFontOption[] = [
   { value: 'system', label: 'System Mono' },
   { value: 'sf-mono', label: 'SF Mono' },
+  { value: 'jetbrains-mono', label: 'JetBrains Mono' },
+  { value: 'fira-code', label: 'Fira Code' },
   { value: 'menlo', label: 'Menlo' },
 ];
 
@@ -793,22 +806,6 @@ const toCommandPreview = (config: AcpCustomAgentConfig | null): string => {
   return preview.length > 0 ? truncateText(preview) : 'No saved command.';
 };
 
-const toPresetLabel = (preset: AcpAgentPreset): string => {
-  if (preset === 'codex') {
-    return 'Codex';
-  }
-
-  if (preset === 'claude') {
-    return 'Claude Code';
-  }
-
-  if (preset === 'custom') {
-    return 'Added ACP agent';
-  }
-
-  return 'Not selected';
-};
-
 const summarizeBranches = (branches: string[]): string => {
   if (branches.length === 0) {
     return 'No branches detected.';
@@ -828,10 +825,12 @@ export const SettingsLayout = ({
   showResizeHandle,
   onStartResizing,
   workspacePath,
+  selectedWorkspaceId,
+  recentWorkspaces,
   agentPreset,
-  codexAgentConfig,
-  claudeAgentConfig,
   customAgentConfig,
+  onSelectWorkspace,
+  onOpenWorkspaceFromPath,
   onSelectAgentPreset,
 }: SettingsLayoutProps): JSX.Element => {
   const [activeSection, setActiveSection] = React.useState<SectionId>(sections[0].id);
@@ -852,13 +851,26 @@ export const SettingsLayout = ({
   const editorThemeImportFileInputRef = React.useRef<HTMLInputElement | null>(null);
   const editorThemeImportModeRef = React.useRef<EditorThemeMode | null>(null);
   const interfaceTheme = resolveInterfaceTheme(uiPreferences.theme);
+  const sharedCodeFont =
+    uiPreferences.editorThemes.light.codeFont === uiPreferences.editorThemes.dark.codeFont
+      ? uiPreferences.editorThemes.light.codeFont
+      : uiPreferences.editorThemes[interfaceTheme].codeFont;
+  const sharedFontLigatures =
+    uiPreferences.editorThemes.light.fontLigatures === uiPreferences.editorThemes.dark.fontLigatures
+      ? uiPreferences.editorThemes.light.fontLigatures
+      : uiPreferences.editorThemes[interfaceTheme].fontLigatures;
 
   const hasWorkspace = workspacePath.trim().length > 1 && workspacePath !== '/';
   const workspaceName = hasWorkspace ? getFolderName(workspacePath) : 'No workspace';
   const {
     configurations: runConfigurations,
+    selectedConfigurationId,
     selectedConfiguration,
+    saveConfiguration,
+    deleteConfiguration,
+    selectConfiguration,
   } = useRunConfigurations(hasWorkspace ? workspacePath : '');
+  const [isRunConfigurationDialogOpen, setIsRunConfigurationDialogOpen] = React.useState(false);
   const unreadNotificationCount = notifications.filter((item) => !item.read).length;
   const latestNotification = notifications[0] ?? null;
   React.useEffect(() => {
@@ -967,31 +979,208 @@ export const SettingsLayout = ({
     };
   }, [activeSection, hasWorkspace, workspacePath]);
 
+  const handleRevealProject = React.useCallback(async (): Promise<void> => {
+    if (!hasWorkspace) {
+      return;
+    }
+
+    try {
+      await window.desktop.workspaceRevealFile({
+        absolutePath: workspacePath,
+      });
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Could not reveal project.');
+    }
+  }, [hasWorkspace, workspacePath]);
+
+  const handleOpenProject = React.useCallback(async (): Promise<void> => {
+    try {
+      const result = await window.desktop.openFolder();
+      if (!result.canceled && result.path) {
+        onOpenWorkspaceFromPath(result.path);
+      }
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Could not open project.');
+    }
+  }, [onOpenWorkspaceFromPath]);
+
+  const switchProjectControl = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="rounded-[10px]">
+          {workspaceName}
+          <ChevronDown className="ml-1.5 h-3.5 w-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-[280px]">
+        <DropdownMenuLabel>Recent projects</DropdownMenuLabel>
+        {recentWorkspaces.length > 0 ? (
+          recentWorkspaces.map((workspace) => (
+            <DropdownMenuCheckboxItem
+              key={workspace.id}
+              checked={workspace.id === selectedWorkspaceId}
+              onCheckedChange={() => {
+                onSelectWorkspace(workspace.id);
+              }}
+              className="items-start"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-[13px] font-medium">{workspace.name}</div>
+                <div className="truncate text-[12px] text-stone-500">{workspace.path}</div>
+              </div>
+            </DropdownMenuCheckboxItem>
+          ))
+        ) : (
+          <DropdownMenuItem disabled>No recent projects</DropdownMenuItem>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={() => {
+            void handleOpenProject();
+          }}
+        >
+          <FolderSearch className="mr-2 h-3.5 w-3.5" />
+          Open project…
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  const runConfigurationControl =
+    hasWorkspace && runConfigurations.length > 0 ? (
+      <div className="flex items-center gap-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="sm" className="rounded-[10px]">
+              {selectedConfiguration?.name ?? 'Select run'}
+              <ChevronDown className="ml-1.5 h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-[320px]">
+            <DropdownMenuLabel>Run configurations</DropdownMenuLabel>
+            {runConfigurations.map((configuration) => (
+              <DropdownMenuCheckboxItem
+                key={configuration.id}
+                checked={configuration.id === selectedConfiguration?.id}
+                onCheckedChange={() => {
+                  selectConfiguration(configuration.id);
+                }}
+                className="items-start"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-[13px] font-medium">{configuration.name}</div>
+                  <div className="truncate text-[12px] text-stone-500">{configuration.command}</div>
+                </div>
+              </DropdownMenuCheckboxItem>
+            ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() => {
+                setIsRunConfigurationDialogOpen(true);
+              }}
+            >
+              Manage run configurations
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="rounded-[10px]"
+          onClick={() => {
+            setIsRunConfigurationDialogOpen(true);
+          }}
+        >
+          Manage
+        </Button>
+      </div>
+    ) : (
+      <div className="flex items-center gap-2">
+        <PillLabel>{selectedConfiguration?.name ?? 'None'}</PillLabel>
+        {hasWorkspace ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="rounded-[10px]"
+            onClick={() => {
+              setIsRunConfigurationDialogOpen(true);
+            }}
+          >
+            Manage
+          </Button>
+        ) : null}
+      </div>
+    );
+
   const renderGeneralSection = (): JSX.Element => (
     <>
-      <SectionGroup title="Workspace">
+      <SectionGroup title="Project">
         <SettingsCard>
           <SettingRow
-            title="Workspace folder"
-            description={hasWorkspace ? workspacePath : 'No workspace is open for this thread.'}
-            control={<PillLabel>{workspaceName}</PillLabel>}
+            title="Current project"
+            description={hasWorkspace ? workspacePath : 'No project is open for this thread.'}
+            control={
+              hasWorkspace ? (
+                <div className="flex items-center gap-2">
+                  <PillLabel>{workspaceName}</PillLabel>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="rounded-[10px]"
+                    onClick={() => {
+                      void handleRevealProject();
+                    }}
+                  >
+                    Reveal
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-[10px]"
+                  onClick={() => {
+                    void handleOpenProject();
+                  }}
+                >
+                  <FolderSearch className="mr-1.5 h-3.5 w-3.5" />
+                  Open project
+                </Button>
+              )
+            }
           />
           <SettingRow
-            title="Saved run configurations"
-            description="Terminal commands saved for the current workspace."
-            control={<PillLabel>{toCountLabel(runConfigurations.length, 'configuration')}</PillLabel>}
+            title="Switch project"
+            description={
+              recentWorkspaces.length > 0
+                ? `Switch between ${toCountLabel(recentWorkspaces.length, 'recent project')} or open another folder.`
+                : 'Open a project folder to add it to the recent project list.'
+            }
+            control={switchProjectControl}
           />
           <SettingRow
-            title="Selected run configuration"
+            title="Run configuration"
             description={
               selectedConfiguration
                 ? truncateText(selectedConfiguration.command.replace(/\s+/g, ' '))
-                : 'No run configuration is selected right now.'
+                : hasWorkspace
+                  ? `No run configuration is selected for ${workspaceName}.`
+                  : 'Open a project to load its saved run configurations.'
             }
-            control={<PillLabel>{selectedConfiguration?.name ?? 'None'}</PillLabel>}
+            control={runConfigurationControl}
           />
         </SettingsCard>
       </SectionGroup>
+
+      <RunConfigurationDialog
+        open={isRunConfigurationDialogOpen}
+        configurations={runConfigurations}
+        selectedConfigurationId={selectedConfigurationId}
+        onOpenChange={setIsRunConfigurationDialogOpen}
+        onSelectConfiguration={selectConfiguration}
+        onSaveConfiguration={saveConfiguration}
+        onDeleteConfiguration={deleteConfiguration}
+      />
 
       <VoiceSettingsSection />
 
@@ -1025,8 +1214,6 @@ export const SettingsLayout = ({
     <AgentsSettingsSection
       workspacePath={workspacePath}
       agentPreset={agentPreset}
-      codexAgentConfig={codexAgentConfig}
-      claudeAgentConfig={claudeAgentConfig}
       customAgentConfig={customAgentConfig}
       onSelectAgentPreset={onSelectAgentPreset}
     />
@@ -1035,6 +1222,42 @@ export const SettingsLayout = ({
   const renderSkillsSection = (): JSX.Element => (
     <SkillsSettingsSection mode={interfaceTheme} />
   );
+
+  const renderLspSection = (): JSX.Element => (
+    <LspSettingsSection mode={interfaceTheme} />
+  );
+
+  const updateSharedCodeFont = React.useCallback((codeFont: CodeFontPreference): void => {
+    setUiPreferences((previous) => ({
+      ...previous,
+      editorThemes: {
+        light: {
+          ...previous.editorThemes.light,
+          codeFont,
+        },
+        dark: {
+          ...previous.editorThemes.dark,
+          codeFont,
+        },
+      },
+    }));
+  }, []);
+
+  const updateSharedFontLigatures = React.useCallback((fontLigatures: boolean): void => {
+    setUiPreferences((previous) => ({
+      ...previous,
+      editorThemes: {
+        light: {
+          ...previous.editorThemes.light,
+          fontLigatures,
+        },
+        dark: {
+          ...previous.editorThemes.dark,
+          fontLigatures,
+        },
+      },
+    }));
+  }, []);
 
   const updateEditorTheme = React.useCallback((
     mode: EditorThemeMode,
@@ -1138,13 +1361,23 @@ export const SettingsLayout = ({
 
       try {
         const importedTheme = parseImportedEditorTheme(rawTheme, mode);
-        updateEditorTheme(mode, () => importedTheme);
+        updateEditorTheme(mode, () => ({
+          ...importedTheme,
+          codeFont: sharedCodeFont,
+          fontLigatures: sharedFontLigatures,
+        }));
         showEditorThemeFeedback(mode, 'Theme imported.');
       } catch (error) {
         window.alert(error instanceof Error ? error.message : 'Could not import theme.');
       }
     },
-    [parseImportedEditorTheme, showEditorThemeFeedback, updateEditorTheme],
+    [
+      parseImportedEditorTheme,
+      sharedCodeFont,
+      sharedFontLigatures,
+      showEditorThemeFeedback,
+      updateEditorTheme,
+    ],
   );
 
   const importEditorThemeFromFile = React.useCallback((mode: EditorThemeMode): void => {
@@ -1175,13 +1408,23 @@ export const SettingsLayout = ({
         }
 
         const importedTheme = parseImportedEditorTheme(rawTheme, mode);
-        updateEditorTheme(mode, () => importedTheme);
+        updateEditorTheme(mode, () => ({
+          ...importedTheme,
+          codeFont: sharedCodeFont,
+          fontLigatures: sharedFontLigatures,
+        }));
         showEditorThemeFeedback(mode, `Imported ${file.name}.`);
       } catch (error) {
         window.alert(error instanceof Error ? error.message : 'Could not import theme.');
       }
     })();
-  }, [parseImportedEditorTheme, showEditorThemeFeedback, updateEditorTheme]);
+  }, [
+    parseImportedEditorTheme,
+    sharedCodeFont,
+    sharedFontLigatures,
+    showEditorThemeFeedback,
+    updateEditorTheme,
+  ]);
 
   const renderAppearanceSection = (): JSX.Element => (
     <>
@@ -1261,7 +1504,11 @@ export const SettingsLayout = ({
               void copyEditorTheme('light');
             }}
             onSelectPreset={(preset) => {
-              updateEditorTheme('light', () => getEditorThemePresetDefaults('light', preset));
+              updateEditorTheme('light', () => ({
+                ...getEditorThemePresetDefaults('light', preset),
+                codeFont: sharedCodeFont,
+                fontLigatures: sharedFontLigatures,
+              }));
             }}
             onAccentChange={(accent) => {
               updateEditorTheme('light', (theme) => ({
@@ -1297,20 +1544,6 @@ export const SettingsLayout = ({
             onEditorColorChange={(key, value) => {
               updateEditorThemeEditorColor('light', key, value);
             }}
-            onCodeFontChange={(codeFont) => {
-              updateEditorTheme('light', (theme) => ({
-                ...theme,
-                preset: 'custom',
-                codeFont,
-              }));
-            }}
-            onContrastChange={(contrast) => {
-              updateEditorTheme('light', (theme) => ({
-                ...theme,
-                preset: 'custom',
-                contrast,
-              }));
-            }}
           />
           <EditorThemeCard
             appearanceMode={interfaceTheme}
@@ -1327,7 +1560,11 @@ export const SettingsLayout = ({
               void copyEditorTheme('dark');
             }}
             onSelectPreset={(preset) => {
-              updateEditorTheme('dark', () => getEditorThemePresetDefaults('dark', preset));
+              updateEditorTheme('dark', () => ({
+                ...getEditorThemePresetDefaults('dark', preset),
+                codeFont: sharedCodeFont,
+                fontLigatures: sharedFontLigatures,
+              }));
             }}
             onAccentChange={(accent) => {
               updateEditorTheme('dark', (theme) => ({
@@ -1363,20 +1600,6 @@ export const SettingsLayout = ({
             onEditorColorChange={(key, value) => {
               updateEditorThemeEditorColor('dark', key, value);
             }}
-            onCodeFontChange={(codeFont) => {
-              updateEditorTheme('dark', (theme) => ({
-                ...theme,
-                preset: 'custom',
-                codeFont,
-              }));
-            }}
-            onContrastChange={(contrast) => {
-              updateEditorTheme('dark', (theme) => ({
-                ...theme,
-                preset: 'custom',
-                contrast,
-              }));
-            }}
           />
         </div>
       </SectionGroup>
@@ -1395,6 +1618,21 @@ export const SettingsLayout = ({
                     editorFontSize,
                   }));
                 }}
+              />
+            }
+          />
+          <SettingRow
+            title="Code font"
+            description="Controls the Monaco editor font family in both light and dark themes. Falls back if a font is not installed."
+            control={<CodeFontSelect value={sharedCodeFont} onSelect={updateSharedCodeFont} />}
+          />
+          <SettingRow
+            title="Font ligatures"
+            description="Enables programming ligatures in Monaco editors for both light and dark themes."
+            control={
+              <EditorLigaturesSwitch
+                checked={sharedFontLigatures}
+                onCheckedChange={updateSharedFontLigatures}
               />
             }
           />
@@ -1540,6 +1778,10 @@ export const SettingsLayout = ({
       return renderSkillsSection();
     }
 
+    if (activeSection === 'lsp') {
+      return renderLspSection();
+    }
+
     if (activeSection === 'appearance') {
       return renderAppearanceSection();
     }
@@ -1560,11 +1802,11 @@ export const SettingsLayout = ({
           !isResizing && 'transition-[width] duration-200 ease-out',
         )}
       >
-        <div className="flex h-full flex-col border-r border-stone-200/55 bg-[rgba(249,250,252,0.06)] backdrop-blur-[4px] backdrop-saturate-125">
+        <div className="zeroade-sidebar-panel-surface flex h-full flex-col border-r border-r-[var(--zeroade-shell-divider)]">
           <div className="px-3 pt-2.5">
             <button
               type="button"
-              className="zeroade-sidebar-hover-shadow no-drag mb-0.5 flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-sm text-stone-600 transition-colors hover:bg-white/55 hover:text-stone-900"
+              className="zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface no-drag mb-0.5 flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-sm text-stone-600 transition-colors hover:text-stone-900"
               onClick={onBack}
             >
               <ArrowLeft className="h-4 w-4" />
@@ -1582,8 +1824,8 @@ export const SettingsLayout = ({
                   key={section.id}
                   type="button"
                   className={cn(
-                    'zeroade-sidebar-hover-shadow no-drag flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] text-stone-600 transition-colors hover:bg-white/55 hover:text-stone-900',
-                    isActive && 'bg-white/45 text-stone-900',
+                    'zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface no-drag flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] text-stone-600 transition-colors hover:text-stone-900',
+                    isActive && 'zeroade-sidebar-active-surface text-stone-900',
                   )}
                   onClick={() => setActiveSection(section.id)}
                 >
@@ -1631,6 +1873,292 @@ const toSettingsErrorMessage = (error: unknown, fallback: string): string => {
 
   return fallback;
 };
+
+const toLspSourceLabel = (source: LspManagedServerSource): string => {
+  if (source === 'managed') {
+    return 'Managed';
+  }
+
+  if (source === 'development') {
+    return 'Development';
+  }
+
+  if (source === 'system') {
+    return 'System';
+  }
+
+  return 'Missing';
+};
+
+const LspServerLanguageIcons = ({
+  mode,
+  languages,
+}: {
+  mode: EditorThemeMode;
+  languages: string[];
+}): JSX.Element => {
+  const normalizedLanguages = Array.from(
+    new Set(languages.map((language) => language.trim().toLowerCase()).filter(Boolean)),
+  );
+  const visibleLanguages =
+    normalizedLanguages.includes('typescript') && normalizedLanguages.includes('javascript')
+      ? ['typescript']
+      : normalizedLanguages.slice(0, 2);
+
+  return (
+    <div className="flex shrink-0 items-center">
+      {visibleLanguages.map((language, index) => {
+        const languagePresentation = toLanguagePresentation(language);
+        const LanguageIcon = languagePresentation.Icon;
+
+        return (
+          <span
+            key={language}
+            title={languagePresentation.label}
+            className={cn(
+              'inline-flex h-8 w-8 items-center justify-center rounded-[10px] border text-[15px]',
+              index > 0 && '-ml-1.5',
+              mode === 'dark'
+                ? 'border-stone-800 bg-stone-900 text-stone-100'
+                : 'border-stone-200/80 bg-stone-100 text-stone-700',
+            )}
+          >
+            <LanguageIcon className="h-4 w-4" />
+          </span>
+        );
+      })}
+    </div>
+  );
+};
+
+const LspSettingsSection = ({ mode }: { mode: EditorThemeMode }): JSX.Element => {
+  const [servers, setServers] = React.useState<LspServerCatalogEntry[]>([]);
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = React.useState('');
+  const [pendingServerId, setPendingServerId] = React.useState<string | null>(null);
+
+  const loadServers = React.useCallback(async (): Promise<void> => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const result = await window.desktop.lspListServers();
+      setServers(result.servers);
+    } catch (loadError) {
+      setError(toSettingsErrorMessage(loadError, 'Could not load language servers.'));
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadServers();
+  }, [loadServers]);
+
+  const handleInstall = React.useCallback(async (server: LspServerCatalogEntry): Promise<void> => {
+    setPendingServerId(server.id);
+
+    try {
+      await window.desktop.lspInstallServer({ serverId: server.id });
+      await loadServers();
+    } catch {
+      // Keep the catalog stable and rely on button state instead of a separate summary card.
+    } finally {
+      setPendingServerId(null);
+    }
+  }, [loadServers]);
+
+  const handleDelete = React.useCallback(async (server: LspServerCatalogEntry): Promise<void> => {
+    setPendingServerId(server.id);
+
+    try {
+      await window.desktop.lspDeleteServer({ serverId: server.id });
+      await loadServers();
+    } catch {
+      // Keep the catalog stable and rely on button state instead of a separate summary card.
+    } finally {
+      setPendingServerId(null);
+    }
+  }, [loadServers]);
+
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const visibleServers = React.useMemo(
+    () =>
+      normalizedSearchQuery.length === 0
+        ? servers
+        : servers.filter((server) =>
+            [
+              server.name,
+              server.description,
+              server.detail ?? '',
+              ...server.languages,
+            ].some((value) => value.toLowerCase().includes(normalizedSearchQuery)),
+          ),
+    [normalizedSearchQuery, servers],
+  );
+
+  const toolbar = (
+    <div className="flex items-center gap-2">
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 rounded-[10px]"
+        onClick={() => {
+          void loadServers();
+        }}
+        disabled={isLoading}
+        aria-label="Reload language servers"
+        title="Reload language servers"
+      >
+        {isLoading ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <RefreshCw className="h-3.5 w-3.5" />
+        )}
+      </Button>
+      <label className="inline-flex h-8 items-center gap-2 rounded-full border border-stone-200 bg-white pl-3 pr-3 text-[13px] text-stone-500">
+        <Search className="h-3.5 w-3.5 shrink-0" />
+        <input
+          value={searchQuery}
+          onChange={(event) => {
+            setSearchQuery(event.target.value);
+          }}
+          placeholder="Search servers"
+          className="w-[180px] bg-transparent text-stone-700 outline-none placeholder:text-stone-400"
+          aria-label="Search language servers"
+        />
+      </label>
+    </div>
+  );
+
+  return (
+    <>
+      <SectionGroup title="" action={toolbar}>
+        <SettingsCard>
+          {isLoading && servers.length === 0 ? (
+            <SettingRow
+              title="Loading language servers"
+              description="Reading the available LSP catalog and install state."
+              control={<PillLabel>Loading…</PillLabel>}
+            />
+          ) : error ? (
+            <SettingRow
+              title="Language servers unavailable"
+              description={error}
+              control={<PillLabel>Error</PillLabel>}
+            />
+          ) : visibleServers.length === 0 ? (
+            <SettingRow
+              title={normalizedSearchQuery ? 'No matching language servers' : 'No language servers'}
+              description={
+                normalizedSearchQuery
+                  ? 'Try a different search query.'
+                  : 'Zero does not have any language server definitions configured.'
+              }
+              control={<PillLabel>Empty</PillLabel>}
+            />
+          ) : (
+            visibleServers.map((server) => (
+              <LspServerSettingsRow
+                key={server.id}
+                mode={mode}
+                server={server}
+                isPending={pendingServerId === server.id}
+                onInstall={() => {
+                  void handleInstall(server);
+                }}
+                onDelete={() => {
+                  void handleDelete(server);
+                }}
+              />
+            ))
+          )}
+        </SettingsCard>
+      </SectionGroup>
+    </>
+  );
+};
+
+const LspServerSettingsRow = ({
+  mode,
+  server,
+  isPending,
+  onInstall,
+  onDelete,
+}: {
+  mode: EditorThemeMode;
+  server: LspServerCatalogEntry;
+  isPending: boolean;
+  onInstall: () => void;
+  onDelete: () => void;
+}): JSX.Element => (
+  <div className="flex items-center justify-between gap-4 border-b border-stone-200/75 px-3 py-3 last:border-b-0">
+    <div className="flex min-w-0 items-start gap-3">
+      <LspServerLanguageIcons mode={mode} languages={server.languages} />
+      <div className="min-w-0">
+        <p className="min-w-0 text-[14px] font-medium text-stone-800">{server.name}</p>
+        <p className="mt-0.5 text-[12px] text-stone-500">
+          {toLspSourceLabel(server.source)}
+          {' · '}
+          {server.installKind === 'manual'
+            ? 'Manual install'
+            : server.installKind === 'download'
+              ? 'Managed download available'
+              : 'Managed install available'}
+        </p>
+        <p className="mt-1 text-[13px] text-stone-500">{server.description}</p>
+        {server.detail ? <p className="mt-1 text-[12px] text-stone-500">{server.detail}</p> : null}
+      </div>
+    </div>
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+      <PillLabel>{toLspSourceLabel(server.source)}</PillLabel>
+      {server.canInstall ? (
+        <Button
+          size="sm"
+          variant="outline"
+          className="rounded-[10px]"
+          onClick={onInstall}
+          disabled={isPending}
+        >
+          {isPending ? (
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Plus className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          {isPending ? 'Installing…' : 'Install'}
+        </Button>
+      ) : null}
+      {server.canDelete ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          className={cn(
+            'rounded-[10px]',
+            mode === 'dark'
+              ? 'text-rose-300 hover:bg-rose-950/40 hover:text-rose-200'
+              : 'text-rose-700 hover:bg-rose-50 hover:text-rose-800',
+          )}
+          onClick={onDelete}
+          disabled={isPending}
+        >
+          {isPending ? (
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          {isPending ? 'Deleting…' : 'Delete'}
+        </Button>
+      ) : null}
+      {!server.canInstall && !server.canDelete && server.installed ? (
+        <Button size="sm" variant="ghost" className="rounded-[10px]" disabled>
+          <Check className="mr-1.5 h-3.5 w-3.5" />
+          Available
+        </Button>
+      ) : null}
+    </div>
+  </div>
+);
 
 const VoiceSettingsSection = (): JSX.Element => {
   const [draftOpenAiApiKey, setDraftOpenAiApiKey] = React.useState('');
@@ -1797,10 +2325,12 @@ interface SectionGroupProps {
 
 const SectionGroup = ({ title, action, children }: SectionGroupProps): JSX.Element => (
   <section className="mt-6 first:mt-0">
-    <div className="flex items-center justify-between gap-4">
-      <h3 className="text-[20px] font-semibold text-stone-900">{title}</h3>
-      {action ? <div className="shrink-0">{action}</div> : null}
-    </div>
+    {title || action ? (
+      <div className="flex items-center justify-between gap-4">
+        {title ? <h3 className="text-[20px] font-semibold text-stone-900">{title}</h3> : <div />}
+        {action ? <div className="shrink-0">{action}</div> : null}
+      </div>
+    ) : null}
     <div className="mt-3">{children}</div>
   </section>
 );
@@ -1889,23 +2419,21 @@ const EditorThemePreviewPane = ({
   const keywordColor = resolvedVisuals.syntaxColors.keyword;
   const propertyColor = resolvedVisuals.syntaxColors.type;
   const valueColor = resolvedVisuals.syntaxColors.string;
-  const numericColor = resolvedVisuals.syntaxColors.number;
   const fontFamily = getCodeFontFamily(theme.codeFont);
+  const fontVariantLigatures = theme.fontLigatures ? 'normal' : 'none';
   const rows =
     mode === 'light'
       ? [
           ['1', 'const', 'themePreview', '{'],
           ['2', 'surface', `"${theme.background}"`, ''],
           ['3', 'accent', `"${theme.accent}"`, ''],
-          ['4', 'contrast', `${theme.contrast}`, ''],
-          ['5', '};', '', ''],
+          ['4', '};', '', ''],
         ]
       : [
           ['1', 'const', 'themePreview', '{'],
           ['2', 'surface', `"${theme.background}"`, ''],
           ['3', 'accent', `"${theme.accent}"`, ''],
-          ['4', 'contrast', `${theme.contrast}`, ''],
-          ['5', '};', '', ''],
+          ['4', '};', '', ''],
         ];
 
   return (
@@ -1921,39 +2449,34 @@ const EditorThemePreviewPane = ({
           key={`${mode}-${lineNumber}`}
           className="grid grid-cols-[44px_minmax(0,1fr)] text-[13px]"
           style={{
-            backgroundColor: index > 0 && index < 4 ? lineOverlay : 'transparent',
+            backgroundColor: index > 0 && index < rows.length - 1 ? lineOverlay : 'transparent',
           }}
         >
           <div
             className="border-r border-black/5 px-3 py-2 text-right"
             style={{
-              backgroundColor: index > 0 && index < 4 ? gutterOverlay : 'transparent',
+              backgroundColor: index > 0 && index < rows.length - 1 ? gutterOverlay : 'transparent',
               color: mode === 'light' ? 'rgba(17, 24, 39, 0.55)' : 'rgba(255, 255, 255, 0.52)',
               fontFamily,
+              fontVariantLigatures,
             }}
           >
             {lineNumber}
           </div>
-          <div className="overflow-hidden px-4 py-2" style={{ fontFamily }}>
+          <div className="overflow-hidden px-4 py-2" style={{ fontFamily, fontVariantLigatures }}>
             {index === 0 ? (
               <>
                 <span style={{ color: keywordColor }}>const</span>{' '}
                 <span style={{ color: propertyColor }}>themePreview</span>: ThemeConfig ={' '}
                 <span>{'{'}</span>
               </>
-            ) : index === 4 ? (
+            ) : index === rows.length - 1 ? (
               <span>{key}</span>
             ) : (
               <>
                 <span className="opacity-70">  </span>
                 <span style={{ color: propertyColor }}>{key}</span>:&nbsp;
-                <span
-                  style={{
-                    color: index === 3 ? numericColor : valueColor,
-                  }}
-                >
-                  {value}
-                </span>
+                <span style={{ color: valueColor }}>{value}</span>
                 {suffix ? <span>{suffix}</span> : null}
                 <span>,</span>
               </>
@@ -1980,8 +2503,6 @@ interface EditorThemeCardProps {
   onForegroundChange: (value: string) => void;
   onSyntaxColorChange: (key: SyntaxColorKey, value: string) => void;
   onEditorColorChange: (key: EditorColorKey, value: string) => void;
-  onCodeFontChange: (value: CodeFontPreference) => void;
-  onContrastChange: (value: number) => void;
 }
 
 const EditorThemeCard = ({
@@ -1999,8 +2520,6 @@ const EditorThemeCard = ({
   onForegroundChange,
   onSyntaxColorChange,
   onEditorColorChange,
-  onCodeFontChange,
-  onContrastChange,
 }: EditorThemeCardProps): JSX.Element => {
   const title = mode === 'light' ? 'Light theme' : 'Dark theme';
   const resolvedVisuals = React.useMemo(() => resolveEditorThemeVisuals(theme, mode), [mode, theme]);
@@ -2062,14 +2581,6 @@ const EditorThemeCard = ({
       <SettingRow
         title="Foreground"
         control={<HexColorControl value={theme.foreground} onChange={onForegroundChange} />}
-      />
-      <SettingRow
-        title="Code font"
-        control={<CodeFontSelect value={theme.codeFont} onSelect={onCodeFontChange} />}
-      />
-      <SettingRow
-        title="Contrast"
-        control={<ContrastSlider value={theme.contrast} onChange={onContrastChange} />}
       />
       <ThemeColorSection
         mode={appearanceMode}
@@ -2342,7 +2853,7 @@ const EditorThemePresetSelect = ({
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-stone-500" />
         </SettingsSelectTrigger>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="max-h-[360px] w-[230px] overflow-y-auto rounded-[22px] p-2">
+      <DropdownMenuContent align="end" className="zeroade-dropdown-scroll max-h-[360px] w-[230px] overflow-y-auto rounded-[22px] p-2">
         {editorThemePresetOptions.map((option) => {
           const isSelected = option.value === value;
           const badgeBackground =
@@ -2384,6 +2895,11 @@ interface CodeFontSelectProps {
   onSelect: (value: CodeFontPreference) => void;
 }
 
+interface EditorLigaturesSwitchProps {
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}
+
 interface EditorFontSizeSelectProps {
   value: number;
   onSelect: (value: number) => void;
@@ -2400,7 +2916,7 @@ const EditorFontSizeSelect = ({ value, onSelect }: EditorFontSizeSelectProps): J
         <ChevronDown className="h-3.5 w-3.5 text-stone-500" />
       </SettingsSelectTrigger>
     </DropdownMenuTrigger>
-    <DropdownMenuContent align="end" className="max-h-[320px] w-[128px] overflow-y-auto rounded-[22px] p-2">
+    <DropdownMenuContent align="end" className="zeroade-dropdown-scroll max-h-[320px] w-[128px] overflow-y-auto rounded-[22px] p-2">
       {editorFontSizeOptions.map((fontSize) => {
         const isSelected = fontSize === value;
 
@@ -2438,7 +2954,7 @@ const CodeFontSelect = ({ value, onSelect }: CodeFontSelectProps): JSX.Element =
           <ChevronDown className="h-3.5 w-3.5 text-stone-500" />
         </SettingsSelectTrigger>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-[220px] rounded-[22px] p-2">
+      <DropdownMenuContent align="end" className="w-[240px] rounded-[22px] p-2">
         {codeFontOptions.map((option) => {
           const isSelected = option.value === value;
 
@@ -2463,26 +2979,33 @@ const CodeFontSelect = ({ value, onSelect }: CodeFontSelectProps): JSX.Element =
   );
 };
 
-interface ContrastSliderProps {
-  value: number;
-  onChange: (value: number) => void;
-}
-
-const ContrastSlider = ({ value, onChange }: ContrastSliderProps): JSX.Element => (
-  <div className="flex items-center gap-3">
-    <input
-      type="range"
-      min={0}
-      max={100}
-      value={value}
-      onChange={(event) => {
-        onChange(Number.parseInt(event.target.value, 10));
-      }}
-      className="h-1 w-40 cursor-pointer accent-stone-900"
-      aria-label="Adjust editor contrast"
+const EditorLigaturesSwitch = ({
+  checked,
+  onCheckedChange,
+}: EditorLigaturesSwitchProps): JSX.Element => (
+  <button
+    type="button"
+    role="switch"
+    aria-checked={checked}
+    aria-label="Toggle editor font ligatures"
+    data-state={checked ? 'checked' : 'unchecked'}
+    className={cn(
+      'relative inline-flex h-6 w-10 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--zeroade-selection)]',
+      checked
+        ? 'border-transparent bg-[var(--zeroade-accent-strong)]'
+        : 'border-stone-300 bg-stone-100',
+    )}
+    onClick={() => {
+      onCheckedChange(!checked);
+    }}
+  >
+    <span
+      className={cn(
+        'pointer-events-none absolute left-0.5 h-5 w-5 rounded-full border border-black/10 bg-[white] shadow-sm transition-transform',
+        checked && 'translate-x-4',
+      )}
     />
-    <span className="w-8 text-right text-[13px] text-stone-600">{value}</span>
-  </div>
+  </button>
 );
 
 interface AccentColorSelectProps {
@@ -2539,8 +3062,6 @@ const AccentColorSelect = ({ value, onSelect }: AccentColorSelectProps): JSX.Ele
 interface AgentsSettingsSectionProps {
   workspacePath: string;
   agentPreset: AcpAgentPreset;
-  codexAgentConfig: AcpCustomAgentConfig | null;
-  claudeAgentConfig: AcpCustomAgentConfig | null;
   customAgentConfig: AcpCustomAgentConfig | null;
   onSelectAgentPreset: (selection: AgentPresetSelection) => void;
 }
@@ -2548,8 +3069,6 @@ interface AgentsSettingsSectionProps {
 const AgentsSettingsSection = ({
   workspacePath,
   agentPreset,
-  codexAgentConfig,
-  claudeAgentConfig,
   customAgentConfig,
   onSelectAgentPreset,
 }: AgentsSettingsSectionProps): JSX.Element => {
@@ -2976,19 +3495,6 @@ const AgentsSettingsSection = ({
         : agentPreset === 'claude'
           ? (claudeRegistryAgent?.icon ?? null)
           : null;
-  const currentAgentPreview =
-    agentPreset === 'custom'
-      ? toCommandPreview(customAgentConfig)
-      : agentPreset === 'codex'
-        ? codexAgentConfig
-          ? toCommandPreview(codexAgentConfig)
-          : 'Uses the bundled Codex ACP adapter.'
-        : agentPreset === 'claude'
-          ? claudeAgentConfig
-            ? toCommandPreview(claudeAgentConfig)
-            : 'Uses the bundled Claude Code ACP adapter.'
-          : 'Select an ACP agent to start new sessions with.';
-
   return (
     <>
       <SectionGroup title="Default">
@@ -3009,11 +3515,6 @@ const AgentsSettingsSection = ({
                 onSelectCustom={handleUseCustomAgent}
               />
             }
-          />
-          <SettingRow
-            title="Current launch command"
-            description={currentAgentPreview}
-            control={<PillLabel>{agentPreset === 'custom' ? 'Custom' : toPresetLabel(agentPreset)}</PillLabel>}
           />
           <SettingRow
             title="Installed agents"
@@ -3472,7 +3973,7 @@ const AgentPresetSelect = ({
         <ChevronDown className="h-3.5 w-3.5 shrink-0 text-stone-500" />
       </SettingsSelectTrigger>
     </DropdownMenuTrigger>
-    <DropdownMenuContent align="end" className="max-h-[360px] w-[260px] overflow-y-auto rounded-[22px] p-2">
+    <DropdownMenuContent align="end" className="zeroade-dropdown-scroll max-h-[360px] w-[260px] overflow-y-auto rounded-[22px] p-2">
       <SettingsSelectItem selected={agentPreset === 'codex'} onSelect={() => onSelectBuiltIn('codex')}>
         <span className="flex min-w-0 flex-1 items-center gap-3">
           <AgentAvatar

@@ -215,94 +215,106 @@ export const CommandPalette = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="no-drag max-h-[76vh] max-w-[620px] overflow-hidden p-0"
+        className="no-drag max-w-[620px] border-0 bg-transparent p-0 shadow-none"
       >
-        <div className="p-3">
-          <label className="flex items-center gap-2 rounded-xl bg-stone-50 px-3 py-2">
-            <Search className="h-4 w-4 text-stone-500" />
-            <input
-              autoFocus
-              value={query}
-              onChange={(event) => handleQueryChange(event.target.value)}
-              onKeyDown={handleInputKeyDown}
-              placeholder={placeholder}
-              className="w-full bg-transparent text-sm text-stone-700 placeholder:text-stone-400 focus:outline-none"
-            />
-          </label>
-        </div>
+        <div className="relative max-h-[76vh] overflow-hidden rounded-[22px] border border-stone-200/85 bg-white/24 shadow-[0_30px_90px_-42px_rgba(15,23,42,0.45),0_1px_0_rgba(255,255,255,0.65)_inset,0_20px_34px_-28px_rgba(255,255,255,0.78)_inset] backdrop-blur-[30px] backdrop-saturate-150">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-[linear-gradient(180deg,rgba(255,255,255,0.76),rgba(255,255,255,0.24),transparent)]"
+          />
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-8 top-0 h-px bg-white/80"
+          />
 
-        <div
-          className={cn(
-            'overflow-y-auto px-3 py-3',
-            filterItems ? 'max-h-[56vh]' : 'h-[52vh] min-h-[280px] max-h-[56vh]',
-          )}
-        >
-          <div className="space-y-5 pb-2">
-            {groupedItems.length === 0 && (
-              <div className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-500">
-                {loading ? 'Searching…' : emptyMessage}
-              </div>
+          <div className="relative p-3">
+            <label className="flex items-center gap-2 rounded-xl border border-white/80 bg-white px-3 py-2 shadow-[0_1px_0_rgba(255,255,255,0.82)_inset,0_10px_24px_-20px_rgba(15,23,42,0.18)]">
+              <Search className="h-4 w-4 text-stone-500" />
+              <input
+                autoFocus
+                value={query}
+                onChange={(event) => handleQueryChange(event.target.value)}
+                onKeyDown={handleInputKeyDown}
+                placeholder={placeholder}
+                className="w-full bg-transparent text-sm text-stone-700 placeholder:text-stone-500 focus:outline-none"
+              />
+            </label>
+          </div>
+
+          <div
+            className={cn(
+              'relative overflow-y-auto px-3 py-3',
+              filterItems ? 'max-h-[56vh]' : 'h-[52vh] min-h-[280px] max-h-[56vh]',
             )}
-
-            {groupedItems.map((group) => (
-              <section key={group.section} className="space-y-2.5">
-                <h3 className="px-1 text-[13px] font-medium text-stone-600">
-                  {group.section}
-                </h3>
-
-                <div className="space-y-1.5">
-                  {group.items.map((item) => (
-                    <button
-                      type="button"
-                      key={item.id}
-                      ref={(element) => {
-                        if (element) {
-                          itemButtonByIdRef.current.set(item.id, element);
-                          return;
-                        }
-
-                        itemButtonByIdRef.current.delete(item.id);
-                      }}
-                      aria-selected={activeItemId === item.id}
-                      className={cn(
-                        'no-drag flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-stone-100',
-                        activeItemId === item.id && 'bg-stone-100',
-                      )}
-                      onMouseEnter={() => {
-                        suppressNextPreviewRef.current = false;
-                        setActiveItemId(item.id);
-                      }}
-                      onFocus={() => {
-                        suppressNextPreviewRef.current = false;
-                        setActiveItemId(item.id);
-                      }}
-                      onClick={() => selectItem(item)}
-                    >
-                      <span className="mt-0.5 rounded-md bg-stone-100 p-1 text-stone-500">
-                        {item.icon === 'folder' ? (
-                          <FolderOpen className="h-3.5 w-3.5" />
-                        ) : item.icon === 'file' ? (
-                          <FileText className="h-3.5 w-3.5" />
-                        ) : (
-                          <Hash className="h-3.5 w-3.5" />
-                        )}
-                      </span>
-
-                      <span className="min-w-0">
-                        <span className="block truncate text-sm font-normal text-stone-700">
-                          {item.title}
-                        </span>
-                        {item.subtitle ? (
-                          <span className="block truncate text-xs text-stone-500">
-                            {item.subtitle}
-                          </span>
-                        ) : null}
-                      </span>
-                    </button>
-                  ))}
+          >
+            <div className="space-y-5 pb-2">
+              {groupedItems.length === 0 && (
+                <div className="rounded-xl bg-white/18 px-3 py-2 text-sm text-stone-500 backdrop-blur-md">
+                  {loading ? 'Searching…' : emptyMessage}
                 </div>
-              </section>
-            ))}
+              )}
+
+              {groupedItems.map((group) => (
+                <section key={group.section} className="space-y-2.5">
+                  <h3 className="px-1 text-[13px] font-medium text-stone-600/90">
+                    {group.section}
+                  </h3>
+
+                  <div className="space-y-1.5">
+                    {group.items.map((item) => (
+                      <button
+                        type="button"
+                        key={item.id}
+                        ref={(element) => {
+                          if (element) {
+                            itemButtonByIdRef.current.set(item.id, element);
+                            return;
+                          }
+
+                          itemButtonByIdRef.current.delete(item.id);
+                        }}
+                        aria-selected={activeItemId === item.id}
+                        className={cn(
+                          'no-drag flex w-full items-start gap-2 rounded-xl border border-transparent px-2.5 py-2 text-left',
+                          activeItemId === item.id &&
+                            'border-stone-300/80 bg-stone-200/95',
+                        )}
+                        onMouseEnter={() => {
+                          suppressNextPreviewRef.current = false;
+                          setActiveItemId(item.id);
+                        }}
+                        onFocus={() => {
+                          suppressNextPreviewRef.current = false;
+                          setActiveItemId(item.id);
+                        }}
+                        onClick={() => selectItem(item)}
+                      >
+                        <span className="mt-0.5 p-1 text-stone-500">
+                          {item.icon === 'folder' ? (
+                            <FolderOpen className="h-3.5 w-3.5" />
+                          ) : item.icon === 'file' ? (
+                            <FileText className="h-3.5 w-3.5" />
+                          ) : (
+                            <Hash className="h-3.5 w-3.5" />
+                          )}
+                        </span>
+
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-normal text-stone-700">
+                            {item.title}
+                          </span>
+                          {item.subtitle ? (
+                            <span className="block truncate text-xs text-stone-500">
+                              {item.subtitle}
+                            </span>
+                          ) : null}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
           </div>
         </div>
       </DialogContent>

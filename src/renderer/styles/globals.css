@@ -11,6 +11,8 @@
   --zeroade-selection: rgba(74, 74, 74, 0.18);
   --zeroade-sidebar-hover-shadow: 0 12px 28px -18px rgba(32, 28, 24, 0.26),
     0 4px 12px -10px rgba(32, 28, 24, 0.18);
+  --zeroade-sidebar-hover-bg: rgba(255, 255, 255, 0.55);
+  --zeroade-sidebar-active-bg: rgba(255, 255, 255, 0.45);
   --zeroade-diff-insert-line-bg: #dce8d7;
   --zeroade-diff-insert-text-bg: #cfe0c8;
   --zeroade-diff-insert-gutter-bg: #d3e2cb;
@@ -87,6 +89,8 @@
   --zeroade-selection: rgba(148, 163, 184, 0.22);
   --zeroade-sidebar-hover-shadow: 0 14px 30px -20px rgba(0, 0, 0, 0.62),
     0 6px 14px -12px rgba(0, 0, 0, 0.52);
+  --zeroade-sidebar-hover-bg: rgba(18, 18, 24, 0.9);
+  --zeroade-sidebar-active-bg: rgba(7, 7, 10, 0.94);
   --zeroade-diff-insert-line-bg: rgba(64, 89, 72, 0.55);
   --zeroade-diff-insert-text-bg: rgba(57, 81, 65, 0.72);
   --zeroade-diff-insert-gutter-bg: rgba(54, 76, 61, 0.72);
@@ -118,6 +122,30 @@
 :root[data-zeroade-theme='dark'] .bg-\[\#fdfdfff2\],
 :root[data-zeroade-theme='dark'] [class*='bg-[rgba(249,250,252'] {
   background-color: var(--zeroade-bg-panel) !important;
+}
+
+.zeroade-sidebar-shell-surface {
+  background: rgba(249, 250, 252, 0.02);
+  backdrop-filter: blur(1px) saturate(125%);
+  -webkit-backdrop-filter: blur(1px) saturate(125%);
+}
+
+.zeroade-sidebar-panel-surface {
+  background: rgba(249, 250, 252, 0.02);
+  backdrop-filter: blur(1px) saturate(125%);
+  -webkit-backdrop-filter: blur(1px) saturate(125%);
+}
+
+:root[data-zeroade-theme='dark'] .zeroade-sidebar-shell-surface {
+  background: rgba(11, 11, 14, 0.9) !important;
+  backdrop-filter: blur(18px) saturate(120%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(120%) !important;
+}
+
+:root[data-zeroade-theme='dark'] .zeroade-sidebar-panel-surface {
+  background: rgba(11, 11, 14, 0.9) !important;
+  backdrop-filter: blur(18px) saturate(120%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(120%) !important;
 }
 
 :root[data-zeroade-theme='dark'] .bg-white,
@@ -258,39 +286,6 @@
   color: var(--zeroade-text-strong) !important;
 }
 
-:root .zeroade-switch-track {
-  border: 1px solid rgba(120, 113, 108, 0.2);
-  background-color: #e7e5e4;
-  transition-property: background-color, border-color;
-  transition-duration: 140ms;
-  transition-timing-function: ease-out;
-}
-
-:root .zeroade-switch-track[data-state='checked'] {
-  border-color: #2563eb;
-  background-color: #2563eb;
-}
-
-:root .zeroade-switch-thumb {
-  background-color: #ffffff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
-}
-
-:root[data-zeroade-theme='dark'] .zeroade-switch-track {
-  border-color: #2f3548;
-  background-color: #1b2030;
-}
-
-:root[data-zeroade-theme='dark'] .zeroade-switch-track[data-state='checked'] {
-  border-color: #4e8bff;
-  background-color: #4e8bff;
-}
-
-:root[data-zeroade-theme='dark'] .zeroade-switch-thumb {
-  background-color: #eef2ff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
-}
-
 :root[data-zeroade-theme='dark'] .zeroade-agent-icon-image {
   filter: brightness(0) invert(1);
 }
@@ -391,9 +386,7 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
 :root[data-zeroade-theme='dark'] .zeroade-notification-card {
   border-color: var(--zeroade-border) !important;
   background: var(--zeroade-bg-elev) !important;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.02),
-    0 16px 28px -26px rgba(0, 0, 0, 0.78) !important;
+  box-shadow: none !important;
 }
 
 :root[data-zeroade-theme='dark'] .zeroade-notification-card:hover {
@@ -458,6 +451,30 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
 .zeroade-sidebar-hover-shadow:hover,
 .zeroade-sidebar-hover-shadow:focus-visible {
   box-shadow: var(--zeroade-sidebar-hover-shadow);
+}
+
+.zeroade-sidebar-hover-surface:hover,
+.zeroade-sidebar-hover-surface:focus-visible,
+.zeroade-sidebar-hover-surface[data-state='open'] {
+  background-color: var(--zeroade-sidebar-hover-bg);
+}
+
+.zeroade-sidebar-active-surface,
+.zeroade-sidebar-active-surface:hover,
+.zeroade-sidebar-active-surface:focus-visible {
+  background-color: var(--zeroade-sidebar-active-bg);
+}
+
+.zeroade-danger-hover:hover,
+.zeroade-danger-hover:focus-visible {
+  background-color: #ffe4e6;
+  color: #be123c;
+}
+
+:root[data-zeroade-theme='dark'] .zeroade-danger-hover:hover,
+:root[data-zeroade-theme='dark'] .zeroade-danger-hover:focus-visible {
+  background-color: rgba(76, 5, 25, 0.4) !important;
+  color: #fecdd3 !important;
 }
 
 .zeroade-inline-monaco-diff .monaco-editor .line-insert,
@@ -577,10 +594,26 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
   box-shadow: 0 12px 28px -24px var(--vscode-widget-shadow, rgba(15, 23, 42, 0.18)) !important;
 }
 
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget,
+:root[data-zeroade-theme='dark'] .monaco-editor .findOptionsWidget {
+  background: rgba(16, 16, 19, 0.92) !important;
+  color: var(--zeroade-text) !important;
+  border: 1px solid rgba(255, 255, 255, 0.07) !important;
+  box-shadow:
+    0 22px 56px -36px rgba(0, 0, 0, 0.8),
+    0 10px 24px -18px rgba(0, 0, 0, 0.58) !important;
+  backdrop-filter: blur(18px) saturate(120%);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
+}
+
 .monaco-editor .find-widget {
   overflow: hidden;
   border: 0 !important;
   border-radius: 12px !important;
+}
+
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget {
+  border-radius: 18px !important;
 }
 
 .monaco-editor .find-widget .monaco-sash {
@@ -598,10 +631,31 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
     background-color 140ms ease;
 }
 
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget > .find-part .monaco-inputbox,
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget > .replace-part .monaco-inputbox {
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  background: rgba(255, 255, 255, 0.03) !important;
+}
+
 .monaco-editor .find-widget .monaco-inputbox.synthetic-focus {
   outline: none !important;
   border-color: var(--vscode-input-border, transparent) !important;
   box-shadow: none !important;
+}
+
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget .monaco-inputbox.synthetic-focus {
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+}
+
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget .monaco-inputbox .input,
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget .monaco-inputbox input {
+  color: var(--zeroade-text-strong) !important;
+}
+
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget .monaco-inputbox .input::placeholder,
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget .monaco-inputbox input::placeholder {
+  color: var(--zeroade-text-faint) !important;
 }
 
 .monaco-editor .find-widget .matchesCount {
@@ -609,6 +663,10 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
   padding-top: 0;
   color: var(--vscode-peekViewTitleDescription-foreground, var(--vscode-editorWidget-foreground));
   font-size: 11px;
+}
+
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget .matchesCount {
+  color: var(--zeroade-text-faint) !important;
 }
 
 .monaco-editor .find-widget .button,
@@ -635,14 +693,9 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
 }
 
 .monaco-editor .find-widget > .button.codicon-widget-close {
-  top: 5px;
+  top: 8px;
   right: 8px;
   transform: none;
-}
-
-.monaco-editor .find-widget:not(.replaceToggled) > .button.codicon-widget-close {
-  top: 50%;
-  transform: translateY(-50%);
 }
 
 .monaco-editor .find-widget .button.button:not(.disabled):hover,
@@ -674,7 +727,7 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
 
 :root[data-zeroade-theme='dark'] .monaco-editor .find-widget .monaco-custom-toggle.checked,
 :root[data-zeroade-theme='dark'] .monaco-editor .findOptionsWidget .monaco-custom-toggle.checked {
-  background-color: var(--zeroade-bg-soft) !important;
+  background-color: rgba(255, 255, 255, 0.08) !important;
   color: var(--zeroade-text-strong) !important;
 }
 
@@ -689,6 +742,11 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
   padding: 3px;
   border: 0 !important;
   border-radius: 999px;
+}
+
+:root[data-zeroade-theme='dark'] .monaco-editor .find-widget,
+:root[data-zeroade-theme='dark'] .monaco-editor .findOptionsWidget {
+  border: 1px solid rgba(255, 255, 255, 0.07) !important;
 }
 
 .monaco-editor .zone-widget .zone-widget-container.reference-zone-widget {
@@ -1025,6 +1083,33 @@ textarea {
 }
 
 ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.zeroade-dropdown-scroll {
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.zeroade-dropdown-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.zeroade-dropdown-scroll::-webkit-scrollbar-thumb {
+  background: rgba(139, 132, 121, 0.24);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+:root[data-zeroade-theme='dark'] .zeroade-dropdown-scroll::-webkit-scrollbar-thumb {
+  background: rgba(99, 99, 108, 0.42);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.zeroade-dropdown-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
 

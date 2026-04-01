@@ -13,7 +13,12 @@ export type EditorThemePreset =
   | 'paper'
   | 'zero'
   | 'custom';
-export type CodeFontPreference = 'system' | 'sf-mono' | 'menlo';
+export type CodeFontPreference =
+  | 'system'
+  | 'sf-mono'
+  | 'menlo'
+  | 'fira-code'
+  | 'jetbrains-mono';
 export type ResolvedMonacoTheme = 'zeroade-editor-light' | 'zeroade-editor-dark';
 export type AccentColorPreference =
   | 'default'
@@ -28,6 +33,7 @@ export type AccentColorPreference =
 export interface EditorThemeFonts {
   code: CodeFontPreference | null;
   ui: string | null;
+  ligatures?: boolean | null;
 }
 
 export interface EditorThemeSemanticColors {
@@ -85,6 +91,7 @@ export interface EditorThemeSettings {
   background: string;
   foreground: string;
   codeFont: CodeFontPreference;
+  fontLigatures: boolean;
   uiFont: string | null;
   contrast: number;
   opaqueWindows: boolean;
@@ -118,6 +125,10 @@ const CODE_FONT_STACKS: Record<CodeFontPreference, string> = {
   'sf-mono':
     '"SF Mono", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
   menlo: 'Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+  'fira-code':
+    '"Fira Code", "FiraCode Nerd Font", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+  'jetbrains-mono':
+    '"JetBrains Mono", "JetBrainsMono Nerd Font", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -226,7 +237,13 @@ const parseEditorThemePreset = (value: unknown): EditorThemePreset | null => {
 };
 
 const parseCodeFontPreference = (value: unknown): CodeFontPreference | null => {
-  if (value === 'system' || value === 'sf-mono' || value === 'menlo') {
+  if (
+    value === 'system' ||
+    value === 'sf-mono' ||
+    value === 'menlo' ||
+    value === 'fira-code' ||
+    value === 'jetbrains-mono'
+  ) {
     return value;
   }
 
@@ -266,7 +283,10 @@ const resolveTheme = (theme: ThemePreference): EditorThemeMode => {
 
 const DEFAULT_EDITOR_THEME_EXTRAS: Record<
   EditorThemeMode,
-  Omit<EditorThemeSettings, 'preset' | 'accent' | 'background' | 'foreground' | 'codeFont' | 'contrast'>
+  Omit<
+    EditorThemeSettings,
+    'preset' | 'accent' | 'background' | 'foreground' | 'codeFont' | 'fontLigatures' | 'contrast'
+  >
 > = {
   light: {
     uiFont: null,
@@ -289,7 +309,12 @@ const EDITOR_THEME_PRESETS: Record<
   Record<
     EditorThemeMode,
     Pick<EditorThemeSettings, 'accent' | 'background' | 'foreground' | 'codeFont' | 'contrast'> &
-      Partial<Pick<EditorThemeSettings, 'uiFont' | 'opaqueWindows' | 'diffAdded' | 'diffRemoved' | 'skill'>>
+      Partial<
+        Pick<
+          EditorThemeSettings,
+          'fontLigatures' | 'uiFont' | 'opaqueWindows' | 'diffAdded' | 'diffRemoved' | 'skill'
+        >
+      >
   >
 > = {
   absolutely: {
@@ -484,6 +509,7 @@ export const getEditorThemePresetDefaults = (
     background: base.background,
     foreground: base.foreground,
     codeFont: base.codeFont,
+    fontLigatures: base.fontLigatures ?? false,
     uiFont: base.uiFont ?? extras.uiFont,
     contrast: base.contrast,
     opaqueWindows: base.opaqueWindows ?? extras.opaqueWindows,
@@ -510,6 +536,7 @@ const normalizeEditorThemeSettings = (
     background: normalizeHexColor(value.background, base.background),
     foreground: normalizeHexColor(value.foreground, base.foreground),
     codeFont: parseCodeFontPreference(value.codeFont) ?? base.codeFont,
+    fontLigatures: typeof value.fontLigatures === 'boolean' ? value.fontLigatures : base.fontLigatures,
     uiFont: typeof value.uiFont === 'string' && value.uiFont.trim().length > 0 ? value.uiFont.trim() : null,
     contrast:
       typeof value.contrast === 'number' && Number.isFinite(value.contrast)
@@ -630,6 +657,9 @@ const parseTransferCodeFont = (value: unknown, fallback: CodeFontPreference): Co
 
   return parseCodeFontPreference(value) ?? fallback;
 };
+
+const parseTransferFontLigatures = (value: unknown, fallback: boolean): boolean =>
+  typeof value === 'boolean' ? value : fallback;
 
 const parseOptionalUiFont = (value: unknown, fallback: string | null): string | null => {
   if (value === null) {
@@ -858,6 +888,14 @@ const parseIntellijCodeFont = (
     return 'menlo';
   }
 
+  if (normalized.includes('fira code') || normalized.includes('firacode')) {
+    return 'fira-code';
+  }
+
+  if (normalized.includes('jetbrains mono') || normalized.includes('jetbrainsmono')) {
+    return 'jetbrains-mono';
+  }
+
   return fallback;
 };
 
@@ -872,6 +910,7 @@ export const serializeEditorThemeForClipboard = (
       contrast: settings.contrast,
       fonts: {
         code: toTransferCodeFont(settings.codeFont),
+        ligatures: settings.fontLigatures,
         ui: settings.uiFont,
       } as EditorThemeFonts,
       editorColors: settings.editorColors,
@@ -938,6 +977,7 @@ export const parseEditorThemeFromClipboard = (
     background: normalizeHexColor(theme.surface, base.background),
     foreground: normalizeHexColor(theme.ink, base.foreground),
     codeFont: parseTransferCodeFont(fonts?.code, base.codeFont),
+    fontLigatures: parseTransferFontLigatures(fonts?.ligatures, base.fontLigatures),
     uiFont: parseOptionalUiFont(fonts?.ui, base.uiFont),
     contrast:
       typeof theme.contrast === 'number' && Number.isFinite(theme.contrast)
@@ -1166,6 +1206,7 @@ export const parseEditorThemeFromIntellijIcls = (
     background,
     foreground,
     codeFont: parseIntellijCodeFont(options.EDITOR_FONT_NAME, base.codeFont),
+    fontLigatures: base.fontLigatures,
     uiFont: base.uiFont,
     contrast: deriveImportedContrast(background, foreground, base.contrast),
     opaqueWindows: base.opaqueWindows,
@@ -1208,6 +1249,9 @@ export const readResolvedEditorThemeSettings = (): EditorThemeSettings => {
 
 export const readResolvedCodeFontFamily = (): string =>
   getCodeFontFamily(readResolvedEditorThemeSettings().codeFont);
+
+export const readResolvedCodeFontLigatures = (): boolean =>
+  readResolvedEditorThemeSettings().fontLigatures;
 
 export const readResolvedEditorFontSize = (): number =>
   readUiPreferences().editorFontSize;

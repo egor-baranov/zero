@@ -34,7 +34,7 @@ import type {
 } from '@shared/types/workspace';
 
 const execFileAsync = promisify(execFile);
-const MAX_FILE_COUNT = 400;
+const MAX_FILE_COUNT = 5_000;
 const MAX_FILE_SIZE_BYTES = 1_000_000;
 const MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SEARCH_OUTPUT_BYTES = 8 * 1024 * 1024;

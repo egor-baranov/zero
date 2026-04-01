@@ -37,14 +37,18 @@ import type {
 import type {
   LspCompletionRequest,
   LspCompletionResult,
+  LspDeleteServerRequest,
   LspDefinitionResult,
   LspDocumentCloseRequest,
   LspDocumentSyncRequest,
   LspDocumentSyncResult,
   LspHoverResult,
+  LspInstallServerRequest,
+  LspListServersResult,
   LspReferencesRequest,
   LspReferencesResult,
   LspRendererEvent,
+  LspServerMutationResult,
   LspSemanticTokensRequest,
   LspSemanticTokensResult,
   LspTextDocumentPositionRequest,
@@ -200,6 +204,13 @@ export interface DesktopApi {
   lspReferences: (
     request: LspReferencesRequest,
   ) => Promise<LspReferencesResult>;
+  lspListServers: () => Promise<LspListServersResult>;
+  lspInstallServer: (
+    request: LspInstallServerRequest,
+  ) => Promise<LspServerMutationResult>;
+  lspDeleteServer: (
+    request: LspDeleteServerRequest,
+  ) => Promise<LspServerMutationResult>;
   onLspEvent: (listener: (event: LspRendererEvent) => void) => () => void;
   acpInitialize: (request: AcpInitializeRequest) => Promise<AcpInitializeResult>;
   acpSessionNew: (request: AcpSessionNewRequest) => Promise<AcpSessionNewResult>;

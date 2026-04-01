@@ -183,7 +183,7 @@ export const BrowserPushPanel = ({
     <aside
       style={{ width: open ? panelWidth : 0 }}
       className={cn(
-        'zeroade-notifications-panel relative h-full shrink-0 overflow-hidden border-l border-l-[var(--zeroade-shell-divider)] bg-[#fdfdfff2] shadow-[-18px_0_36px_-30px_rgba(28,28,33,0.18)] backdrop-blur-xl transition-[width] duration-200 ease-out',
+        'zeroade-notifications-panel relative h-full shrink-0 overflow-hidden border-l border-l-[var(--zeroade-shell-divider)] bg-[#fdfdfff2] backdrop-blur-xl transition-[width] duration-200 ease-out',
         isResizing && 'transition-none',
         !open && 'border-l-0',
       )}
@@ -225,7 +225,7 @@ export const BrowserPushPanel = ({
             <div className="space-y-2 px-3 py-3">
               {items.map((item) => {
                 const cardClass = cn(
-                  'zeroade-notification-card w-full min-w-0 rounded-2xl border px-3 py-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.58)] transition-[border-color,background-color,box-shadow] duration-150',
+                  'zeroade-notification-card w-full min-w-0 rounded-2xl border px-3 py-3 text-left transition-[border-color,background-color] duration-150',
                   item.url
                     ? 'no-drag hover:border-stone-300 hover:bg-white/95'
                     : 'cursor-default',

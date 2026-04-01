@@ -6,6 +6,7 @@ import { ensureMonacoThemes } from '@renderer/lib/monaco-theme';
 import {
   getMonacoEditorLineHeight,
   readResolvedCodeFontFamily,
+  readResolvedCodeFontLigatures,
   readResolvedEditorFontSize,
   readResolvedMonacoTheme,
 } from '@renderer/store/ui-preferences';
@@ -309,12 +310,14 @@ export const SideBySideDiffView = ({
           enabled: false,
         },
         lineNumbersMinChars: 3,
+        cursorSmoothCaretAnimation: 'on',
         scrollBeyondLastLine: false,
         wordWrap: 'off',
         minimap: { enabled: false },
         fontSize,
         lineHeight: getMonacoEditorLineHeight(fontSize),
         fontFamily: readResolvedCodeFontFamily(),
+        fontLigatures: readResolvedCodeFontLigatures(),
         scrollbar: {
           horizontalScrollbarSize: 8,
           verticalScrollbarSize: 8,
@@ -379,8 +382,10 @@ export const SideBySideDiffView = ({
       const fontSize = readResolvedEditorFontSize();
       editorRef.current?.updateOptions({
         fontFamily: readResolvedCodeFontFamily(),
+        fontLigatures: readResolvedCodeFontLigatures(),
         fontSize,
         lineHeight: getMonacoEditorLineHeight(fontSize),
+        cursorSmoothCaretAnimation: 'on',
         'semanticHighlighting.enabled': true,
       });
     };

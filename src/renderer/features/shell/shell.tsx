@@ -72,6 +72,28 @@ const getFolderName = (folderPath: string): string =>
   folderPath.split(/[\\/]/).filter(Boolean).pop() ?? folderPath;
 const normalizeMessageText = (value: string): string =>
   value.replace(/\s+/g, ' ').trim();
+const getAttachmentLabel = (attachment: AcpPromptAttachment): string =>
+  attachment.displayPath?.trim() ||
+  attachment.relativePath?.trim() ||
+  getFolderName(attachment.absolutePath);
+const toPromptPreviewText = (
+  text: string,
+  attachments: AcpPromptAttachment[],
+  hasAudio: boolean,
+): string => {
+  const normalizedText = normalizeMessageText(text);
+  if (normalizedText) {
+    return normalizedText;
+  }
+
+  if (attachments.length > 0) {
+    return attachments.length === 1
+      ? `Attached ${getAttachmentLabel(attachments[0])}`
+      : `Attached ${attachments.length} files`;
+  }
+
+  return hasAudio ? VOICE_PROMPT_PREVIEW_TEXT : '';
+};
 const TITLEBAR_ICON_BUTTON_CLASS =
   'no-drag inline-flex h-6 min-h-6 w-6 min-w-6 shrink-0 items-center justify-center rounded-md p-0 text-stone-600 transition-colors hover:bg-white/55 hover:text-stone-700';
 const TITLEBAR_ICON_CLASS = 'h-3.5 w-3.5';
@@ -2284,13 +2306,17 @@ export const Shell = (): JSX.Element => {
               mimeType: audio.mimeType.trim(),
             }
           : null;
-      if (!trimmedText && !normalizedAudio) {
+      if (!trimmedText && attachments.length === 0 && !normalizedAudio) {
         if (audio) {
           setStatusText('Current agent does not accept voice prompts');
         }
         return false;
       }
-      const previewText = trimmedText || VOICE_PROMPT_PREVIEW_TEXT;
+      const previewText = toPromptPreviewText(
+        trimmedText,
+        attachments,
+        normalizedAudio !== null,
+      );
 
       const isDraftThread = threadWorkspaceId.trim().length === 0;
       try {
@@ -2554,7 +2580,7 @@ export const Shell = (): JSX.Element => {
             }
           : null;
 
-      if (!trimmedText && !normalizedAudio) {
+      if (!trimmedText && attachments.length === 0 && !normalizedAudio) {
         return;
       }
 
@@ -2917,9 +2943,6 @@ export const Shell = (): JSX.Element => {
               subtitle: `${match.relativePath} ${match.lineNumber}`,
               keywords: `${match.relativePath} ${match.preview}`,
               icon: 'file' as const,
-              onPreview: () => {
-                revealFileSearchMatch(match, false);
-              },
               onSelect: () => {
                 revealFileSearchMatch(match, true);
               },
@@ -3420,7 +3443,7 @@ export const Shell = (): JSX.Element => {
             <div className="drag-region flex h-full min-w-0">
               <div
                 className={cn(
-                  'shrink-0 overflow-hidden border-r border-r-[var(--zeroade-shell-divider)] bg-[rgba(249,250,252,0.09)] backdrop-blur-[2px] backdrop-saturate-125',
+                  'zeroade-sidebar-shell-surface shrink-0 overflow-hidden border-r border-r-[var(--zeroade-shell-divider)]',
                   !isResizing && 'transition-[width] duration-200 ease-out',
                 )}
                 style={{ width: activeSidebarWidth }}
@@ -3546,7 +3569,7 @@ export const Shell = (): JSX.Element => {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" className="w-56">
                         <DropdownMenuItem onSelect={handleRenameThreadFromMenu}>
-                          Rename thread
+                          Rename
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
@@ -3578,11 +3601,6 @@ export const Shell = (): JSX.Element => {
                     isWebBrowserOpen={isWebBrowserOpen}
                     onToggleTerminal={() => setIsTerminalOpen((previous) => !previous)}
                     isTerminalOpen={isTerminalOpen}
-                    unreadPushCount={unreadBrowserPushCount}
-                    isPushPanelOpen={isBrowserPushPanelOpen}
-                    onTogglePushPanel={() => {
-                      setIsBrowserPushPanelOpen((previous) => !previous);
-                    }}
                   />
                 ) : null}
               </div>
@@ -3600,10 +3618,12 @@ export const Shell = (): JSX.Element => {
                 showResizeHandle={!isCollapsed}
                 onStartResizing={startResizing}
                 workspacePath={workspacePath}
+                selectedWorkspaceId={selectedWorkspaceId}
+                recentWorkspaces={recentWorkspaces}
                 agentPreset={agentPreset}
-                codexAgentConfig={codexAgentConfig}
-                claudeAgentConfig={claudeAgentConfig}
                 customAgentConfig={customAgentConfig}
+                onSelectWorkspace={selectWorkspace}
+                onOpenWorkspaceFromPath={openWorkspaceFromPath}
                 onSelectAgentPreset={handleSelectAgentPreset}
               />
             </main>
@@ -3642,6 +3662,11 @@ export const Shell = (): JSX.Element => {
                   }}
                   onOpenSettings={() => {
                     setIsSettingsOpen(true);
+                  }}
+                  unreadPushCount={unreadBrowserPushCount}
+                  isPushPanelOpen={isBrowserPushPanelOpen}
+                  onTogglePushPanel={() => {
+                    setIsBrowserPushPanelOpen((previous) => !previous);
                   }}
                 />
               </div>

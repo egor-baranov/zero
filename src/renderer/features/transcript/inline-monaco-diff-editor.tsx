@@ -6,6 +6,7 @@ import { ensureMonacoThemes } from '@renderer/lib/monaco-theme';
 import {
   getMonacoInlineDiffLineHeight,
   readResolvedCodeFontFamily,
+  readResolvedCodeFontLigatures,
   readResolvedEditorFontSize,
   readResolvedMonacoTheme,
 } from '@renderer/store/ui-preferences';
@@ -183,6 +184,7 @@ export const InlineMonacoDiffEditor = ({
         glyphMargin: false,
         lineDecorationsWidth: 8,
         lineNumbersMinChars: 3,
+        cursorSmoothCaretAnimation: 'on',
         scrollBeyondLastLine: false,
         wordWrap: 'off',
         minimap: { enabled: false },
@@ -196,6 +198,7 @@ export const InlineMonacoDiffEditor = ({
           bottom: 0,
         },
         fontFamily: readResolvedCodeFontFamily(),
+        fontLigatures: readResolvedCodeFontLigatures(),
         scrollbar: {
           horizontalScrollbarSize: 8,
           verticalScrollbarSize: 8,
@@ -231,8 +234,10 @@ export const InlineMonacoDiffEditor = ({
       setEditorFontSize(fontSize);
       editorRef.current?.updateOptions({
         fontFamily: readResolvedCodeFontFamily(),
+        fontLigatures: readResolvedCodeFontLigatures(),
         fontSize,
         lineHeight: getMonacoInlineDiffLineHeight(fontSize),
+        cursorSmoothCaretAnimation: 'on',
         'semanticHighlighting.enabled': true,
       });
     };

@@ -22,6 +22,7 @@ import { ensureMonacoThemes } from '@renderer/lib/monaco-theme';
 import {
   getMonacoEditorLineHeight,
   readResolvedCodeFontFamily,
+  readResolvedCodeFontLigatures,
   readResolvedEditorFontSize,
   readResolvedMonacoTheme,
 } from '@renderer/store/ui-preferences';
@@ -209,11 +210,13 @@ export const ReviewPanel = ({
       fontSize,
       lineHeight: getMonacoEditorLineHeight(fontSize),
       lineNumbersMinChars: 3,
+      cursorSmoothCaretAnimation: 'on',
       padding: {
         top: 12,
         bottom: 12,
       },
       fontFamily: readResolvedCodeFontFamily(),
+      fontLigatures: readResolvedCodeFontLigatures(),
       overviewRulerLanes: 0,
       hideCursorInOverviewRuler: true,
       scrollbar: {
@@ -601,8 +604,10 @@ export const ReviewPanel = ({
       const fontSize = readResolvedEditorFontSize();
       const nextOptions = {
         fontFamily: readResolvedCodeFontFamily(),
+        fontLigatures: readResolvedCodeFontLigatures(),
         fontSize,
         lineHeight: getMonacoEditorLineHeight(fontSize),
+        cursorSmoothCaretAnimation: 'on' as const,
         'semanticHighlighting.enabled': true as const,
       };
       primaryEditorRef.current?.updateOptions(nextOptions);

@@ -2,9 +2,11 @@ import { ipcMain } from 'electron';
 import { IPC_CHANNELS } from '@shared/contracts/ipc';
 import type {
   LspCompletionRequest,
+  LspDeleteServerRequest,
   LspDocumentCloseRequest,
-  LspReferencesRequest,
   LspDocumentSyncRequest,
+  LspInstallServerRequest,
+  LspReferencesRequest,
   LspSemanticTokensRequest,
   LspTextDocumentPositionRequest,
 } from '@shared/types/lsp';
@@ -51,5 +53,20 @@ export const registerLspIpc = (lspService: LspService): void => {
   ipcMain.handle(
     IPC_CHANNELS.lspReferences,
     (_event, request: LspReferencesRequest) => lspService.references(request),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.lspListServers,
+    () => lspService.listServers(),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.lspInstallServer,
+    (_event, request: LspInstallServerRequest) => lspService.installServer(request),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.lspDeleteServer,
+    (_event, request: LspDeleteServerRequest) => lspService.deleteServer(request),
   );
 };

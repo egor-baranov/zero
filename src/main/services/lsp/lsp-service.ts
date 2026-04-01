@@ -1,8 +1,16 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import {
+  spawn,
+  spawnSync,
+  type ChildProcessWithoutNullStreams,
+} from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, promises as fs } from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 import { app } from 'electron';
 import {
   LSP_SEMANTIC_TOKEN_MODIFIERS,
@@ -12,6 +20,7 @@ import type {
   LspCompletionItem,
   LspCompletionRequest,
   LspCompletionResult,
+  LspDeleteServerRequest,
   LspDefinitionResult,
   LspDiagnostic,
   LspDiagnosticSeverity,
@@ -19,11 +28,17 @@ import type {
   LspDocumentSyncRequest,
   LspDocumentSyncResult,
   LspHoverResult,
+  LspInstallServerRequest,
+  LspListServersResult,
   LspLocation,
+  LspManagedServerInstallKind,
+  LspManagedServerSource,
   LspRange,
   LspReferencesRequest,
   LspReferencesResult,
   LspRendererEvent,
+  LspServerCatalogEntry,
+  LspServerMutationResult,
   LspSemanticTokensRequest,
   LspSemanticTokensResult,
   LspTextDocumentPositionRequest,
@@ -46,13 +61,41 @@ interface LspLaunchCandidate {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  shell?: boolean;
+}
+
+type LspManagedDownloadStrategy = 'rust-analyzer' | 'kotlin-lsp' | 'jdtls';
+type LspManagedToolchainStrategy = 'go-gopls';
+
+interface LspManagedInstallConfig {
+  id: string;
+  kind: LspManagedServerInstallKind;
+  packageName?: string;
+  packages?: string[];
+  relativeScriptPaths?: string[];
+  relativeCommandPaths?: string[];
+  downloadStrategy?: LspManagedDownloadStrategy;
+  toolchainStrategy?: LspManagedToolchainStrategy;
 }
 
 interface LspServerConfig {
   id: string;
+  name: string;
+  description: string;
   languages: string[];
-  launchCandidates: () => LspLaunchCandidate[];
-  installHint?: string;
+  commandNames: string[];
+  args: string[];
+  installHint: string;
+  managedInstall?: LspManagedInstallConfig;
+}
+
+interface LspServerAvailability {
+  source: LspManagedServerSource;
+  installed: boolean;
+  canInstall: boolean;
+  canDelete: boolean;
+  detail: string | null;
+  launchCandidates: LspLaunchCandidate[];
 }
 
 interface LspDocumentState {
@@ -89,22 +132,11 @@ const CLIENT_SEMANTIC_TOKEN_TYPE_INDEX = new Map(
 const CLIENT_SEMANTIC_TOKEN_MODIFIER_INDEX = new Map(
   CLIENT_SEMANTIC_TOKEN_MODIFIERS.map((modifier, index) => [modifier, index]),
 );
-const BUNDLED_LSP_PLATFORM_DIR = `${process.platform}-${process.arch}`;
+const MANAGED_LSP_DIRECTORY_NAME = 'lsp-servers';
 
-const resolveLocalBin = (name: string): string =>
-  path.join(
-    process.cwd(),
-    'node_modules',
-    '.bin',
-    process.platform === 'win32' ? `${name}.cmd` : name,
-  );
-
-const getExecutableName = (name: string): string =>
-  process.platform === 'win32' && !name.endsWith('.cmd') ? `${name}.cmd` : name;
-
-const getBundledExecutableNames = (name: string): string[] =>
+const getExecutableNames = (name: string): string[] =>
   process.platform === 'win32'
-    ? [`${name}.bat`, `${name}.cmd`, `${name}.exe`, name]
+    ? Array.from(new Set([name, `${name}.cmd`, `${name}.exe`, `${name}.bat`]))
     : [name];
 
 const COMMON_BIN_DIRECTORIES = Array.from(
@@ -112,6 +144,7 @@ const COMMON_BIN_DIRECTORIES = Array.from(
     path.join(homedir(), '.local', 'share', 'nvim', 'mason', 'bin'),
     path.join(homedir(), '.local', 'bin'),
     path.join(homedir(), '.asdf', 'shims'),
+    path.join(homedir(), '.cargo', 'bin'),
     path.join(homedir(), '.volta', 'bin'),
     path.join(homedir(), 'go', 'bin'),
     '/opt/homebrew/bin',
@@ -119,61 +152,39 @@ const COMMON_BIN_DIRECTORIES = Array.from(
   ]),
 );
 
-const resolveBundledLspPlatformRoots = (): string[] =>
+const resolveSystemSearchDirectories = (): string[] =>
   Array.from(
     new Set([
-      path.join(process.resourcesPath, 'lsp', BUNDLED_LSP_PLATFORM_DIR),
-      path.join(process.cwd(), '.bundled-tools', 'lsp', BUNDLED_LSP_PLATFORM_DIR),
+      ...(process.env.PATH ?? '')
+        .split(path.delimiter)
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0),
+      ...COMMON_BIN_DIRECTORIES,
     ]),
-  ).filter((candidate) => existsSync(candidate));
+  );
 
-const resolveBundledJavaHome = (): string | null => {
-  for (const root of resolveBundledLspPlatformRoots()) {
-    const candidates =
-      process.platform === 'darwin'
-        ? [path.join(root, 'java', 'openjdk.jdk', 'Contents', 'Home')]
-        : [path.join(root, 'java')];
+const resolveManagedLspRoot = (): string =>
+  path.join(app.getPath('userData'), MANAGED_LSP_DIRECTORY_NAME);
 
-    for (const candidate of candidates) {
-      if (
-        existsSync(
-          path.join(candidate, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'),
-        )
-      ) {
-        return candidate;
-      }
-    }
+const resolveManagedInstallRoot = (installId: string): string =>
+  path.join(resolveManagedLspRoot(), installId);
+
+const resolveDevelopmentPackageRoots = (): string[] => {
+  if (app.isPackaged) {
+    return [];
   }
 
-  return null;
+  return Array.from(new Set([process.cwd()])).filter((candidate) => existsSync(candidate));
 };
 
-const resolveAppPackageRoots = (): string[] => {
-  const candidates = new Set<string>([
-    process.cwd(),
-    path.join(process.resourcesPath, 'app.asar'),
-    path.join(process.resourcesPath, 'app.asar.unpacked'),
-  ]);
-
-  try {
-    const appPath = app.getAppPath();
-    if (appPath) {
-      candidates.add(appPath);
-    }
-  } catch {
-    // Ignore app path lookup errors during early startup and keep other fallbacks.
-  }
-
-  return Array.from(candidates).filter((candidate) => existsSync(candidate));
-};
-
-const resolveBundledNodePackageScripts = (
+const resolveNodePackageScripts = (
+  packageRoots: string[],
   packageName: string,
   relativeScriptPaths: string[],
 ): string[] => {
   const candidates: string[] = [];
 
-  for (const root of resolveAppPackageRoots()) {
+  for (const root of packageRoots) {
     for (const relativeScriptPath of relativeScriptPaths) {
       const candidate = path.join(root, 'node_modules', packageName, relativeScriptPath);
       if (existsSync(candidate)) {
@@ -189,12 +200,29 @@ const resolveCommandInDirectories = (
   command: string,
   directories: string[],
 ): string[] => {
-  const executableName = getExecutableName(command);
+  if (!command) {
+    return [];
+  }
 
-  return directories
-    .map((directory) => path.join(directory, executableName))
-    .filter((candidate) => existsSync(candidate));
+  if (path.isAbsolute(command) || /[\\/]/.test(command)) {
+    return existsSync(command) ? [command] : [];
+  }
+
+  const candidates: string[] = [];
+  for (const executableName of getExecutableNames(command)) {
+    for (const directory of directories) {
+      const candidate = path.join(directory, executableName);
+      if (existsSync(candidate)) {
+        candidates.push(candidate);
+      }
+    }
+  }
+
+  return Array.from(new Set(candidates));
 };
+
+const isShellCommandPath = (command: string): boolean =>
+  process.platform === 'win32' && /\.(cmd|bat)$/i.test(command);
 
 const dedupeLaunchCandidates = (
   candidates: LspLaunchCandidate[],
@@ -212,267 +240,480 @@ const dedupeLaunchCandidates = (
   });
 };
 
+const resolveCommandOnLoginShell = (command: string): string | null => {
+  if (process.platform === 'win32' || !command || /[\\/]/.test(command) || path.isAbsolute(command)) {
+    return null;
+  }
+
+  const shellPath = process.env.SHELL?.trim() || '/bin/zsh';
+  try {
+    const result = spawnSync(shellPath, ['-lc', `command -v '${command.replace(/'/g, `'\\''`)}'`], {
+      encoding: 'utf8',
+    });
+    if (result.status !== 0) {
+      return null;
+    }
+
+    const resolved = result.stdout.trim().split('\n').pop()?.trim();
+    return resolved && existsSync(resolved) ? resolved : null;
+  } catch {
+    return null;
+  }
+};
+
+const resolveFirstExecutablePath = (commands: string[]): string | null => {
+  const searchDirectories = resolveSystemSearchDirectories();
+
+  for (const command of commands) {
+    const fromDirectories = resolveCommandInDirectories(command, searchDirectories)[0];
+    if (fromDirectories) {
+      return fromDirectories;
+    }
+
+    const fromLoginShell = resolveCommandOnLoginShell(command);
+    if (fromLoginShell) {
+      return fromLoginShell;
+    }
+  }
+
+  return null;
+};
+
+const createNodeScriptLaunchCandidates = (
+  scriptPaths: string[],
+  args: string[] = [],
+): LspLaunchCandidate[] =>
+  scriptPaths.map((scriptPath) => ({
+    command: process.execPath,
+    args: [scriptPath, ...args],
+    env: {
+      ELECTRON_RUN_AS_NODE: '1',
+    },
+  }));
+
+const createDirectLaunchCandidates = (
+  commandPaths: string[],
+  args: string[] = [],
+): LspLaunchCandidate[] =>
+  commandPaths.map((commandPath) => ({
+    command: commandPath,
+    args,
+    shell: isShellCommandPath(commandPath),
+  }));
+
+const resolveManagedCommandPaths = (
+  installRoot: string,
+  relativeCommandPaths: string[],
+): string[] =>
+  Array.from(
+    new Set(
+      relativeCommandPaths
+        .map((relativeCommandPath) => path.join(installRoot, relativeCommandPath))
+        .filter((candidate) => existsSync(candidate)),
+    ),
+  );
+
 const resolveExecutableLaunchCandidates = (
   commands: string[],
   args: string[] = [],
 ): LspLaunchCandidate[] => {
   const candidates: LspLaunchCandidate[] = [];
+  const searchDirectories = resolveSystemSearchDirectories();
 
   for (const command of commands) {
-    const localBin = resolveLocalBin(command);
-    if (existsSync(localBin)) {
-      candidates.push({
-        command: localBin,
-        args,
-      });
-    }
-
-    for (const resolvedCommand of resolveCommandInDirectories(
-      command,
-      COMMON_BIN_DIRECTORIES,
-    )) {
+    for (const resolvedCommand of resolveCommandInDirectories(command, searchDirectories)) {
       candidates.push({
         command: resolvedCommand,
         args,
+        shell: isShellCommandPath(resolvedCommand),
+      });
+    }
+
+    const resolvedFromShell = resolveCommandOnLoginShell(command);
+    if (resolvedFromShell) {
+      candidates.push({
+        command: resolvedFromShell,
+        args,
+        shell: isShellCommandPath(resolvedFromShell),
       });
     }
 
     candidates.push({
       command,
       args,
+      shell: isShellCommandPath(command),
     });
   }
 
   return dedupeLaunchCandidates(candidates);
 };
 
-const resolveBundledLaunchCandidates = (
-  serverDirectory: string,
-  commands: string[],
-  args: string[] = [],
-  options?: {
-    includeBundledJavaHome?: boolean;
-  },
-): LspLaunchCandidate[] => {
+const resolveServerLaunchCandidates = (config: LspServerConfig): LspLaunchCandidate[] => {
   const candidates: LspLaunchCandidate[] = [];
-  const bundledJavaHome = options?.includeBundledJavaHome ? resolveBundledJavaHome() : null;
 
-  for (const root of resolveBundledLspPlatformRoots()) {
-    for (const command of commands) {
-      for (const executableName of getBundledExecutableNames(command)) {
-        const bundledCommand = path.join(root, serverDirectory, 'bin', executableName);
+  if (
+    config.managedInstall?.kind === 'npm' &&
+    config.managedInstall.packageName &&
+    config.managedInstall.relativeScriptPaths
+  ) {
+    const managedScriptPaths = resolveNodePackageScripts(
+      [resolveManagedInstallRoot(config.managedInstall.id)],
+      config.managedInstall.packageName,
+      config.managedInstall.relativeScriptPaths,
+    );
+    const developmentScriptPaths = resolveNodePackageScripts(
+      resolveDevelopmentPackageRoots(),
+      config.managedInstall.packageName,
+      config.managedInstall.relativeScriptPaths,
+    );
 
-        if (!existsSync(bundledCommand)) {
-          continue;
-        }
+    candidates.push(...createNodeScriptLaunchCandidates(managedScriptPaths, config.args));
+    candidates.push(...createNodeScriptLaunchCandidates(developmentScriptPaths, config.args));
+  } else if (
+    (config.managedInstall?.kind === 'download' || config.managedInstall?.kind === 'toolchain') &&
+    config.managedInstall.relativeCommandPaths
+  ) {
+    const managedCommandPaths = resolveManagedCommandPaths(
+      resolveManagedInstallRoot(config.managedInstall.id),
+      config.managedInstall.relativeCommandPaths,
+    );
+    candidates.push(...createDirectLaunchCandidates(managedCommandPaths, config.args));
+  }
 
-        candidates.push({
-          command: bundledCommand,
-          args,
-          env: bundledJavaHome ? { JAVA_HOME: bundledJavaHome } : undefined,
-        });
+  candidates.push(...resolveExecutableLaunchCandidates(config.commandNames, config.args));
+  return dedupeLaunchCandidates(candidates);
+};
+
+const resolveServerAvailability = (config: LspServerConfig): LspServerAvailability => {
+  if (config.managedInstall) {
+    const managedRoot = resolveManagedInstallRoot(config.managedInstall.id);
+    const managedInstalled =
+      config.managedInstall.kind === 'npm' &&
+      config.managedInstall.packageName &&
+      config.managedInstall.relativeScriptPaths
+        ? resolveNodePackageScripts(
+            [managedRoot],
+            config.managedInstall.packageName,
+            config.managedInstall.relativeScriptPaths,
+          ).length > 0
+        : (config.managedInstall.kind === 'download' ||
+            config.managedInstall.kind === 'toolchain') &&
+            config.managedInstall.relativeCommandPaths
+          ? resolveManagedCommandPaths(
+              managedRoot,
+              config.managedInstall.relativeCommandPaths,
+            ).length > 0
+          : false;
+
+    if (managedInstalled) {
+      return {
+        source: 'managed',
+        installed: true,
+        canInstall: false,
+        canDelete: true,
+        detail: `Installed in ${managedRoot}.`,
+        launchCandidates: resolveServerLaunchCandidates(config),
+      };
+    }
+
+    if (
+      config.managedInstall.kind === 'npm' &&
+      config.managedInstall.packageName &&
+      config.managedInstall.relativeScriptPaths
+    ) {
+      const developmentRoots = resolveDevelopmentPackageRoots();
+      const developmentScriptPaths = resolveNodePackageScripts(
+        developmentRoots,
+        config.managedInstall.packageName,
+        config.managedInstall.relativeScriptPaths,
+      );
+      if (developmentScriptPaths.length > 0) {
+        const developmentRoot = developmentRoots[0] ?? process.cwd();
+        return {
+          source: 'development',
+          installed: true,
+          canInstall: true,
+          canDelete: false,
+          detail: `Using development dependency from ${developmentRoot}. Install here to pin a managed copy.`,
+          launchCandidates: resolveServerLaunchCandidates(config),
+        };
       }
     }
   }
 
-  return dedupeLaunchCandidates(candidates);
+  const systemExecutablePath = resolveFirstExecutablePath(config.commandNames);
+  if (systemExecutablePath) {
+    return {
+      source: 'system',
+      installed: true,
+      canInstall: Boolean(config.managedInstall),
+      canDelete: false,
+      detail: config.managedInstall
+        ? `Using ${systemExecutablePath}. Install here to pin a managed copy.`
+        : `Using ${systemExecutablePath}.`,
+      launchCandidates: resolveServerLaunchCandidates(config),
+    };
+  }
+
+  return {
+    source: null,
+    installed: false,
+    canInstall: Boolean(config.managedInstall),
+    canDelete: false,
+    detail: config.installHint,
+    launchCandidates: resolveServerLaunchCandidates(config),
+  };
 };
 
-const resolveBundledThenExecutableLaunchCandidates = (
-  bundledServerDirectory: string,
-  commands: string[],
-  args: string[] = [],
-  options?: {
-    includeBundledJavaHome?: boolean;
-  },
-): LspLaunchCandidate[] =>
-  dedupeLaunchCandidates([
-    ...resolveBundledLaunchCandidates(
-      bundledServerDirectory,
-      commands,
-      args,
-      options,
-    ),
-    ...resolveExecutableLaunchCandidates(commands, args),
-  ]);
-
-const resolveBundledNodePackageLaunchCandidates = (
-  packageName: string,
-  relativeScriptPaths: string[],
-  commands: string[],
-  args: string[] = [],
-): LspLaunchCandidate[] =>
-  dedupeLaunchCandidates([
-    ...resolveBundledNodePackageScripts(packageName, relativeScriptPaths).map((scriptPath) => ({
-      command: process.execPath,
-      args: [scriptPath, ...args],
-      env: {
-        ELECTRON_RUN_AS_NODE: '1',
-      },
-    })),
-    ...resolveExecutableLaunchCandidates(commands, args),
-  ]);
-
-const createBundledDiscoveredServerConfig = (
+const createManagedNodeServerConfig = (
   id: string,
+  name: string,
+  description: string,
   languages: string[],
-  bundledServerDirectory: string,
-  commands: string[],
+  commandNames: string[],
   args: string[] = [],
-  options?: {
-    includeBundledJavaHome?: boolean;
-    installHint?: string;
-  },
+  managedInstall: LspManagedInstallConfig,
+  installHint: string,
 ): LspServerConfig => ({
   id,
+  name,
+  description,
   languages,
-  installHint: options?.installHint,
-  launchCandidates: () =>
-    resolveBundledThenExecutableLaunchCandidates(
-      bundledServerDirectory,
-      commands,
-      args,
-      {
-        includeBundledJavaHome: options?.includeBundledJavaHome,
-      },
-    ),
+  commandNames,
+  args,
+  installHint,
+  managedInstall,
 });
 
-const createBundledNodePackageServerConfig = (
+const createManagedDownloadServerConfig = (
   id: string,
+  name: string,
+  description: string,
   languages: string[],
-  packageName: string,
-  relativeScriptPaths: string[],
-  commands: string[],
+  commandNames: string[],
   args: string[] = [],
-  installHint?: string,
+  managedInstall: LspManagedInstallConfig,
+  installHint: string,
 ): LspServerConfig => ({
   id,
+  name,
+  description,
   languages,
+  commandNames,
+  args,
   installHint,
-  launchCandidates: () =>
-    resolveBundledNodePackageLaunchCandidates(
-      packageName,
-      relativeScriptPaths,
-      commands,
-      args,
-    ),
+  managedInstall,
+});
+
+const createManagedToolchainServerConfig = (
+  id: string,
+  name: string,
+  description: string,
+  languages: string[],
+  commandNames: string[],
+  args: string[] = [],
+  managedInstall: LspManagedInstallConfig,
+  installHint: string,
+): LspServerConfig => ({
+  id,
+  name,
+  description,
+  languages,
+  commandNames,
+  args,
+  installHint,
+  managedInstall,
 });
 
 const SERVER_CONFIGS: LspServerConfig[] = [
-  createBundledNodePackageServerConfig(
+  createManagedNodeServerConfig(
     'typescript-language-server',
+    'TypeScript / JavaScript',
+    'TypeScript language server with JavaScript support.',
     ['typescript', 'javascript'],
-    'typescript-language-server',
-    ['lib/cli.mjs'],
     ['typescript-language-server'],
     ['--stdio'],
-    'Packaged builds should ship `typescript-language-server` and `typescript` in app dependencies.',
+    {
+      id: 'typescript-language-server',
+      kind: 'npm',
+      packageName: 'typescript-language-server',
+      packages: ['typescript-language-server', 'typescript'],
+      relativeScriptPaths: ['lib/cli.mjs'],
+    },
+    'Install from Settings to keep a managed TypeScript server copy. This requires `npm` on PATH.',
   ),
-  createBundledNodePackageServerConfig(
+  createManagedNodeServerConfig(
     'pyright',
+    'Python',
+    'Pyright language server for Python analysis and completions.',
     ['python'],
-    'pyright',
-    ['langserver.index.js'],
     ['pyright-langserver'],
     ['--stdio'],
-    'Packaged builds should ship `pyright` in app dependencies.',
+    {
+      id: 'pyright',
+      kind: 'npm',
+      packageName: 'pyright',
+      packages: ['pyright'],
+      relativeScriptPaths: ['langserver.index.js'],
+    },
+    'Install from Settings to keep a managed Pyright copy. This requires `npm` on PATH.',
   ),
-  createBundledDiscoveredServerConfig(
+  createManagedToolchainServerConfig(
     'gopls',
+    'Go',
+    'Go language server powered by gopls.',
     ['go'],
-    'gopls',
     ['gopls'],
     [],
     {
-      installHint:
-        'Packaged builds should bundle `gopls`. For local development, stage it with `npm run stage:lsps`, set `ZERO_BUNDLED_GOPLS`, or install `gopls` on PATH.',
+      id: 'gopls',
+      kind: 'toolchain',
+      toolchainStrategy: 'go-gopls',
+      relativeCommandPaths: process.platform === 'win32' ? ['bin/gopls.exe'] : ['bin/gopls'],
     },
+    'Install from Settings to keep a managed gopls copy. This requires the Go toolchain on PATH.',
   ),
-  createBundledDiscoveredServerConfig(
+  createManagedDownloadServerConfig(
     'kotlin-lsp',
+    'Kotlin',
+    'Kotlin language server for Kotlin and Gradle Kotlin files.',
     ['kotlin'],
-    'kotlin-language-server',
-    ['kotlin-language-server', 'kotlin-lsp'],
+    ['kotlin-lsp', 'kotlin-language-server'],
     [],
     {
-      includeBundledJavaHome: true,
-      installHint:
-        'Packaged builds should bundle Kotlin LSP resources. For local development, stage them with `npm run stage:lsps` or install `kotlin-language-server` / `kotlin-lsp` on PATH.',
+      id: 'kotlin-lsp',
+      kind: 'download',
+      downloadStrategy: 'kotlin-lsp',
+      relativeCommandPaths:
+        process.platform === 'win32' ? ['kotlin-lsp.cmd'] : ['kotlin-lsp.sh'],
     },
+    'Install from Settings to keep a managed Kotlin LSP copy. Zero downloads the official standalone package with its bundled runtime.',
   ),
-  createBundledDiscoveredServerConfig(
+  createManagedDownloadServerConfig(
     'rust-analyzer',
+    'Rust',
+    'Rust language server powered by rust-analyzer.',
     ['rust'],
-    'rust-analyzer',
     ['rust-analyzer'],
     [],
     {
-      installHint:
-        'Packaged builds should bundle `rust-analyzer`. For local development, stage it with `npm run stage:lsps`, set `ZERO_BUNDLED_RUST_ANALYZER`, or install `rust-analyzer` on PATH.',
+      id: 'rust-analyzer',
+      kind: 'download',
+      downloadStrategy: 'rust-analyzer',
+      relativeCommandPaths:
+        process.platform === 'win32'
+          ? ['bin/rust-analyzer.exe']
+          : ['bin/rust-analyzer'],
     },
+    'Install from Settings to keep a managed rust-analyzer binary. Zero downloads the official upstream release for your platform.',
   ),
-  createBundledDiscoveredServerConfig(
+  createManagedDownloadServerConfig(
     'jdtls',
+    'Java',
+    'Eclipse JDT language server for Java projects.',
     ['java'],
-    'jdtls',
     ['jdtls'],
     [],
     {
-      includeBundledJavaHome: true,
-      installHint:
-        'Packaged builds should bundle JDTLS resources. For local development, stage them with `npm run stage:lsps` or install `jdtls` on PATH.',
+      id: 'jdtls',
+      kind: 'download',
+      downloadStrategy: 'jdtls',
+      relativeCommandPaths: process.platform === 'win32' ? ['bin/jdtls.bat'] : ['bin/jdtls'],
     },
+    'Install from Settings to keep a managed Eclipse JDT LS copy. Java 21 and Python 3 are still required at runtime.',
   ),
-  createBundledNodePackageServerConfig(
+  createManagedNodeServerConfig(
     'json-ls',
+    'JSON',
+    'VS Code JSON language server.',
     ['json'],
-    'vscode-langservers-extracted',
-    ['bin/vscode-json-language-server'],
     ['vscode-json-language-server'],
     ['--stdio'],
-    'Packaged builds should ship `vscode-langservers-extracted` in app dependencies.',
+    {
+      id: 'vscode-langservers-extracted',
+      kind: 'npm',
+      packageName: 'vscode-langservers-extracted',
+      packages: ['vscode-langservers-extracted'],
+      relativeScriptPaths: ['bin/vscode-json-language-server'],
+    },
+    'Install from Settings to keep a managed JSON server copy. This requires `npm` on PATH.',
   ),
-  createBundledNodePackageServerConfig(
+  createManagedNodeServerConfig(
     'yaml-ls',
+    'YAML',
+    'YAML language server with schema-aware validation.',
     ['yaml'],
-    'yaml-language-server',
-    ['bin/yaml-language-server'],
     ['yaml-language-server'],
     ['--stdio'],
-    'Packaged builds should ship `yaml-language-server` in app dependencies.',
+    {
+      id: 'yaml-language-server',
+      kind: 'npm',
+      packageName: 'yaml-language-server',
+      packages: ['yaml-language-server'],
+      relativeScriptPaths: ['bin/yaml-language-server'],
+    },
+    'Install from Settings to keep a managed YAML server copy. This requires `npm` on PATH.',
   ),
-  createBundledNodePackageServerConfig(
+  createManagedNodeServerConfig(
     'bash-ls',
+    'Shell / Bash',
+    'Bash language server for shell scripts.',
     ['shell'],
-    'bash-language-server',
-    ['out/cli.js'],
     ['bash-language-server'],
     ['start'],
-    'Packaged builds should ship `bash-language-server` in app dependencies.',
+    {
+      id: 'bash-language-server',
+      kind: 'npm',
+      packageName: 'bash-language-server',
+      packages: ['bash-language-server'],
+      relativeScriptPaths: ['out/cli.js'],
+    },
+    'Install from Settings to keep a managed Bash server copy. This requires `npm` on PATH.',
   ),
-  createBundledNodePackageServerConfig(
+  createManagedNodeServerConfig(
     'html-ls',
+    'HTML',
+    'VS Code HTML language server.',
     ['html'],
-    'vscode-langservers-extracted',
-    ['bin/vscode-html-language-server'],
     ['vscode-html-language-server'],
     ['--stdio'],
-    'Packaged builds should ship `vscode-langservers-extracted` in app dependencies.',
+    {
+      id: 'vscode-langservers-extracted',
+      kind: 'npm',
+      packageName: 'vscode-langservers-extracted',
+      packages: ['vscode-langservers-extracted'],
+      relativeScriptPaths: ['bin/vscode-html-language-server'],
+    },
+    'Install from Settings to keep a managed HTML server copy. This requires `npm` on PATH.',
   ),
-  createBundledNodePackageServerConfig(
+  createManagedNodeServerConfig(
     'css-ls',
+    'CSS',
+    'VS Code CSS language server.',
     ['css'],
-    'vscode-langservers-extracted',
-    ['bin/vscode-css-language-server'],
     ['vscode-css-language-server'],
     ['--stdio'],
-    'Packaged builds should ship `vscode-langservers-extracted` in app dependencies.',
+    {
+      id: 'vscode-langservers-extracted',
+      kind: 'npm',
+      packageName: 'vscode-langservers-extracted',
+      packages: ['vscode-langservers-extracted'],
+      relativeScriptPaths: ['bin/vscode-css-language-server'],
+    },
+    'Install from Settings to keep a managed CSS server copy. This requires `npm` on PATH.',
   ),
 ];
 
 const isMissingExecutableMessage = (value: string): boolean =>
   /ENOENT|not found|No such file or directory/i.test(value);
+
+const parseSha256Digest = (value: string): string | null => {
+  const match = value.match(/\b[a-f0-9]{64}\b/i);
+  return match ? match[0].toLowerCase() : null;
+};
+
+const getServerConfigById = (serverId: string): LspServerConfig | null =>
+  SERVER_CONFIGS.find((config) => config.id === serverId) ?? null;
 
 const getServerConfigForLanguage = (languageId: string): LspServerConfig | null =>
   SERVER_CONFIGS.find((config) => config.languages.includes(languageId)) ?? null;
@@ -1375,8 +1616,9 @@ class LspServerSession {
 
   private async spawnChild(): Promise<ChildProcessWithoutNullStreams> {
     const errors: string[] = [];
+    const availability = resolveServerAvailability(this.config);
 
-    for (const candidate of this.config.launchCandidates()) {
+    for (const candidate of availability.launchCandidates) {
       try {
         const child = await new Promise<ChildProcessWithoutNullStreams>((resolve, reject) => {
           const nextChild = spawn(candidate.command, candidate.args, {
@@ -1386,6 +1628,7 @@ class LspServerSession {
               ...process.env,
               ...candidate.env,
             },
+            shell: candidate.shell ?? false,
           });
 
           nextChild.once('spawn', () => {
@@ -1409,7 +1652,6 @@ class LspServerSession {
         : `No launch candidate available for ${this.config.id}.`;
 
     const shouldAppendInstallHint =
-      typeof this.config.installHint === 'string' &&
       this.config.installHint.length > 0 &&
       errors.length > 0 &&
       errors.every((message) => isMissingExecutableMessage(message));
@@ -1646,6 +1888,141 @@ export class LspService {
     };
   }
 
+  public async listServers(): Promise<LspListServersResult> {
+    return {
+      servers: SERVER_CONFIGS.map((config) => this.toCatalogEntry(config)),
+    };
+  }
+
+  public async installServer(
+    request: LspInstallServerRequest,
+  ): Promise<LspServerMutationResult> {
+    const config = getServerConfigById(request.serverId);
+    if (!config) {
+      return {
+        ok: false,
+        detail: `Unknown language server: ${request.serverId}.`,
+      };
+    }
+
+    const managedInstall = config.managedInstall;
+    if (
+      !managedInstall ||
+      (managedInstall.kind === 'npm' &&
+        (!managedInstall.packageName ||
+          !managedInstall.packages ||
+          managedInstall.packages.length === 0)) ||
+      (managedInstall.kind === 'download' && !managedInstall.downloadStrategy) ||
+      (managedInstall.kind === 'toolchain' && !managedInstall.toolchainStrategy)
+    ) {
+      return {
+        ok: false,
+        detail: `${config.name} must be installed manually. ${config.installHint}`,
+      };
+    }
+
+    const availability = resolveServerAvailability(config);
+    if (availability.source === 'managed') {
+      return {
+        ok: true,
+        detail: `${config.name} is already installed.`,
+      };
+    }
+
+    try {
+      if (managedInstall.kind === 'npm') {
+        const packages = managedInstall.packages ?? [];
+        const npmCommand = resolveFirstExecutablePath(['npm']);
+        if (!npmCommand) {
+          return {
+            ok: false,
+            detail: `npm was not found on PATH. Install Node.js/npm to manage ${config.name}.`,
+          };
+        }
+
+        const installRoot = await this.ensureManagedNodeServerRoot(managedInstall.id);
+        await this.runCommand(
+          npmCommand,
+          ['install', '--no-audit', '--no-fund', '--omit=dev', ...packages],
+          installRoot,
+        );
+      } else if (managedInstall.kind === 'download') {
+        await this.installDownloadedServer(config, managedInstall);
+      } else {
+        await this.installToolchainServer(config, managedInstall);
+      }
+
+      const nextAvailability = resolveServerAvailability(config);
+      if (nextAvailability.source !== 'managed') {
+        return {
+          ok: false,
+          detail: `${config.name} installed, but Zero could not find the managed server files afterwards.`,
+        };
+      }
+
+      this.disposeSessionsForManagedInstall(managedInstall.id);
+
+      return {
+        ok: true,
+        detail: `Installed ${config.name}.`,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        detail:
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message.trim()
+            : `Could not install ${config.name}.`,
+      };
+    }
+  }
+
+  public async deleteServer(
+    request: LspDeleteServerRequest,
+  ): Promise<LspServerMutationResult> {
+    const config = getServerConfigById(request.serverId);
+    if (!config) {
+      return {
+        ok: false,
+        detail: `Unknown language server: ${request.serverId}.`,
+      };
+    }
+
+    const managedInstall = config.managedInstall;
+    if (!managedInstall) {
+      return {
+        ok: false,
+        detail: `${config.name} is not managed by Zero.`,
+      };
+    }
+
+    const installRoot = resolveManagedInstallRoot(managedInstall.id);
+    if (!existsSync(installRoot)) {
+      return {
+        ok: true,
+        detail: `${config.name} is not installed.`,
+      };
+    }
+
+    try {
+      this.disposeSessionsForManagedInstall(managedInstall.id);
+      await fs.rm(installRoot, { recursive: true, force: true });
+
+      return {
+        ok: true,
+        detail: `Deleted ${config.name}.`,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        detail:
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message.trim()
+            : `Could not delete ${config.name}.`,
+      };
+    }
+  }
+
   public async syncDocument(
     request: LspDocumentSyncRequest,
   ): Promise<LspDocumentSyncResult> {
@@ -1782,6 +2159,527 @@ export class LspService {
     }
 
     this.sessions.clear();
+  }
+
+  private toCatalogEntry(config: LspServerConfig): LspServerCatalogEntry {
+    const availability = resolveServerAvailability(config);
+
+    return {
+      id: config.id,
+      name: config.name,
+      description: config.description,
+      languages: config.languages,
+      installKind: config.managedInstall?.kind ?? 'manual',
+      source: availability.source,
+      installed: availability.installed,
+      canInstall: availability.canInstall,
+      canDelete: availability.canDelete,
+      detail: availability.detail,
+    };
+  }
+
+  private getConfigsForManagedInstall(installId: string): LspServerConfig[] {
+    return SERVER_CONFIGS.filter((config) => config.managedInstall?.id === installId);
+  }
+
+  private disposeSessionsForManagedInstall(installId: string): void {
+    const serverIds = new Set(this.getConfigsForManagedInstall(installId).map((config) => config.id));
+
+    for (const [key, session] of this.sessions.entries()) {
+      if (!serverIds.has(session.getServerId())) {
+        continue;
+      }
+
+      session.dispose();
+      this.sessions.delete(key);
+    }
+  }
+
+  private async ensureManagedNodeServerRoot(installId: string): Promise<string> {
+    const installRoot = resolveManagedInstallRoot(installId);
+    await fs.mkdir(installRoot, { recursive: true });
+
+    const packageJsonPath = path.join(installRoot, 'package.json');
+    if (!existsSync(packageJsonPath)) {
+      const packageName = `zero-managed-lsp-${installId}`
+        .toLowerCase()
+        .replace(/[^a-z0-9-_]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      const packageJson = {
+        name: packageName.length > 0 ? packageName : 'zero-managed-lsp',
+        private: true,
+      };
+      await fs.writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
+    }
+
+    return installRoot;
+  }
+
+  private async createManagedInstallStagingRoot(
+    installId: string,
+  ): Promise<{ installRoot: string; stagingRoot: string }> {
+    const managedRoot = resolveManagedLspRoot();
+    await fs.mkdir(managedRoot, { recursive: true });
+
+    const installRoot = resolveManagedInstallRoot(installId);
+    const stagingRoot = path.join(
+      managedRoot,
+      `.${installId}.tmp-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
+    );
+    await fs.rm(stagingRoot, { recursive: true, force: true });
+    await fs.mkdir(stagingRoot, { recursive: true });
+
+    return {
+      installRoot,
+      stagingRoot,
+    };
+  }
+
+  private async finalizeManagedInstall(
+    installRoot: string,
+    stagingRoot: string,
+  ): Promise<void> {
+    await fs.rm(installRoot, { recursive: true, force: true });
+    await fs.rename(stagingRoot, installRoot);
+  }
+
+  private async downloadBuffer(
+    url: string,
+    headers: Record<string, string> = {},
+    redirectCount = 0,
+  ): Promise<Buffer> {
+    if (redirectCount > 6) {
+      throw new Error(`Too many redirects while downloading ${url}.`);
+    }
+
+    return await new Promise<Buffer>((resolve, reject) => {
+      const client = url.startsWith('https://') ? https : http;
+      const request = client.get(
+        url,
+        {
+          headers: {
+            'User-Agent': 'Zero-LSP-Manager',
+            Accept: '*/*',
+            ...headers,
+          },
+        },
+        (response) => {
+          const statusCode = response.statusCode ?? 0;
+          const locationHeader = response.headers.location;
+          if (statusCode >= 300 && statusCode < 400 && locationHeader) {
+            response.resume();
+            resolve(
+              this.downloadBuffer(new URL(locationHeader, url).toString(), headers, redirectCount + 1),
+            );
+            return;
+          }
+
+          if (statusCode < 200 || statusCode >= 300) {
+            response.resume();
+            reject(new Error(`Download failed for ${url} (HTTP ${statusCode}).`));
+            return;
+          }
+
+          const chunks: Buffer[] = [];
+          response.on('data', (chunk: Buffer | string) => {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          });
+          response.once('end', () => {
+            resolve(Buffer.concat(chunks));
+          });
+          response.once('error', reject);
+        },
+      );
+
+      request.once('error', reject);
+    });
+  }
+
+  private async downloadText(
+    url: string,
+    headers: Record<string, string> = {},
+  ): Promise<string> {
+    return (await this.downloadBuffer(url, headers)).toString('utf8');
+  }
+
+  private async downloadJson<T>(
+    url: string,
+    headers: Record<string, string> = {},
+  ): Promise<T> {
+    return JSON.parse(
+      await this.downloadText(url, {
+        Accept: 'application/vnd.github+json',
+        ...headers,
+      }),
+    ) as T;
+  }
+
+  private async extractZipArchive(archivePath: string, destinationPath: string): Promise<void> {
+    if (process.platform === 'win32') {
+      const powerShell = resolveFirstExecutablePath(['pwsh', 'powershell']) ?? 'powershell';
+      const escapedArchivePath = archivePath.replace(/'/g, "''");
+      const escapedDestinationPath = destinationPath.replace(/'/g, "''");
+      await this.runCommand(
+        powerShell,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `Expand-Archive -LiteralPath '${escapedArchivePath}' -DestinationPath '${escapedDestinationPath}' -Force`,
+        ],
+        destinationPath,
+      );
+      return;
+    }
+
+    const unzipCommand = resolveFirstExecutablePath(['unzip']);
+    if (unzipCommand) {
+      await this.runCommand(unzipCommand, ['-q', '-o', archivePath, '-d', destinationPath], destinationPath);
+      return;
+    }
+
+    const pythonCommand = resolveFirstExecutablePath(['python3', 'python']);
+    if (pythonCommand) {
+      await this.runCommand(
+        pythonCommand,
+        [
+          '-c',
+          'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])',
+          archivePath,
+          destinationPath,
+        ],
+        destinationPath,
+      );
+      return;
+    }
+
+    throw new Error('Could not extract ZIP archive. Install `unzip` or Python 3.');
+  }
+
+  private async extractTarGzArchive(archivePath: string, destinationPath: string): Promise<void> {
+    const tarCommand = resolveFirstExecutablePath(['tar']);
+    if (tarCommand) {
+      await this.runCommand(tarCommand, ['-xzf', archivePath, '-C', destinationPath], destinationPath);
+      return;
+    }
+
+    const pythonCommand = resolveFirstExecutablePath(['python3', 'python']);
+    if (pythonCommand) {
+      await this.runCommand(
+        pythonCommand,
+        [
+          '-c',
+          "import sys, tarfile; tarfile.open(sys.argv[1], 'r:gz').extractall(sys.argv[2])",
+          archivePath,
+          destinationPath,
+        ],
+        destinationPath,
+      );
+      return;
+    }
+
+    throw new Error('Could not extract .tar.gz archive. Install `tar` or Python 3.');
+  }
+
+  private async setExecutableIfNeeded(filePath: string): Promise<void> {
+    if (process.platform === 'win32' || !existsSync(filePath)) {
+      return;
+    }
+
+    await fs.chmod(filePath, 0o755);
+  }
+
+  private async installDownloadedServer(
+    config: LspServerConfig,
+    managedInstall: LspManagedInstallConfig,
+  ): Promise<void> {
+    switch (managedInstall.downloadStrategy) {
+      case 'rust-analyzer':
+        await this.installRustAnalyzer(config, managedInstall);
+        return;
+      case 'kotlin-lsp':
+        await this.installKotlinLanguageServer(config, managedInstall);
+        return;
+      case 'jdtls':
+        await this.installJdtls(config, managedInstall);
+        return;
+      default:
+        throw new Error(`Zero does not know how to install ${config.name} yet.`);
+    }
+  }
+
+  private async installToolchainServer(
+    config: LspServerConfig,
+    managedInstall: LspManagedInstallConfig,
+  ): Promise<void> {
+    switch (managedInstall.toolchainStrategy) {
+      case 'go-gopls':
+        await this.installGoLanguageServer(config, managedInstall);
+        return;
+      default:
+        throw new Error(`Zero does not know how to install ${config.name} yet.`);
+    }
+  }
+
+  private async installGoLanguageServer(
+    config: LspServerConfig,
+    managedInstall: LspManagedInstallConfig,
+  ): Promise<void> {
+    const goCommand = resolveFirstExecutablePath(['go']);
+    if (!goCommand) {
+      throw new Error(`Go was not found on PATH. Install Go to manage ${config.name}.`);
+    }
+
+    const { installRoot, stagingRoot } = await this.createManagedInstallStagingRoot(
+      managedInstall.id,
+    );
+    try {
+      const binDirectory = path.join(stagingRoot, 'bin');
+      await fs.mkdir(binDirectory, { recursive: true });
+      await this.runCommand(
+        goCommand,
+        ['install', 'golang.org/x/tools/gopls@latest'],
+        stagingRoot,
+        {
+          GOBIN: binDirectory,
+        },
+      );
+
+      await this.setExecutableIfNeeded(path.join(binDirectory, 'gopls'));
+      await this.finalizeManagedInstall(installRoot, stagingRoot);
+    } catch (error) {
+      await fs.rm(stagingRoot, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  private async installRustAnalyzer(
+    config: LspServerConfig,
+    managedInstall: LspManagedInstallConfig,
+  ): Promise<void> {
+    const assetName = this.getRustAnalyzerAssetName();
+    const release = await this.downloadJson<{
+      assets?: Array<{ name?: string; browser_download_url?: string; digest?: string | null }>;
+    }>('https://api.github.com/repos/rust-lang/rust-analyzer/releases/latest');
+    const asset = release.assets?.find(
+      (entry) => entry.name === assetName && typeof entry.browser_download_url === 'string',
+    );
+    if (!asset?.browser_download_url) {
+      throw new Error(`Could not find the official ${assetName} release asset for ${config.name}.`);
+    }
+
+    const archiveBuffer = await this.downloadBuffer(asset.browser_download_url);
+    const expectedSha256 = parseSha256Digest(asset.digest ?? '');
+    if (expectedSha256) {
+      const actualSha256 = createHash('sha256').update(archiveBuffer).digest('hex');
+      if (actualSha256 !== expectedSha256) {
+        throw new Error(`Checksum verification failed while downloading ${config.name}.`);
+      }
+    }
+
+    const { installRoot, stagingRoot } = await this.createManagedInstallStagingRoot(managedInstall.id);
+    try {
+      const binDirectory = path.join(stagingRoot, 'bin');
+      await fs.mkdir(binDirectory, { recursive: true });
+
+      if (assetName.endsWith('.gz')) {
+        const targetPath = path.join(binDirectory, 'rust-analyzer');
+        await fs.writeFile(targetPath, gunzipSync(archiveBuffer));
+        await this.setExecutableIfNeeded(targetPath);
+      } else {
+        const archivePath = path.join(stagingRoot, 'rust-analyzer.zip');
+        await fs.writeFile(archivePath, archiveBuffer);
+        await this.extractZipArchive(archivePath, stagingRoot);
+        await fs.rm(archivePath, { force: true });
+
+        const extractedExecutable = path.join(stagingRoot, 'rust-analyzer.exe');
+        if (!existsSync(extractedExecutable)) {
+          throw new Error(`Downloaded ${config.name}, but rust-analyzer.exe was missing from the archive.`);
+        }
+
+        await fs.rename(extractedExecutable, path.join(binDirectory, 'rust-analyzer.exe'));
+      }
+
+      await this.finalizeManagedInstall(installRoot, stagingRoot);
+    } catch (error) {
+      await fs.rm(stagingRoot, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  private async installKotlinLanguageServer(
+    config: LspServerConfig,
+    managedInstall: LspManagedInstallConfig,
+  ): Promise<void> {
+    const release = await this.downloadJson<{ tag_name?: string }>(
+      'https://api.github.com/repos/Kotlin/kotlin-lsp/releases/latest',
+    );
+    const version = release.tag_name?.split('/').pop()?.trim();
+    if (!version) {
+      throw new Error(`Could not determine the latest Kotlin LSP version for ${config.name}.`);
+    }
+
+    const archiveName = `kotlin-lsp-${version}-${this.getKotlinArchiveSuffix()}.zip`;
+    const archiveUrl = `https://download-cdn.jetbrains.com/kotlin-lsp/${version}/${archiveName}`;
+    const checksumText = await this.downloadText(`${archiveUrl}.sha256`);
+    const expectedSha256 = parseSha256Digest(checksumText);
+    if (!expectedSha256) {
+      throw new Error(`Could not read the checksum for ${config.name}.`);
+    }
+
+    const archiveBuffer = await this.downloadBuffer(archiveUrl);
+    const actualSha256 = createHash('sha256').update(archiveBuffer).digest('hex');
+    if (actualSha256 !== expectedSha256) {
+      throw new Error(`Checksum verification failed while downloading ${config.name}.`);
+    }
+
+    const { installRoot, stagingRoot } = await this.createManagedInstallStagingRoot(managedInstall.id);
+    try {
+      const archivePath = path.join(stagingRoot, archiveName);
+      await fs.writeFile(archivePath, archiveBuffer);
+      await this.extractZipArchive(archivePath, stagingRoot);
+      await fs.rm(archivePath, { force: true });
+
+      await this.setExecutableIfNeeded(path.join(stagingRoot, 'kotlin-lsp.sh'));
+      await this.finalizeManagedInstall(installRoot, stagingRoot);
+    } catch (error) {
+      await fs.rm(stagingRoot, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  private async installJdtls(
+    config: LspServerConfig,
+    managedInstall: LspManagedInstallConfig,
+  ): Promise<void> {
+    const latestFileName = (await this.downloadText('https://download.eclipse.org/jdtls/snapshots/latest.txt')).trim();
+    if (!latestFileName.endsWith('.tar.gz')) {
+      throw new Error(`Could not resolve the latest Eclipse JDT LS archive for ${config.name}.`);
+    }
+
+    const archiveUrl = `https://download.eclipse.org/jdtls/snapshots/${latestFileName}`;
+    const checksumText = await this.downloadText(`${archiveUrl}.sha256`);
+    const expectedSha256 = parseSha256Digest(checksumText);
+    if (!expectedSha256) {
+      throw new Error(`Could not read the checksum for ${config.name}.`);
+    }
+
+    const archiveBuffer = await this.downloadBuffer(archiveUrl);
+    const actualSha256 = createHash('sha256').update(archiveBuffer).digest('hex');
+    if (actualSha256 !== expectedSha256) {
+      throw new Error(`Checksum verification failed while downloading ${config.name}.`);
+    }
+
+    const { installRoot, stagingRoot } = await this.createManagedInstallStagingRoot(managedInstall.id);
+    try {
+      const archivePath = path.join(stagingRoot, latestFileName);
+      await fs.writeFile(archivePath, archiveBuffer);
+      await this.extractTarGzArchive(archivePath, stagingRoot);
+      await fs.rm(archivePath, { force: true });
+
+      await this.setExecutableIfNeeded(path.join(stagingRoot, 'bin', 'jdtls'));
+      await this.finalizeManagedInstall(installRoot, stagingRoot);
+    } catch (error) {
+      await fs.rm(stagingRoot, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  private getRustAnalyzerAssetName(): string {
+    if (process.platform === 'darwin' && process.arch === 'arm64') {
+      return 'rust-analyzer-aarch64-apple-darwin.gz';
+    }
+    if (process.platform === 'darwin' && process.arch === 'x64') {
+      return 'rust-analyzer-x86_64-apple-darwin.gz';
+    }
+    if (process.platform === 'linux' && process.arch === 'arm64') {
+      return 'rust-analyzer-aarch64-unknown-linux-gnu.gz';
+    }
+    if (process.platform === 'linux' && process.arch === 'x64') {
+      return 'rust-analyzer-x86_64-unknown-linux-gnu.gz';
+    }
+    if (process.platform === 'win32' && process.arch === 'arm64') {
+      return 'rust-analyzer-aarch64-pc-windows-msvc.zip';
+    }
+    if (process.platform === 'win32' && process.arch === 'x64') {
+      return 'rust-analyzer-x86_64-pc-windows-msvc.zip';
+    }
+
+    throw new Error(`Rust Analyzer installs are not available for ${process.platform}/${process.arch}.`);
+  }
+
+  private getKotlinArchiveSuffix(): string {
+    if (process.platform === 'darwin' && process.arch === 'arm64') {
+      return 'mac-aarch64';
+    }
+    if (process.platform === 'darwin' && process.arch === 'x64') {
+      return 'mac-x64';
+    }
+    if (process.platform === 'linux' && process.arch === 'arm64') {
+      return 'linux-aarch64';
+    }
+    if (process.platform === 'linux' && process.arch === 'x64') {
+      return 'linux-x64';
+    }
+    if (process.platform === 'win32' && process.arch === 'arm64') {
+      return 'win-aarch64';
+    }
+    if (process.platform === 'win32' && process.arch === 'x64') {
+      return 'win-x64';
+    }
+
+    throw new Error(`Kotlin LSP installs are not available for ${process.platform}/${process.arch}.`);
+  }
+
+  private async runCommand(
+    command: string,
+    args: string[],
+    cwd: string,
+    extraEnv: Record<string, string> = {},
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(command, args, {
+        cwd,
+        env: {
+          ...process.env,
+          ...extraEnv,
+          npm_config_audit: 'false',
+          npm_config_fund: 'false',
+          npm_config_update_notifier: 'false',
+        },
+        shell: isShellCommandPath(command),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (chunk: Buffer | string) => {
+        stdout += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
+      });
+      child.stderr.on('data', (chunk: Buffer | string) => {
+        stderr += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
+      });
+      child.once('error', (error) => {
+        reject(error);
+      });
+      child.once('exit', (code, signal) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+
+        const output = [stderr.trim(), stdout.trim()].find((value) => value.length > 0);
+        reject(
+          new Error(
+            output ??
+              `${command} exited${code !== null ? ` with code ${code}` : ''}${
+                signal ? ` (${signal})` : ''
+              }.`,
+          ),
+        );
+      });
+    });
   }
 
   private async ensureSession(

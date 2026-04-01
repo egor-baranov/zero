@@ -37,14 +37,18 @@ import type {
 import type {
   LspCompletionRequest,
   LspCompletionResult,
+  LspDeleteServerRequest,
   LspDefinitionResult,
   LspDocumentCloseRequest,
   LspDocumentSyncRequest,
   LspDocumentSyncResult,
   LspHoverResult,
+  LspInstallServerRequest,
+  LspListServersResult,
   LspReferencesRequest,
   LspReferencesResult,
   LspRendererEvent,
+  LspServerMutationResult,
   LspSemanticTokensRequest,
   LspSemanticTokensResult,
   LspTextDocumentPositionRequest,
@@ -219,6 +223,16 @@ export const desktopApi: DesktopApi = {
     request: LspReferencesRequest,
   ): Promise<LspReferencesResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.lspReferences, request),
+  lspListServers: (): Promise<LspListServersResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspListServers),
+  lspInstallServer: (
+    request: LspInstallServerRequest,
+  ): Promise<LspServerMutationResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspInstallServer, request),
+  lspDeleteServer: (
+    request: LspDeleteServerRequest,
+  ): Promise<LspServerMutationResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.lspDeleteServer, request),
   onLspEvent: (listener: (event: LspRendererEvent) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, payload: LspRendererEvent) => {
       listener(payload);

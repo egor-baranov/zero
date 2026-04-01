@@ -1,5 +1,6 @@
 import * as React from 'react';
 import {
+  Bell,
   Cog,
   ChevronDown,
   ChevronRight,
@@ -40,6 +41,9 @@ interface SidebarProps {
   onRenameThread: (threadId: string) => void;
   onRemoveThread: (threadId: string, currentTitle: string) => void;
   onOpenSettings: () => void;
+  unreadPushCount: number;
+  isPushPanelOpen: boolean;
+  onTogglePushPanel: () => void;
 }
 
 const COLLAPSED_PROJECTS_KEY = 'zeroade.sidebar.collapsed-projects.v1';
@@ -124,6 +128,9 @@ export const Sidebar = ({
   onRenameThread,
   onRemoveThread,
   onOpenSettings,
+  unreadPushCount,
+  isPushPanelOpen,
+  onTogglePushPanel,
 }: SidebarProps): JSX.Element => {
   const [collapsedProjectIds, setCollapsedProjectIds] = React.useState<Set<string>>(() =>
     readCollapsedProjects(),
@@ -181,7 +188,7 @@ export const Sidebar = ({
     <aside
       style={{ width }}
       className={cn(
-        'relative flex h-full flex-col border-r border-r-[var(--zeroade-shell-divider)] bg-[rgba(249,250,252,0.02)] backdrop-blur-[1px] backdrop-saturate-125',
+        'zeroade-sidebar-panel-surface relative flex h-full flex-col border-r border-r-[var(--zeroade-shell-divider)]',
         !isResizing && 'transition-[width,opacity] duration-200',
       )}
     >
@@ -199,13 +206,13 @@ export const Sidebar = ({
               aria-label="New project"
               title="New project"
               className={cn(
-              'zeroade-sidebar-hover-shadow no-drag inline-flex h-6 w-6 items-center justify-center rounded-md',
-              'text-stone-600 transition-colors hover:bg-white/55',
-            )}
-            onClick={onOpenFolder}
-          >
-            <FolderPlus className="h-3.5 w-3.5" />
-          </button>
+                'zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface no-drag inline-flex h-6 w-6 items-center justify-center rounded-md',
+                'text-stone-600 transition-colors',
+              )}
+              onClick={onOpenFolder}
+            >
+              <FolderPlus className="h-3.5 w-3.5" />
+            </button>
         </div>
       </div>
 
@@ -233,7 +240,7 @@ export const Sidebar = ({
                 <section key={group.id} className="group/project space-y-0.5">
                   <div
                     className={cn(
-                      'zeroade-sidebar-hover-shadow no-drag group relative flex h-9 w-full items-center justify-between rounded-xl px-2 text-left transition-colors hover:bg-white/55',
+                      'zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface no-drag group relative flex h-9 w-full items-center justify-between rounded-xl px-2 text-left transition-colors',
                     )}
                   >
                     <button
@@ -269,7 +276,7 @@ export const Sidebar = ({
                             type="button"
                             aria-label={`Project options for ${group.label}`}
                             className={cn(
-                              'zeroade-sidebar-hover-shadow inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:bg-white/55 hover:text-stone-700',
+                              'zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:text-stone-700',
                               'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto',
                               'focus-visible:opacity-100 focus-visible:pointer-events-auto data-[state=open]:opacity-100 data-[state=open]:pointer-events-auto',
                             )}
@@ -294,7 +301,7 @@ export const Sidebar = ({
                         type="button"
                         aria-label={`Create new chat in ${group.label}`}
                         className={cn(
-                          'zeroade-sidebar-hover-shadow inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:bg-white/55 hover:text-stone-700',
+                          'zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:text-stone-700',
                           'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto',
                           'focus-visible:opacity-100 focus-visible:pointer-events-auto',
                         )}
@@ -318,9 +325,9 @@ export const Sidebar = ({
                             <button
                               type="button"
                               className={cn(
-                                'zeroade-sidebar-hover-shadow no-drag flex w-full rounded-xl text-left transition-colors hover:bg-white/55',
+                                'zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface no-drag flex w-full rounded-xl text-left transition-colors',
                                 'flex-col gap-0.5 py-1.5 pl-8 pr-9',
-                                thread.id === selectedThreadId && 'bg-white/45',
+                                thread.id === selectedThreadId && 'zeroade-sidebar-active-surface',
                               )}
                               onClick={() => onSelectThread(thread.id)}
                             >
@@ -369,7 +376,7 @@ export const Sidebar = ({
                                   type="button"
                                   aria-label={`Thread options for ${thread.title}`}
                                   className={cn(
-                                    'zeroade-sidebar-hover-shadow absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:bg-white/55 hover:text-stone-700',
+                                    'zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md text-stone-500 transition-all hover:text-stone-700',
                                     'opacity-0 pointer-events-none group-hover/thread:opacity-100 group-hover/thread:pointer-events-auto',
                                     'group-focus-within/thread:opacity-100 group-focus-within/thread:pointer-events-auto',
                                     'focus-visible:opacity-100 focus-visible:pointer-events-auto data-[state=open]:opacity-100 data-[state=open]:pointer-events-auto',
@@ -407,18 +414,35 @@ export const Sidebar = ({
         )}
       </ScrollArea>
 
-      <div className="px-2.5 py-2">
+      <div className="flex items-center gap-1.5 px-2.5 py-2">
         <button
           type="button"
           className={cn(
-            'zeroade-sidebar-hover-shadow no-drag flex h-8 w-full items-center rounded-lg text-stone-600 transition-colors hover:bg-white/55',
+            'zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface no-drag flex h-8 flex-1 items-center rounded-lg text-stone-600 transition-colors',
             'gap-2 px-2.5 text-sm',
-            isSettingsOpen && 'bg-white/45 text-stone-900',
+            isSettingsOpen && 'zeroade-sidebar-active-surface text-stone-900',
           )}
           onClick={onOpenSettings}
         >
           <Cog className="h-4 w-4" />
           <span>Settings</span>
+        </button>
+
+        <button
+          type="button"
+          aria-label="Notifications"
+          className={cn(
+            'zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface no-drag relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-stone-600 transition-colors',
+            isPushPanelOpen && 'zeroade-sidebar-active-surface text-stone-900',
+          )}
+          onClick={onTogglePushPanel}
+        >
+          <Bell className="h-4 w-4" />
+          {unreadPushCount > 0 ? (
+            <span className="absolute -right-0.5 -top-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-stone-800 px-1 text-[10px] font-medium text-white">
+              {unreadPushCount > 9 ? '9+' : unreadPushCount}
+            </span>
+          ) : null}
         </button>
       </div>
     </aside>
@@ -441,7 +465,7 @@ const SidebarAction = ({
       type="button"
       onClick={onClick}
       className={cn(
-        'zeroade-sidebar-hover-shadow no-drag mb-0.5 flex w-full items-center rounded-lg text-stone-600 transition-colors hover:bg-white/55',
+        'zeroade-sidebar-hover-shadow zeroade-sidebar-hover-surface no-drag mb-0.5 flex w-full items-center rounded-lg text-stone-600 transition-colors',
         'h-8 gap-2 px-2.5 text-sm',
       )}
     >
