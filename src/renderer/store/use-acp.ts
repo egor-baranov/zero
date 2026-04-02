@@ -24,8 +24,11 @@ import type {
   AcpSessionNewResult,
 } from '@shared/types/acp';
 
-const THREAD_SESSION_KEY_PREFIX = 'zeroade.acp.thread-sessions.v2';
-const THREAD_ATTACHMENT_HISTORY_KEY_PREFIX = 'zeroade.acp.thread-attachments.v1';
+const THREAD_SESSION_KEY = 'zeroade.acp.thread-sessions.v3';
+const LEGACY_THREAD_SESSION_KEY_PREFIX = 'zeroade.acp.thread-sessions.v2';
+const THREAD_ATTACHMENT_HISTORY_KEY = 'zeroade.acp.thread-attachments.v2';
+const LEGACY_THREAD_ATTACHMENT_HISTORY_KEY_PREFIX = 'zeroade.acp.thread-attachments.v1';
+const THREAD_AGENT_SELECTION_KEY = 'zeroade.acp.thread-agent-selections.v1';
 const AGENT_PRESET_KEY = 'zeroade.acp.agent-preset.v1';
 const CUSTOM_AGENT_CONFIG_KEY = 'zeroade.acp.custom-agent-config.v1';
 const CODEX_AGENT_CONFIG_KEY = 'zeroade.acp.codex-agent-config.v1';
@@ -50,6 +53,11 @@ const FILE_MUTATION_TOOL_KIND_TOKENS = [
 export type AcpAgentPreset = 'mock' | 'codex' | 'claude' | 'custom';
 
 type ThreadSessionMap = Record<string, string>;
+export interface ThreadAgentSelection {
+  preset: AcpAgentPreset;
+  customConfig?: AcpCustomAgentConfig;
+}
+type ThreadAgentSelectionMap = Record<string, ThreadAgentSelection>;
 interface PersistedThreadAttachmentEntry {
   text: string;
   attachments: AcpPromptAttachment[];
@@ -113,19 +121,23 @@ interface UseAcpResult {
   agentName: string;
   promptCapabilities: AcpPromptCapabilities;
   agentPreset: AcpAgentPreset;
+  defaultAgentPreset: AcpAgentPreset;
   codexAgentConfig: AcpCustomAgentConfig | null;
   claudeAgentConfig: AcpCustomAgentConfig | null;
   customAgentConfig: AcpCustomAgentConfig | null;
+  defaultCustomAgentConfig: AcpCustomAgentConfig | null;
   loadSessionSupported: boolean;
   activeSessionId: string | null;
   activeSessionThreadId: string | null;
   activeTimeline: SessionTimeline;
   threadPromptingById: Record<string, boolean>;
+  threadAgentSelectionById: ThreadAgentSelectionMap;
   threadSessionTitleById: Record<string, string>;
   threadSessionUpdatedAtById: Record<string, number>;
   activeSessionControls: AcpSessionControls | null;
   pendingPermission: AcpPermissionRequestEvent | null;
   setAgentPreset: (preset: AcpAgentPreset) => void;
+  setThreadAgentSelection: (threadId: string, selection: ThreadAgentSelection) => void;
   saveAgentConfig: (
     preset: 'codex' | 'claude' | 'custom',
     config: AcpCustomAgentConfig,
@@ -150,14 +162,13 @@ interface UseAcpResult {
   invalidateThreadSession: (threadId: string) => void;
 }
 
-const getThreadSessionKey = (preset: AcpAgentPreset): string =>
-  `${THREAD_SESSION_KEY_PREFIX}.${preset}`;
+const getLegacyThreadSessionKey = (preset: AcpAgentPreset): string =>
+  `${LEGACY_THREAD_SESSION_KEY_PREFIX}.${preset}`;
 
-const getThreadAttachmentHistoryKey = (preset: AcpAgentPreset): string =>
-  `${THREAD_ATTACHMENT_HISTORY_KEY_PREFIX}.${preset}`;
+const getLegacyThreadAttachmentHistoryKey = (preset: AcpAgentPreset): string =>
+  `${LEGACY_THREAD_ATTACHMENT_HISTORY_KEY_PREFIX}.${preset}`;
 
-const readThreadSessionMap = (preset: AcpAgentPreset): ThreadSessionMap => {
-  const raw = window.localStorage.getItem(getThreadSessionKey(preset));
+const parseThreadSessionMap = (raw: string | null): ThreadSessionMap => {
   if (!raw) {
     return {};
   }
@@ -170,8 +181,30 @@ const readThreadSessionMap = (preset: AcpAgentPreset): ThreadSessionMap => {
   }
 };
 
-const readThreadAttachmentHistoryMap = (preset: AcpAgentPreset): ThreadAttachmentHistoryMap => {
-  const raw = window.localStorage.getItem(getThreadAttachmentHistoryKey(preset));
+const readThreadSessionMap = (preferredPreset: AcpAgentPreset): ThreadSessionMap => {
+  const current = parseThreadSessionMap(window.localStorage.getItem(THREAD_SESSION_KEY));
+  if (Object.keys(current).length > 0) {
+    return current;
+  }
+
+  const presets: AcpAgentPreset[] = ['mock', 'codex', 'claude', 'custom'];
+  const orderedPresets = [
+    ...presets.filter((preset) => preset !== preferredPreset),
+    preferredPreset,
+  ];
+
+  const merged: ThreadSessionMap = {};
+  for (const preset of orderedPresets) {
+    Object.assign(
+      merged,
+      parseThreadSessionMap(window.localStorage.getItem(getLegacyThreadSessionKey(preset))),
+    );
+  }
+
+  return merged;
+};
+
+const parseThreadAttachmentHistoryMap = (raw: string | null): ThreadAttachmentHistoryMap => {
   if (!raw) {
     return {};
   }
@@ -225,6 +258,35 @@ const readThreadAttachmentHistoryMap = (preset: AcpAgentPreset): ThreadAttachmen
   } catch {
     return {};
   }
+};
+
+const readThreadAttachmentHistoryMap = (
+  preferredPreset: AcpAgentPreset,
+): ThreadAttachmentHistoryMap => {
+  const current = parseThreadAttachmentHistoryMap(
+    window.localStorage.getItem(THREAD_ATTACHMENT_HISTORY_KEY),
+  );
+  if (Object.keys(current).length > 0) {
+    return current;
+  }
+
+  const presets: AcpAgentPreset[] = ['mock', 'codex', 'claude', 'custom'];
+  const orderedPresets = [
+    ...presets.filter((preset) => preset !== preferredPreset),
+    preferredPreset,
+  ];
+
+  const merged: ThreadAttachmentHistoryMap = {};
+  for (const preset of orderedPresets) {
+    Object.assign(
+      merged,
+      parseThreadAttachmentHistoryMap(
+        window.localStorage.getItem(getLegacyThreadAttachmentHistoryKey(preset)),
+      ),
+    );
+  }
+
+  return merged;
 };
 
 const readAgentPreset = (): AcpAgentPreset => {
@@ -312,6 +374,127 @@ const normalizeAgentConfig = (config: AcpCustomAgentConfig): AcpCustomAgentConfi
     cwd: config.cwd?.trim() || undefined,
     env: config.env,
   };
+};
+
+const normalizeThreadAgentSelection = (value: unknown): ThreadAgentSelection | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const preset = typeof value.preset === 'string' ? value.preset : '';
+  if (preset !== 'mock' && preset !== 'codex' && preset !== 'claude' && preset !== 'custom') {
+    return null;
+  }
+
+  const normalizedCustomConfig =
+    'customConfig' in value ? normalizeAgentConfig(value.customConfig as AcpCustomAgentConfig) : null;
+
+  if (preset === 'custom') {
+    return normalizedCustomConfig
+      ? {
+          preset,
+          customConfig: normalizedCustomConfig,
+        }
+      : {
+          preset,
+        };
+  }
+
+  return {
+    preset,
+  };
+};
+
+const toThreadAgentSelectionSignature = (selection: ThreadAgentSelection | null): string =>
+  JSON.stringify({
+    preset: selection?.preset ?? 'mock',
+    customConfig: selection?.customConfig
+      ? normalizeAgentConfig(selection.customConfig)
+      : null,
+  });
+
+const readThreadAgentSelectionMap = (preferredPreset: AcpAgentPreset): ThreadAgentSelectionMap => {
+  const raw = window.localStorage.getItem(THREAD_AGENT_SELECTION_KEY);
+  if (!raw) {
+    const presets: AcpAgentPreset[] = ['mock', 'codex', 'claude', 'custom'];
+    const orderedPresets = [
+      ...presets.filter((preset) => preset !== preferredPreset),
+      preferredPreset,
+    ];
+    const migrated: ThreadAgentSelectionMap = {};
+    const legacyCustomConfig = readCustomAgentConfig();
+
+    for (const preset of orderedPresets) {
+      const legacyThreadMap = parseThreadSessionMap(
+        window.localStorage.getItem(getLegacyThreadSessionKey(preset)),
+      );
+
+      for (const threadId of Object.keys(legacyThreadMap)) {
+        migrated[threadId] =
+          preset === 'custom'
+            ? {
+                preset,
+                ...(legacyCustomConfig ? { customConfig: legacyCustomConfig } : {}),
+              }
+            : {
+                preset,
+              };
+      }
+    }
+
+    return migrated;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) {
+      return {};
+    }
+
+    const result: ThreadAgentSelectionMap = {};
+    for (const [threadId, value] of Object.entries(parsed)) {
+      const normalizedThreadId = threadId.trim();
+      if (!normalizedThreadId) {
+        continue;
+      }
+
+      const normalizedSelection = normalizeThreadAgentSelection(value);
+      if (!normalizedSelection) {
+        continue;
+      }
+
+      result[normalizedThreadId] = normalizedSelection;
+    }
+
+    return result;
+  } catch {
+    return {};
+  }
+};
+
+const toAgentConfigSignature = (agent: AcpAgentConfig | null): string => {
+  if (!agent) {
+    return 'none';
+  }
+
+  if (agent.kind === 'mock') {
+    return 'mock';
+  }
+
+  if (agent.kind === 'custom') {
+    return JSON.stringify({
+      kind: 'custom',
+      command: agent.command,
+      args: agent.args,
+      cwd: agent.cwd ?? '',
+      env: agent.env ?? {},
+    });
+  }
+
+  return JSON.stringify({
+    kind: agent.kind,
+    config: agent.config ?? null,
+  });
 };
 
 const toConfigSelectValues = (
@@ -1046,7 +1229,7 @@ const reduceTimeline = (
   }
 };
 
-export const useAcp = (): UseAcpResult => {
+export const useAcp = (selectedThreadId: string): UseAcpResult => {
   const initialAgentPreset = readAgentPreset();
 
   const [threadSessionMap, setThreadSessionMap] = React.useState<ThreadSessionMap>(() =>
@@ -1076,7 +1259,7 @@ export const useAcp = (): UseAcpResult => {
   const [promptCapabilities, setPromptCapabilities] = React.useState<AcpPromptCapabilities>(
     DEFAULT_PROMPT_CAPABILITIES,
   );
-  const [agentPreset, setAgentPresetState] = React.useState<AcpAgentPreset>(() =>
+  const [defaultAgentPreset, setDefaultAgentPresetState] = React.useState<AcpAgentPreset>(() =>
     initialAgentPreset,
   );
   const [codexAgentConfig, setCodexAgentConfig] =
@@ -1085,6 +1268,8 @@ export const useAcp = (): UseAcpResult => {
     React.useState<AcpCustomAgentConfig | null>(() => readClaudeAgentConfig());
   const [customAgentConfig, setCustomAgentConfig] =
     React.useState<AcpCustomAgentConfig | null>(() => readCustomAgentConfig());
+  const [threadAgentSelectionById, setThreadAgentSelectionById] =
+    React.useState<ThreadAgentSelectionMap>(() => readThreadAgentSelectionMap(initialAgentPreset));
   const [loadSessionSupported, setLoadSessionSupported] = React.useState(false);
   const [pendingPermissions, setPendingPermissions] = React.useState<
     AcpPermissionRequestEvent[]
@@ -1092,6 +1277,7 @@ export const useAcp = (): UseAcpResult => {
 
   const initializePromiseRef = React.useRef<Promise<void> | null>(null);
   const isInitializedRef = React.useRef(false);
+  const initializedAgentSignatureRef = React.useRef<string | null>(null);
   const loadSessionSupportedRef = React.useRef(false);
   const hydratedSessionIdsRef = React.useRef<Set<string>>(new Set());
   const loadingSessionIdsRef = React.useRef<Set<string>>(new Set());
@@ -1218,18 +1404,15 @@ export const useAcp = (): UseAcpResult => {
   );
 
   React.useEffect(() => {
-    window.localStorage.setItem(
-      getThreadSessionKey(agentPreset),
-      JSON.stringify(threadSessionMap),
-    );
-  }, [agentPreset, threadSessionMap]);
+    window.localStorage.setItem(THREAD_SESSION_KEY, JSON.stringify(threadSessionMap));
+  }, [threadSessionMap]);
 
   React.useEffect(() => {
     window.localStorage.setItem(
-      getThreadAttachmentHistoryKey(agentPreset),
+      THREAD_ATTACHMENT_HISTORY_KEY,
       JSON.stringify(threadAttachmentHistoryMap),
     );
-  }, [agentPreset, threadAttachmentHistoryMap]);
+  }, [threadAttachmentHistoryMap]);
 
   React.useEffect(() => {
     threadSessionMapRef.current = threadSessionMap;
@@ -1248,8 +1431,15 @@ export const useAcp = (): UseAcpResult => {
   }, [activeSessionId]);
 
   React.useEffect(() => {
-    window.localStorage.setItem(AGENT_PRESET_KEY, agentPreset);
-  }, [agentPreset]);
+    window.localStorage.setItem(AGENT_PRESET_KEY, defaultAgentPreset);
+  }, [defaultAgentPreset]);
+
+  React.useEffect(() => {
+    window.localStorage.setItem(
+      THREAD_AGENT_SELECTION_KEY,
+      JSON.stringify(threadAgentSelectionById),
+    );
+  }, [threadAgentSelectionById]);
 
   React.useEffect(() => {
     if (!codexAgentConfig) {
@@ -1443,6 +1633,13 @@ export const useAcp = (): UseAcpResult => {
       }
 
       if (event.type === 'connection-state') {
+        if (event.state === 'disconnected' || event.state === 'error') {
+          isInitializedRef.current = false;
+          initializePromiseRef.current = null;
+          initializedAgentSignatureRef.current = null;
+          loadSessionSupportedRef.current = false;
+        }
+
         setConnectionState(event.state);
         setConnectionMessage(event.message ?? null);
       }
@@ -1451,44 +1648,87 @@ export const useAcp = (): UseAcpResult => {
     return unsubscribe;
   }, [captureToolCallSnapshots, updateSessionTimelines]);
 
-  const resetRuntimeState = React.useCallback(() => {
-    initializePromiseRef.current = null;
-    isInitializedRef.current = false;
-    loadSessionSupportedRef.current = false;
-    loadingSessionIdsRef.current.clear();
-    recencyEligibleSessionIdsRef.current.clear();
-    suppressUpdatedAtUntilBySessionIdRef.current = {};
-    attachmentReplayCursorBySessionIdRef.current = {};
-    sessionCwdByIdRef.current = {};
-    setConnectionState('disconnected');
-    setConnectionMessage(null);
-    setLoadSessionSupported(false);
-    setAgentName('ACP Agent');
-    setPromptCapabilities(DEFAULT_PROMPT_CAPABILITIES);
-    setActiveSessionIdSafely(null);
-    setPendingPermissions([]);
-    setSessionTitleBySessionId({});
-    setSessionUpdatedAtBySessionId({});
-    setSessionControlsBySessionId({});
-    hydratedSessionIdsRef.current.clear();
-  }, [setActiveSessionIdSafely]);
+  const resolveThreadAgentSelection = React.useCallback(
+    (threadId?: string | null): ThreadAgentSelection | null => {
+      const normalizedThreadId = threadId?.trim() ?? '';
+      if (normalizedThreadId) {
+        const storedSelection = threadAgentSelectionById[normalizedThreadId];
+        if (storedSelection) {
+          return storedSelection;
+        }
+      }
+
+      if (defaultAgentPreset === 'custom') {
+        return customAgentConfig
+          ? {
+              preset: 'custom',
+              customConfig: customAgentConfig,
+            }
+          : {
+              preset: 'custom',
+            };
+      }
+
+      return {
+        preset: defaultAgentPreset,
+      };
+    },
+    [customAgentConfig, defaultAgentPreset, threadAgentSelectionById],
+  );
+
+  const getAgentConfigForSelection = React.useCallback(
+    (selection: ThreadAgentSelection | null): AcpAgentConfig | null => {
+      if (!selection || selection.preset === 'mock') {
+        return {
+          kind: 'mock',
+        };
+      }
+
+      if (selection.preset === 'custom') {
+        const resolvedConfig = selection.customConfig ?? customAgentConfig;
+        if (!resolvedConfig?.command.trim()) {
+          return null;
+        }
+
+        return {
+          kind: 'custom',
+          command: resolvedConfig.command,
+          args: resolvedConfig.args,
+          cwd: resolvedConfig.cwd,
+          env: resolvedConfig.env,
+        };
+      }
+
+      if (selection.preset === 'codex') {
+        return {
+          kind: 'codex',
+          config: codexAgentConfig ?? undefined,
+        };
+      }
+
+      return {
+        kind: 'claude',
+        config: claudeAgentConfig ?? undefined,
+      };
+    },
+    [claudeAgentConfig, codexAgentConfig, customAgentConfig],
+  );
+
+  const getCurrentAgentConfig = React.useCallback(
+    (threadId?: string | null): AcpAgentConfig | null =>
+      getAgentConfigForSelection(resolveThreadAgentSelection(threadId)),
+    [getAgentConfigForSelection, resolveThreadAgentSelection],
+  );
 
   const setAgentPreset = React.useCallback(
     (preset: AcpAgentPreset) => {
-      if (preset === agentPreset) {
+      if (preset === defaultAgentPreset) {
         return;
       }
 
-      const nextThreadSessionMap = readThreadSessionMap(preset);
-      const nextThreadAttachmentHistoryMap = readThreadAttachmentHistoryMap(preset);
-      setAgentPresetState(preset);
-      threadSessionMapRef.current = nextThreadSessionMap;
-      threadAttachmentHistoryMapRef.current = nextThreadAttachmentHistoryMap;
-      setThreadSessionMap(nextThreadSessionMap);
-      setThreadAttachmentHistoryMap(nextThreadAttachmentHistoryMap);
-      resetRuntimeState();
+      setDefaultAgentPresetState(preset);
     },
-    [agentPreset, resetRuntimeState],
+    [defaultAgentPreset],
   );
 
   const saveAgentConfig = React.useCallback(
@@ -1502,15 +1742,7 @@ export const useAcp = (): UseAcpResult => {
       }
 
       if (preset === 'custom') {
-        const nextThreadSessionMap = readThreadSessionMap('custom');
-        const nextThreadAttachmentHistoryMap = readThreadAttachmentHistoryMap('custom');
         setCustomAgentConfig(nextConfig);
-        setAgentPresetState('custom');
-        threadSessionMapRef.current = nextThreadSessionMap;
-        threadAttachmentHistoryMapRef.current = nextThreadAttachmentHistoryMap;
-        setThreadSessionMap(nextThreadSessionMap);
-        setThreadAttachmentHistoryMap(nextThreadAttachmentHistoryMap);
-        resetRuntimeState();
         return;
       }
 
@@ -1519,63 +1751,38 @@ export const useAcp = (): UseAcpResult => {
       } else {
         setClaudeAgentConfig(nextConfig);
       }
-
-      if (agentPreset === preset) {
-        resetRuntimeState();
-      }
     },
-    [agentPreset, resetRuntimeState],
+    [],
   );
 
-  const getCurrentAgentConfig = React.useCallback((): AcpAgentConfig | null => {
-    if (agentPreset === 'custom') {
-      if (!customAgentConfig?.command.trim()) {
-        return null;
-      }
+  const initialize = React.useCallback(async (cwd: string, threadId?: string): Promise<boolean> => {
+    const requestedAgent = getCurrentAgentConfig(threadId);
+    const requestedAgentSignature = toAgentConfigSignature(requestedAgent);
 
-      return {
-        kind: 'custom',
-        command: customAgentConfig.command,
-        args: customAgentConfig.args,
-        cwd: customAgentConfig.cwd,
-        env: customAgentConfig.env,
-      };
-    }
-
-    if (agentPreset === 'codex') {
-      return {
-        kind: 'codex',
-        config: codexAgentConfig ?? undefined,
-      };
-    }
-
-    if (agentPreset === 'claude') {
-      return {
-        kind: 'claude',
-        config: claudeAgentConfig ?? undefined,
-      };
-    }
-
-    return {
-      kind: 'mock',
-    };
-  }, [agentPreset, claudeAgentConfig, codexAgentConfig, customAgentConfig]);
-
-  const initialize = React.useCallback(async (cwd: string): Promise<boolean> => {
-    if (isInitializedRef.current) {
+    if (
+      isInitializedRef.current &&
+      initializedAgentSignatureRef.current === requestedAgentSignature
+    ) {
       return true;
+    }
+
+    if (initializedAgentSignatureRef.current !== requestedAgentSignature) {
+      isInitializedRef.current = false;
+      initializePromiseRef.current = null;
     }
 
     if (!initializePromiseRef.current) {
       initializePromiseRef.current = (async () => {
         try {
-          const agent = getCurrentAgentConfig();
+          const agent = getCurrentAgentConfig(threadId);
+          const nextAgentSignature = toAgentConfigSignature(agent);
           if (!agent) {
             setConnectionState('error');
             setPromptCapabilities(DEFAULT_PROMPT_CAPABILITIES);
             setLoadSessionSupported(false);
             loadSessionSupportedRef.current = false;
             isInitializedRef.current = false;
+            initializedAgentSignatureRef.current = null;
             initializePromiseRef.current = null;
             return;
           }
@@ -1598,6 +1805,7 @@ export const useAcp = (): UseAcpResult => {
             );
           }
           isInitializedRef.current = result.connected;
+          initializedAgentSignatureRef.current = result.connected ? nextAgentSignature : null;
           if (!result.connected) {
             initializePromiseRef.current = null;
           }
@@ -1612,6 +1820,7 @@ export const useAcp = (): UseAcpResult => {
           setLoadSessionSupported(false);
           loadSessionSupportedRef.current = false;
           isInitializedRef.current = false;
+          initializedAgentSignatureRef.current = null;
           initializePromiseRef.current = null;
           throw new Error('ACP initialize failed');
         }
@@ -1643,7 +1852,22 @@ export const useAcp = (): UseAcpResult => {
     async (threadId: string, cwd: string): Promise<void> => {
       const normalizedThreadId = threadId.trim();
       const normalizedCwd = cwd.trim();
-      const initialized = await initialize(normalizedCwd);
+      const resolvedSelection = resolveThreadAgentSelection(normalizedThreadId);
+      if (normalizedThreadId && !threadAgentSelectionById[normalizedThreadId] && resolvedSelection) {
+        setThreadAgentSelectionById((previous) => {
+          if (previous[normalizedThreadId]) {
+            return previous;
+          }
+
+          return {
+            ...previous,
+            [normalizedThreadId]: resolvedSelection,
+          };
+        });
+      }
+
+      const currentAgentConfig = getAgentConfigForSelection(resolvedSelection) ?? undefined;
+      const initialized = await initialize(normalizedCwd, normalizedThreadId);
       if (!initialized) {
         return;
       }
@@ -1663,7 +1887,7 @@ export const useAcp = (): UseAcpResult => {
         try {
           created = await window.desktop.acpSessionNew({
             cwd: normalizedCwd,
-            agent: getCurrentAgentConfig() ?? undefined,
+            agent: currentAgentConfig,
             mcpServers: getCurrentMcpServers(),
           });
         } catch (error) {
@@ -1688,7 +1912,7 @@ export const useAcp = (): UseAcpResult => {
             const loaded = await window.desktop.acpSessionLoad({
               sessionId: created.sessionId,
               cwd: normalizedCwd,
-              agent: getCurrentAgentConfig() ?? undefined,
+              agent: currentAgentConfig,
               mcpServers: getCurrentMcpServers(),
             });
 
@@ -1726,7 +1950,7 @@ export const useAcp = (): UseAcpResult => {
             const result = await window.desktop.acpSessionLoad({
               sessionId: existingSessionId,
               cwd: normalizedCwd,
-              agent: getCurrentAgentConfig() ?? undefined,
+              agent: currentAgentConfig,
               mcpServers: getCurrentMcpServers(),
             });
 
@@ -1819,7 +2043,7 @@ export const useAcp = (): UseAcpResult => {
       try {
         created = await window.desktop.acpSessionNew({
           cwd: normalizedCwd,
-          agent: getCurrentAgentConfig() ?? undefined,
+          agent: currentAgentConfig,
           mcpServers: getCurrentMcpServers(),
         });
       } catch (error) {
@@ -1853,7 +2077,7 @@ export const useAcp = (): UseAcpResult => {
           const loaded = await window.desktop.acpSessionLoad({
             sessionId: created.sessionId,
             cwd: normalizedCwd,
-            agent: getCurrentAgentConfig() ?? undefined,
+            agent: currentAgentConfig,
             mcpServers: getCurrentMcpServers(),
           });
 
@@ -1872,11 +2096,13 @@ export const useAcp = (): UseAcpResult => {
     },
     [
       ensureTimelineExists,
-      getCurrentAgentConfig,
+      getAgentConfigForSelection,
       getCurrentMcpServers,
       initialize,
+      resolveThreadAgentSelection,
       rememberSessionCwd,
       setActiveSessionIdSafely,
+      threadAgentSelectionById,
       threadSessionMap,
     ],
   );
@@ -2165,9 +2391,9 @@ export const useAcp = (): UseAcpResult => {
     async (cwd: string): Promise<AcpAuthenticateResult> =>
       window.desktop.acpAuthenticate({
         cwd,
-        agent: getCurrentAgentConfig() ?? undefined,
+        agent: getCurrentAgentConfig(selectedThreadId) ?? undefined,
       }),
-    [getCurrentAgentConfig],
+    [getCurrentAgentConfig, selectedThreadId],
   );
 
   const invalidateThreadSession = React.useCallback(
@@ -2241,6 +2467,48 @@ export const useAcp = (): UseAcpResult => {
     },
     [setActiveSessionIdSafely],
   );
+
+  const setThreadAgentSelection = React.useCallback(
+    (threadId: string, selection: ThreadAgentSelection): void => {
+      const normalizedThreadId = threadId.trim();
+      if (!normalizedThreadId) {
+        return;
+      }
+
+      const normalizedSelection = normalizeThreadAgentSelection(selection);
+      if (!normalizedSelection) {
+        return;
+      }
+
+      const currentSelection = threadAgentSelectionById[normalizedThreadId] ?? null;
+      if (
+        toThreadAgentSelectionSignature(currentSelection) ===
+        toThreadAgentSelectionSignature(normalizedSelection)
+      ) {
+        return;
+      }
+
+      setThreadAgentSelectionById((previous) => ({
+        ...previous,
+        [normalizedThreadId]: normalizedSelection,
+      }));
+      invalidateThreadSession(normalizedThreadId);
+    },
+    [invalidateThreadSession, threadAgentSelectionById],
+  );
+
+  const currentThreadSelection = React.useMemo(
+    () => resolveThreadAgentSelection(selectedThreadId),
+    [resolveThreadAgentSelection, selectedThreadId],
+  );
+  const agentPreset = currentThreadSelection?.preset ?? defaultAgentPreset;
+  const currentCustomAgentConfig = React.useMemo(() => {
+    if (agentPreset !== 'custom') {
+      return customAgentConfig;
+    }
+
+    return currentThreadSelection?.customConfig ?? customAgentConfig;
+  }, [agentPreset, currentThreadSelection?.customConfig, customAgentConfig]);
 
   const pendingPermission = pendingPermissions[0] ?? null;
 
@@ -2320,19 +2588,23 @@ export const useAcp = (): UseAcpResult => {
     agentName,
     promptCapabilities,
     agentPreset,
+    defaultAgentPreset,
     codexAgentConfig,
     claudeAgentConfig,
-    customAgentConfig,
+    customAgentConfig: currentCustomAgentConfig,
+    defaultCustomAgentConfig: customAgentConfig,
     loadSessionSupported,
     activeSessionId,
     activeSessionThreadId,
     activeTimeline,
     threadPromptingById,
+    threadAgentSelectionById,
     threadSessionTitleById,
     threadSessionUpdatedAtById,
     activeSessionControls,
     pendingPermission,
     setAgentPreset,
+    setThreadAgentSelection,
     saveAgentConfig,
     ensureSessionForThread,
     sendPrompt,

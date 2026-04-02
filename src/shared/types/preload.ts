@@ -4,6 +4,8 @@ import type {
   AcpCancelRequest,
   AcpInitializeRequest,
   AcpInitializeResult,
+  AcpPrepareAgentRequest,
+  AcpPrepareAgentResult,
   AcpPromptRequest,
   AcpPromptResult,
   AcpRendererEvent,
@@ -213,6 +215,7 @@ export interface DesktopApi {
   ) => Promise<LspServerMutationResult>;
   onLspEvent: (listener: (event: LspRendererEvent) => void) => () => void;
   acpInitialize: (request: AcpInitializeRequest) => Promise<AcpInitializeResult>;
+  acpPrepareAgent: (request: AcpPrepareAgentRequest) => Promise<AcpPrepareAgentResult>;
   acpSessionNew: (request: AcpSessionNewRequest) => Promise<AcpSessionNewResult>;
   acpSessionLoad: (request: AcpSessionLoadRequest) => Promise<AcpSessionLoadResult>;
   acpSessionSetMode: (

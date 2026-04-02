@@ -32,6 +32,7 @@ export const IPC_CHANNELS = {
   lspDeleteServer: 'lsp:delete-server',
   lspEvent: 'lsp:event',
   acpInitialize: 'acp:initialize',
+  acpPrepareAgent: 'acp:prepare-agent',
   acpSessionNew: 'acp:session:new',
   acpSessionLoad: 'acp:session:load',
   acpSessionSetMode: 'acp:session:set-mode',

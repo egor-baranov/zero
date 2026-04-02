@@ -6,6 +6,8 @@ import type {
   AcpCancelRequest,
   AcpInitializeRequest,
   AcpInitializeResult,
+  AcpPrepareAgentRequest,
+  AcpPrepareAgentResult,
   AcpPromptRequest,
   AcpPromptResult,
   AcpRendererEvent,
@@ -246,6 +248,8 @@ export const desktopApi: DesktopApi = {
   },
   acpInitialize: (request: AcpInitializeRequest): Promise<AcpInitializeResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.acpInitialize, request),
+  acpPrepareAgent: (request: AcpPrepareAgentRequest): Promise<AcpPrepareAgentResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.acpPrepareAgent, request),
   acpSessionNew: (request: AcpSessionNewRequest): Promise<AcpSessionNewResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.acpSessionNew, request),
   acpSessionLoad: (request: AcpSessionLoadRequest): Promise<AcpSessionLoadResult> =>
@@ -285,7 +289,7 @@ export const desktopApi: DesktopApi = {
   },
   skillsList: () => ipcRenderer.invoke(IPC_CHANNELS.skillsList),
   skillsCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.skillsCatalog),
-  skillsCatalogDetail: (request: SkillsглавCatalogDetailRequest): Promise<SkillsCatalogDetailResult> =>
+  skillsCatalogDetail: (request: SkillsCatalogDetailRequest): Promise<SkillsCatalogDetailResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.skillsCatalogDetail, request),
   skillsRead: (request: SkillsReadRequest): Promise<SkillsReadResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.skillsRead, request),

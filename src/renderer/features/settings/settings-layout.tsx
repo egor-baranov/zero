@@ -93,6 +93,10 @@ interface SettingsLayoutProps {
   onSelectWorkspace: (workspaceId: string) => void;
   onOpenWorkspaceFromPath: (folderPath: string) => void;
   onSelectAgentPreset: (selection: AgentPresetSelection) => void;
+  onSaveAgentConfig: (
+    preset: 'codex' | 'claude' | 'custom',
+    config: AcpCustomAgentConfig,
+  ) => void;
 }
 
 const sections = [
@@ -646,6 +650,9 @@ const toBinaryKeyCandidates = (platform: NodeJS.Platform): string[] => {
   return [];
 };
 
+const shouldPreferRegistryBinaryTemplate = (agentId: string): boolean =>
+  agentId === 'codex-acp';
+
 const isLikelyRunnableCommand = (value: string): boolean => {
   if (!value) {
     return false;
@@ -664,6 +671,35 @@ const toRegistryLaunchTemplate = (
   agent: RegistryAgent,
   platform: NodeJS.Platform,
 ): RegistryLaunchTemplate => {
+  const binaryDistribution = agent.distribution?.binary ?? {};
+  const binaryCandidates = toBinaryKeyCandidates(platform)
+    .map((key) => binaryDistribution[key])
+    .filter((target): target is RegistryBinaryDistributionTarget => Boolean(target));
+  const binaryFallback = Object.values(binaryDistribution).filter(
+    (target): target is RegistryBinaryDistributionTarget =>
+      typeof target?.cmd === 'string' && target.cmd.trim().length > 0,
+  );
+  const binaryTarget = [...binaryCandidates, ...binaryFallback].find(
+    (target) => typeof target.cmd === 'string' && target.cmd.trim().length > 0,
+  );
+  const binaryCommand =
+    binaryTarget && typeof binaryTarget.cmd === 'string' ? binaryTarget.cmd.trim() : '';
+  const binaryArgs = Array.isArray(binaryTarget?.args)
+    ? binaryTarget.args.filter(
+        (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
+      )
+    : [];
+
+  if (shouldPreferRegistryBinaryTemplate(agent.id) && binaryCommand) {
+    return {
+      command: binaryCommand,
+      args: binaryArgs,
+      source: 'binary',
+      autoConfigurable: isLikelyRunnableCommand(binaryCommand),
+      preview: joinCommandPreview(binaryCommand, binaryArgs),
+    };
+  }
+
   const npxDistribution = agent.distribution?.npx;
   if (npxDistribution?.package) {
     const args = ['-y', npxDistribution.package, ...(npxDistribution.args ?? [])];
@@ -689,25 +725,6 @@ const toRegistryLaunchTemplate = (
       preview: joinCommandPreview('uvx', args),
     };
   }
-
-  const binaryDistribution = agent.distribution?.binary ?? {};
-  const binaryCandidates = toBinaryKeyCandidates(platform)
-    .map((key) => binaryDistribution[key])
-    .filter((target): target is RegistryBinaryDistributionTarget => Boolean(target));
-  const binaryFallback = Object.values(binaryDistribution).filter(
-    (target): target is RegistryBinaryDistributionTarget =>
-      typeof target?.cmd === 'string' && target.cmd.trim().length > 0,
-  );
-  const binaryTarget = [...binaryCandidates, ...binaryFallback].find(
-    (target) => typeof target.cmd === 'string' && target.cmd.trim().length > 0,
-  );
-  const binaryCommand =
-    binaryTarget && typeof binaryTarget.cmd === 'string' ? binaryTarget.cmd.trim() : '';
-  const binaryArgs = Array.isArray(binaryTarget?.args)
-    ? binaryTarget.args.filter(
-        (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
-      )
-    : [];
 
   if (binaryCommand) {
     return {
@@ -833,6 +850,7 @@ export const SettingsLayout = ({
   onSelectWorkspace,
   onOpenWorkspaceFromPath,
   onSelectAgentPreset,
+  onSaveAgentConfig,
 }: SettingsLayoutProps): JSX.Element => {
   const [activeSection, setActiveSection] = React.useState<SectionId>(sections[0].id);
   const [uiPreferences, setUiPreferences] = React.useState<UiPreferences>(() => readUiPreferences());
@@ -1218,6 +1236,7 @@ export const SettingsLayout = ({
       agentPreset={agentPreset}
       customAgentConfig={customAgentConfig}
       onSelectAgentPreset={onSelectAgentPreset}
+      onSaveAgentConfig={onSaveAgentConfig}
     />
   );
 
@@ -3085,6 +3104,10 @@ interface AgentsSettingsSectionProps {
   agentPreset: AcpAgentPreset;
   customAgentConfig: AcpCustomAgentConfig | null;
   onSelectAgentPreset: (selection: AgentPresetSelection) => void;
+  onSaveAgentConfig: (
+    preset: 'codex' | 'claude' | 'custom',
+    config: AcpCustomAgentConfig,
+  ) => void;
 }
 
 const AgentsSettingsSection = ({
@@ -3092,6 +3115,7 @@ const AgentsSettingsSection = ({
   agentPreset,
   customAgentConfig,
   onSelectAgentPreset,
+  onSaveAgentConfig,
 }: AgentsSettingsSectionProps): JSX.Element => {
   const currentPlatform = window.desktop?.platform ?? 'darwin';
   const [storedCustomAgents, setStoredCustomAgents] = React.useState<StoredCustomAgentEntry[]>(() =>
@@ -3103,6 +3127,13 @@ const AgentsSettingsSection = ({
   const [registryAgents, setRegistryAgents] = React.useState<RegistryAgent[]>([]);
   const [isRegistryLoading, setIsRegistryLoading] = React.useState(false);
   const [registryError, setRegistryError] = React.useState<string | null>(null);
+  const [installingRegistryAgentId, setInstallingRegistryAgentId] = React.useState<string | null>(
+    null,
+  );
+  const [registryInstallNotice, setRegistryInstallNotice] = React.useState<{
+    tone: 'success' | 'error';
+    text: string;
+  } | null>(null);
   const [editorState, setEditorState] = React.useState<AgentEditorState | null>(null);
   const [pendingDeleteAgentId, setPendingDeleteAgentId] = React.useState<string | null>(null);
 
@@ -3454,7 +3485,7 @@ const AgentsSettingsSection = ({
   );
 
   const handleAddRegistryAgent = React.useCallback(
-    (agent: RegistryAgent) => {
+    async (agent: RegistryAgent) => {
       const launchTemplate = toRegistryLaunchTemplate(agent, currentPlatform);
       if (!launchTemplate.autoConfigurable) {
         return;
@@ -3466,6 +3497,25 @@ const AgentsSettingsSection = ({
         env: launchTemplate.env,
       });
       if (!parsedConfig) {
+        return;
+      }
+
+      setInstallingRegistryAgentId(agent.id);
+      setRegistryInstallNotice(null);
+
+      try {
+        if (launchTemplate.source === 'binary') {
+          await window.desktop.acpPrepareAgent({
+            cwd: workspacePath,
+            config: parsedConfig,
+          });
+        }
+      } catch (error) {
+        setRegistryInstallNotice({
+          tone: 'error',
+          text: toSettingsErrorMessage(error, `Could not install ${agent.name}.`),
+        });
+        setInstallingRegistryAgentId(null);
         return;
       }
 
@@ -3485,6 +3535,13 @@ const AgentsSettingsSection = ({
         registryAgentId: agent.id,
       };
 
+      const builtInPreset =
+        agent.id === 'codex-acp'
+          ? 'codex'
+          : agent.id === 'claude-acp' || agent.id === 'claude-agent-acp'
+            ? 'claude'
+            : null;
+
       setStoredCustomAgents((previous) => {
         const hasTarget = previous.some((entry) => entry.id === targetId);
         if (!hasTarget) {
@@ -3493,9 +3550,24 @@ const AgentsSettingsSection = ({
 
         return previous.map((entry) => (entry.id === targetId ? nextEntry : entry));
       });
+      if (builtInPreset) {
+        onSaveAgentConfig(builtInPreset, parsedConfig);
+      }
       setActiveCustomAgentId(targetId);
+      setRegistryInstallNotice({
+        tone: 'success',
+        text:
+          launchTemplate.source === 'binary'
+            ? builtInPreset
+              ? `${agent.name} installed, configured for the built-in preset, and added to your agent library.`
+              : `${agent.name} installed and added to your agent library.`
+            : builtInPreset
+              ? `${agent.name} configured for the built-in preset and added to your agent library.`
+              : `${agent.name} added to your agent library.`,
+      });
+      setInstallingRegistryAgentId(null);
     },
-    [currentPlatform, storedCustomAgents],
+    [currentPlatform, onSaveAgentConfig, storedCustomAgents, workspacePath],
   );
 
   const currentAgentLabel =
@@ -3649,6 +3721,16 @@ const AgentsSettingsSection = ({
         }
       >
         <SettingsCard>
+          {registryInstallNotice ? (
+            <div
+              className={cn(
+                'border-b border-stone-200/75 px-3 py-2 text-[13px]',
+                registryInstallNotice.tone === 'error' ? 'text-rose-700' : 'text-[#0169cc]',
+              )}
+            >
+              {registryInstallNotice.text}
+            </div>
+          ) : null}
           {isRegistryLoading && registryAgents.length === 0 ? (
             <SettingRow
               title="Loading registry"
@@ -3714,12 +3796,12 @@ const AgentsSettingsSection = ({
                           size="sm"
                           variant="outline"
                           className="rounded-[10px]"
-                          disabled={!canAutoConfigure}
+                          disabled={!canAutoConfigure || Boolean(installingRegistryAgentId)}
                           onClick={() => {
-                            handleAddRegistryAgent(agent);
+                            void handleAddRegistryAgent(agent);
                           }}
                         >
-                          Install
+                          {installingRegistryAgentId === agent.id ? 'Installing…' : 'Install'}
                         </Button>
                       )}
                       {agent.repository ? (

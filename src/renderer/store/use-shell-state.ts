@@ -7,9 +7,31 @@ export interface WorkspaceRecord {
   lastOpenedAt: number;
 }
 
+export interface WorkspaceScopeRecord {
+  id: string;
+  name: string;
+  projectIds: string[];
+  lastOpenedAt: number;
+}
+
+export type ThreadBoardStatus = 'open' | 'in_progress' | 'review' | 'archive';
+
+export const THREAD_BOARD_COLUMNS: ReadonlyArray<{
+  id: ThreadBoardStatus;
+  label: string;
+}> = [
+  { id: 'open', label: 'Open' },
+  { id: 'in_progress', label: 'In progress' },
+  { id: 'review', label: 'Review' },
+  { id: 'archive', label: 'Archive' },
+];
+
 export interface ThreadRecord {
   id: string;
   workspaceId: string;
+  projectId: string;
+  status: ThreadBoardStatus;
+  isDraft: boolean;
   title: string;
   titleSource: 'auto' | 'manual';
   preview: string;
@@ -19,20 +41,28 @@ export interface ThreadRecord {
 export interface ThreadGroupView {
   id: string;
   label: string;
-  workspaceId: string;
+  projectId: string;
   path: string;
   threads: ThreadRecord[];
 }
 
+type InsertPlacement = 'before' | 'after';
+
 interface ShellState {
-  workspaces: WorkspaceRecord[];
+  projects: WorkspaceRecord[];
+  workspaces: WorkspaceScopeRecord[];
   threads: ThreadRecord[];
   selectedThreadId: string;
   selectedWorkspaceId: string;
+  selectedProjectId: string;
 }
 
-const STORAGE_KEY = 'zeroade.shell.state.v2';
-const MAX_RECENT_WORKSPACES = 8;
+interface PersistedThreadRecord extends Partial<ThreadRecord> {
+  updatedAt?: unknown;
+}
+
+const STORAGE_KEY = 'zeroade.shell.state.v3';
+const MAX_RECENT_PROJECTS = 8;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
@@ -40,13 +70,15 @@ const WEEK_MS = 7 * DAY_MS;
 const MONTH_MS = 30 * DAY_MS;
 
 const EMPTY_STATE: ShellState = {
+  projects: [],
   workspaces: [],
   threads: [],
   selectedThreadId: '',
   selectedWorkspaceId: '',
+  selectedProjectId: '',
 };
 
-const LEGACY_DEMO_WORKSPACE_IDS = new Set([
+const LEGACY_DEMO_PROJECT_IDS = new Set([
   'workspace-zero-ade',
   'workspace-desktop-lab',
 ]);
@@ -68,10 +100,31 @@ const slugify = (value: string): string =>
 const getFolderName = (folderPath: string): string =>
   folderPath.split(/[\\/]/).filter(Boolean).pop() ?? folderPath;
 
-const UNASSIGNED_WORKSPACE_ID = '';
+const normalizeFolderPath = (value: string): string => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  if (trimmed === '/' || trimmed === '\\') {
+    return trimmed;
+  }
+
+  if (/^[a-zA-Z]:[\\/]?$/.test(trimmed)) {
+    return trimmed.slice(0, 2) + trimmed.slice(2).replace(/[\\/]/g, '\\');
+  }
+
+  return trimmed.replace(/[\\/]+$/, '');
+};
 
 const normalizeMessageText = (value: string): string =>
   value.replace(/\s+/g, ' ').trim();
+
+const isThreadBoardStatus = (value: unknown): value is ThreadBoardStatus =>
+  value === 'open' ||
+  value === 'in_progress' ||
+  value === 'review' ||
+  value === 'archive';
 
 const toPlainPreviewText = (value: string): string =>
   normalizeMessageText(
@@ -138,13 +191,18 @@ const parseLegacyUpdatedAtMs = (value: unknown): number => {
 };
 
 const createNewChatThread = (
-  workspaceName: string,
+  projectName: string,
+  projectId: string,
+  workspaceId: string,
 ): ThreadRecord => {
   const suffix = Date.now().toString(36);
 
   return {
-    id: `thread-${slugify(workspaceName)}-${suffix}`,
-    workspaceId: UNASSIGNED_WORKSPACE_ID,
+    id: `thread-${slugify(projectName)}-${suffix}`,
+    workspaceId,
+    projectId,
+    status: 'open',
+    isDraft: true,
     title: 'New chat',
     titleSource: 'auto',
     preview: 'New conversation',
@@ -180,90 +238,319 @@ const toThreadPreviewFromPrompt = (prompt: string): string => {
   return `${normalized.slice(0, maxLength).trimEnd()}…`;
 };
 
-const isUnassignedThread = (thread: ThreadRecord): boolean =>
-  thread.workspaceId.trim().length === 0;
+const compareByRecent = <T extends { lastOpenedAt: number }>(left: T, right: T): number =>
+  right.lastOpenedAt - left.lastOpenedAt;
 
-const compareThreadsByRecentActivity = (left: ThreadRecord, right: ThreadRecord): number => {
-  const leftUpdatedAt = Number.isFinite(left.updatedAtMs) ? left.updatedAtMs : 0;
-  const rightUpdatedAt = Number.isFinite(right.updatedAtMs) ? right.updatedAtMs : 0;
-  if (rightUpdatedAt !== leftUpdatedAt) {
-    return rightUpdatedAt - leftUpdatedAt;
+const reorderItemsById = <T extends { id: string }>(
+  items: T[],
+  sourceId: string,
+  targetId: string,
+  placement: InsertPlacement = 'before',
+): T[] => {
+  if (!sourceId || !targetId || sourceId === targetId) {
+    return items;
   }
 
-  return left.title.localeCompare(right.title);
+  const sourceIndex = items.findIndex((item) => item.id === sourceId);
+  const targetIndex = items.findIndex((item) => item.id === targetId);
+  if (sourceIndex < 0 || targetIndex < 0) {
+    return items;
+  }
+
+  const nextItems = [...items];
+  const [movedItem] = nextItems.splice(sourceIndex, 1);
+  if (!movedItem) {
+    return items;
+  }
+
+  const nextTargetIndex = nextItems.findIndex((item) => item.id === targetId);
+  if (nextTargetIndex < 0) {
+    return items;
+  }
+
+  const insertionIndex = nextTargetIndex + (placement === 'after' ? 1 : 0);
+  if (insertionIndex === sourceIndex) {
+    return items;
+  }
+
+  nextItems.splice(insertionIndex, 0, movedItem);
+  return nextItems;
+};
+
+const getMostRecentProjects = (projects: WorkspaceRecord[]): WorkspaceRecord[] =>
+  [...projects].sort(compareByRecent).slice(0, MAX_RECENT_PROJECTS);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+const normalizeProjectRecords = (value: unknown): WorkspaceRecord[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const projects: WorkspaceRecord[] = [];
+  const seenIds = new Set<string>();
+
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+
+    const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+    const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+    const path = typeof entry.path === 'string' ? normalizeFolderPath(entry.path) : '';
+    if (!id || !name || !path || seenIds.has(id)) {
+      continue;
+    }
+
+    seenIds.add(id);
+    projects.push({
+      id,
+      name,
+      path,
+      lastOpenedAt:
+        typeof entry.lastOpenedAt === 'number' && Number.isFinite(entry.lastOpenedAt)
+          ? entry.lastOpenedAt
+          : Date.now(),
+    });
+  }
+
+  return projects;
+};
+
+const normalizeWorkspaceScopeRecords = (
+  value: unknown,
+  validProjectIds: Set<string>,
+): WorkspaceScopeRecord[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const workspaces: WorkspaceScopeRecord[] = [];
+  const seenIds = new Set<string>();
+
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+
+    const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+    const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+    const projectIds = Array.isArray(entry.projectIds)
+      ? Array.from(
+          new Set(
+            entry.projectIds.filter(
+              (projectId): projectId is string =>
+                typeof projectId === 'string' && validProjectIds.has(projectId),
+            ),
+          ),
+        )
+      : [];
+
+    if (!id || !name || projectIds.length === 0 || seenIds.has(id)) {
+      continue;
+    }
+
+    seenIds.add(id);
+    workspaces.push({
+      id,
+      name,
+      projectIds,
+      lastOpenedAt:
+        typeof entry.lastOpenedAt === 'number' && Number.isFinite(entry.lastOpenedAt)
+          ? entry.lastOpenedAt
+          : Date.now(),
+    });
+  }
+
+  return workspaces;
+};
+
+const normalizeThreadRecords = (
+  value: unknown,
+  validProjectIds: Set<string>,
+  validWorkspaceIds: Set<string>,
+  isLegacyState: boolean,
+): ThreadRecord[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const threads: ThreadRecord[] = [];
+  const seenIds = new Set<string>();
+
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+
+    const thread = entry as PersistedThreadRecord;
+    const id = typeof thread.id === 'string' ? thread.id.trim() : '';
+    const legacyWorkspaceId =
+      typeof thread.workspaceId === 'string' ? thread.workspaceId.trim() : '';
+    const projectId = typeof thread.projectId === 'string'
+      ? thread.projectId.trim()
+      : legacyWorkspaceId
+        ? legacyWorkspaceId
+        : '';
+    const workspaceId = isLegacyState
+      ? ''
+      : legacyWorkspaceId
+        ? legacyWorkspaceId
+        : '';
+
+    if (
+      !id ||
+      !projectId ||
+      !validProjectIds.has(projectId) ||
+      (workspaceId && !validWorkspaceIds.has(workspaceId)) ||
+      seenIds.has(id)
+    ) {
+      continue;
+    }
+
+    seenIds.add(id);
+    threads.push({
+      id,
+      workspaceId,
+      projectId,
+      status: isThreadBoardStatus(thread.status) ? thread.status : 'open',
+      isDraft:
+        typeof thread.isDraft === 'boolean'
+          ? thread.isDraft
+          : isLegacyState
+            ? legacyWorkspaceId.length === 0
+            : false,
+      title: typeof thread.title === 'string' && thread.title.trim().length > 0
+        ? thread.title
+        : 'New chat',
+      titleSource:
+        thread.titleSource === 'manual' || thread.titleSource === 'auto'
+          ? thread.titleSource
+          : isDefaultThreadTitle(typeof thread.title === 'string' ? thread.title : '')
+            ? 'auto'
+            : 'manual',
+      preview: toThreadPreviewFromPrompt(
+        typeof thread.preview === 'string' ? thread.preview : '',
+      ),
+      updatedAtMs: parseLegacyUpdatedAtMs(thread.updatedAtMs ?? thread.updatedAt),
+    });
+  }
+
+  return threads;
+};
+
+const getProjectIdsForWorkspace = (
+  projects: WorkspaceRecord[],
+  workspaces: WorkspaceScopeRecord[],
+  workspaceId: string,
+): string[] => {
+  if (!workspaceId.trim()) {
+    return projects.map((project) => project.id);
+  }
+
+  return workspaces.find((workspace) => workspace.id === workspaceId)?.projectIds ?? [];
+};
+
+const sanitizeState = (state: ShellState): ShellState => {
+  const projects = normalizeProjectRecords(state.projects);
+  const validProjectIds = new Set(projects.map((project) => project.id));
+  const workspaces = normalizeWorkspaceScopeRecords(state.workspaces, validProjectIds);
+  const validWorkspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+  const threads = normalizeThreadRecords(state.threads, validProjectIds, validWorkspaceIds, false);
+
+  const selectedThread = threads.find((thread) => thread.id === state.selectedThreadId);
+  const selectedWorkspaceId = selectedThread
+    ? selectedThread.workspaceId
+    : validWorkspaceIds.has(state.selectedWorkspaceId)
+      ? state.selectedWorkspaceId
+      : '';
+  const visibleProjectIds = getProjectIdsForWorkspace(
+    projects,
+    workspaces,
+    selectedWorkspaceId,
+  );
+  const selectedProjectId = selectedThread
+    ? selectedThread.projectId
+    : visibleProjectIds.includes(state.selectedProjectId)
+      ? state.selectedProjectId
+      : visibleProjectIds[0] ?? '';
+
+  return {
+    projects,
+    workspaces,
+    threads,
+    selectedThreadId: selectedThread?.id ?? '',
+    selectedWorkspaceId,
+    selectedProjectId,
+  };
 };
 
 const isLegacyDemoState = (state: ShellState): boolean => {
-  if (state.workspaces.length === 0 && state.threads.length === 0) {
+  if (state.projects.length === 0 && state.threads.length === 0) {
     return false;
   }
 
-  const workspacesMatch =
-    state.workspaces.length > 0 &&
-    state.workspaces.every((workspace) => LEGACY_DEMO_WORKSPACE_IDS.has(workspace.id));
+  const projectsMatch =
+    state.projects.length > 0 &&
+    state.projects.every((project) => LEGACY_DEMO_PROJECT_IDS.has(project.id));
   const threadsMatch =
     state.threads.length > 0 &&
     state.threads.every(
       (thread) =>
         LEGACY_DEMO_THREAD_IDS.has(thread.id) &&
-        LEGACY_DEMO_WORKSPACE_IDS.has(thread.workspaceId),
+        LEGACY_DEMO_PROJECT_IDS.has(thread.projectId),
     );
-  const selectedWorkspaceMatches =
-    !state.selectedWorkspaceId ||
-    LEGACY_DEMO_WORKSPACE_IDS.has(state.selectedWorkspaceId);
+  const selectedProjectMatches =
+    !state.selectedProjectId ||
+    LEGACY_DEMO_PROJECT_IDS.has(state.selectedProjectId);
   const selectedThreadMatches =
     !state.selectedThreadId ||
     LEGACY_DEMO_THREAD_IDS.has(state.selectedThreadId);
 
-  return workspacesMatch && threadsMatch && selectedWorkspaceMatches && selectedThreadMatches;
+  return projectsMatch && threadsMatch && selectedProjectMatches && selectedThreadMatches;
 };
 
 const parsePersistedState = (): ShellState => {
-  const raw = window.localStorage.getItem(STORAGE_KEY);
+  const raw = window.localStorage.getItem(STORAGE_KEY) ?? window.localStorage.getItem('zeroade.shell.state.v2');
   if (!raw) {
     return EMPTY_STATE;
   }
 
   try {
-    const parsed = JSON.parse(raw) as Partial<ShellState>;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const hasProjects = Array.isArray(parsed.projects);
+    const projects = hasProjects
+      ? normalizeProjectRecords(parsed.projects)
+      : normalizeProjectRecords(parsed.workspaces);
+    const validProjectIds = new Set(projects.map((project) => project.id));
+    const workspaces = hasProjects
+      ? normalizeWorkspaceScopeRecords(parsed.workspaces, validProjectIds)
+      : [];
+    const validWorkspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+    const threads = normalizeThreadRecords(
+      parsed.threads,
+      validProjectIds,
+      validWorkspaceIds,
+      !hasProjects,
+    );
 
-    if (
-      !parsed ||
-      !Array.isArray(parsed.workspaces) ||
-      !Array.isArray(parsed.threads) ||
-      typeof parsed.selectedThreadId !== 'string' ||
-      typeof parsed.selectedWorkspaceId !== 'string'
-    ) {
-      return EMPTY_STATE;
-    }
-
-    const normalizedThreads = (parsed.threads as Array<
-      ThreadRecord & {
-        updatedAt?: unknown;
-      }
-    >).map((thread) => {
-      const previewSource =
-        typeof thread.preview === 'string' ? thread.preview : '';
-
-      return {
-        ...thread,
-        titleSource:
-          thread.titleSource === 'manual' || thread.titleSource === 'auto'
-            ? thread.titleSource
-            : isDefaultThreadTitle(thread.title)
-              ? 'auto'
-              : 'manual',
-        preview: toThreadPreviewFromPrompt(previewSource),
-        updatedAtMs: parseLegacyUpdatedAtMs(thread.updatedAtMs ?? thread.updatedAt),
-      };
+    const nextState = sanitizeState({
+      projects,
+      workspaces,
+      threads,
+      selectedThreadId: typeof parsed.selectedThreadId === 'string' ? parsed.selectedThreadId : '',
+      selectedWorkspaceId:
+        hasProjects && typeof parsed.selectedWorkspaceId === 'string'
+          ? parsed.selectedWorkspaceId
+          : '',
+      selectedProjectId:
+        typeof parsed.selectedProjectId === 'string'
+          ? parsed.selectedProjectId
+          : typeof parsed.selectedWorkspaceId === 'string'
+            ? parsed.selectedWorkspaceId
+            : '',
     });
-
-    const nextState: ShellState = {
-      workspaces: parsed.workspaces as WorkspaceRecord[],
-      threads: normalizedThreads,
-      selectedThreadId: parsed.selectedThreadId,
-      selectedWorkspaceId: parsed.selectedWorkspaceId,
-    };
 
     if (isLegacyDemoState(nextState)) {
       return EMPTY_STATE;
@@ -275,29 +562,70 @@ const parsePersistedState = (): ShellState => {
   }
 };
 
-const getMostRecentWorkspaceOrder = (
-  workspaces: WorkspaceRecord[],
-): WorkspaceRecord[] => {
-  return [...workspaces]
-    .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
-    .slice(0, MAX_RECENT_WORKSPACES);
+const upsertProject = (
+  projects: WorkspaceRecord[],
+  folderPath: string,
+): { projects: WorkspaceRecord[]; project: WorkspaceRecord } | null => {
+  const normalizedPath = normalizeFolderPath(folderPath);
+  if (!normalizedPath) {
+    return null;
+  }
+
+  const timestamp = Date.now();
+  const existing = projects.find((project) => project.path === normalizedPath);
+  if (existing) {
+    const refreshedProject: WorkspaceRecord = {
+      ...existing,
+      lastOpenedAt: timestamp,
+    };
+
+    return {
+      projects: projects.map((project) =>
+        project.id === existing.id ? refreshedProject : project,
+      ),
+      project: refreshedProject,
+    };
+  }
+
+  const project: WorkspaceRecord = {
+    id: `project-${slugify(getFolderName(normalizedPath))}-${timestamp.toString(36)}`,
+    name: getFolderName(normalizedPath),
+    path: normalizedPath,
+    lastOpenedAt: timestamp,
+  };
+
+  return {
+    projects: [...projects, project],
+    project,
+  };
 };
 
 export const useShellState = (): {
-  workspaces: WorkspaceRecord[];
-  recentWorkspaces: WorkspaceRecord[];
+  projects: WorkspaceRecord[];
+  recentProjects: WorkspaceRecord[];
+  workspaces: WorkspaceScopeRecord[];
   threadGroups: ThreadGroupView[];
   selectedThread: ThreadRecord | undefined;
-  selectedWorkspace: WorkspaceRecord | undefined;
+  selectedWorkspace: WorkspaceScopeRecord | undefined;
+  selectedProject: WorkspaceRecord | undefined;
   selectedThreadId: string;
   selectedWorkspaceId: string;
+  selectedProjectId: string;
   selectThread: (threadId: string) => void;
+  clearThreadSelection: () => void;
   selectWorkspace: (workspaceId: string) => void;
-  createThreadInWorkspace: (workspaceId: string) => void;
-  bindThreadToWorkspace: (
+  selectProject: (projectId: string) => void;
+  createThread: (options?: {
+    workspaceId?: string;
+    projectId?: string;
+  }) => void;
+  setThreadProject: (threadId: string, projectId: string) => void;
+  setThreadStatus: (threadId: string, status: ThreadBoardStatus) => void;
+  moveThreadInBoard: (
     threadId: string,
-    workspaceId: string,
-    firstMessage: string,
+    targetStatus: ThreadBoardStatus,
+    targetThreadId?: string,
+    placement?: InsertPlacement,
   ) => void;
   updateThreadFromMessage: (
     threadId: string,
@@ -305,43 +633,51 @@ export const useShellState = (): {
     options?: {
       allowAutoTitle?: boolean;
       touchUpdatedAt?: boolean;
+      markStarted?: boolean;
     },
   ) => void;
   updateThreadUpdatedAt: (threadId: string, updatedAtMs: number) => void;
   applyAutoThreadTitle: (threadId: string, title: string) => void;
   renameThread: (threadId: string, title: string) => void;
   removeThread: (threadId: string) => void;
+  reorderProjects: (
+    sourceProjectId: string,
+    targetProjectId: string,
+    placement?: InsertPlacement,
+  ) => void;
+  reorderThreads: (
+    sourceThreadId: string,
+    targetThreadId: string,
+    placement?: InsertPlacement,
+  ) => void;
+  createWorkspace: (input: {
+    name: string;
+    projectPaths: string[];
+  }) => WorkspaceScopeRecord | null;
   renameWorkspace: (workspaceId: string, name: string) => void;
   removeWorkspace: (workspaceId: string) => void;
-  openWorkspaceFromPath: (folderPath: string) => void;
+  openWorkspaceFromPath: (folderPath: string) => WorkspaceRecord | null;
+  addProjectToWorkspace: (workspaceId: string, folderPath: string) => WorkspaceRecord | null;
 } => {
   const [state, setState] = React.useState<ShellState>(() => parsePersistedState());
 
   React.useEffect(() => {
-    setState((previous) => {
-      let didUpdate = false;
-      const normalizedThreads = previous.threads.map((thread) => {
-        const nextPreview = toThreadPreviewFromPrompt(thread.preview);
-        if (nextPreview === thread.preview) {
-          return thread;
-        }
-
-        didUpdate = true;
-        return {
-          ...thread,
-          preview: nextPreview,
-        };
-      });
-
-      if (!didUpdate) {
-        return previous;
-      }
-
-      return {
+    setState((previous) =>
+      sanitizeState({
         ...previous,
-        threads: normalizedThreads,
-      };
-    });
+        threads: previous.threads.map((thread) => {
+          const nextPreview = toThreadPreviewFromPrompt(thread.preview);
+          if (nextPreview === thread.preview) {
+            return thread;
+          }
+
+          return {
+            ...thread,
+            preview: nextPreview,
+          };
+        }),
+      }),
+    );
   }, []);
 
   React.useEffect(() => {
@@ -355,106 +691,250 @@ export const useShellState = (): {
         return previous;
       }
 
-      return {
+      return sanitizeState({
         ...previous,
         selectedThreadId: thread.id,
-        selectedWorkspaceId: isUnassignedThread(thread)
-          ? previous.selectedWorkspaceId
-          : thread.workspaceId,
-      };
+        selectedWorkspaceId: thread.workspaceId,
+        selectedProjectId: thread.projectId,
+      });
     });
+  }, []);
+
+  const clearThreadSelection = React.useCallback(() => {
+    setState((previous) =>
+      sanitizeState({
+        ...previous,
+        selectedThreadId: '',
+      }),
+    );
   }, []);
 
   const selectWorkspace = React.useCallback((workspaceId: string) => {
     setState((previous) => {
-      const workspaceExists = previous.workspaces.some(
-        (workspace) => workspace.id === workspaceId,
-      );
-      if (!workspaceExists) {
+      if (workspaceId && !previous.workspaces.some((workspace) => workspace.id === workspaceId)) {
         return previous;
       }
 
-      const selectedThreadInWorkspace = previous.threads.find(
-        (thread) => thread.id === previous.selectedThreadId && thread.workspaceId === workspaceId,
+      const visibleProjectIds = getProjectIdsForWorkspace(
+        previous.projects,
+        previous.workspaces,
+        workspaceId,
       );
-      const selectedThread = previous.threads.find(
+      const currentSelectedThread = previous.threads.find(
         (thread) => thread.id === previous.selectedThreadId,
       );
-      const shouldPreserveSelectedThread =
-        Boolean(selectedThread) && isUnassignedThread(selectedThread);
-
+      const shouldKeepSelectedThread =
+        currentSelectedThread?.workspaceId === workspaceId &&
+        visibleProjectIds.includes(currentSelectedThread.projectId);
       const fallbackThread = previous.threads.find(
-        (thread) => thread.workspaceId === workspaceId,
+        (thread) =>
+          thread.workspaceId === workspaceId && visibleProjectIds.includes(thread.projectId),
       );
+      const nextSelectedProjectId = shouldKeepSelectedThread
+        ? currentSelectedThread?.projectId ?? previous.selectedProjectId
+        : visibleProjectIds.includes(previous.selectedProjectId)
+          ? previous.selectedProjectId
+          : fallbackThread?.projectId ?? visibleProjectIds[0] ?? '';
 
-      return {
+      return sanitizeState({
         ...previous,
+        workspaces: previous.workspaces.map((workspace) =>
+          workspace.id === workspaceId
+            ? {
+                ...workspace,
+                lastOpenedAt: Date.now(),
+              }
+            : workspace,
+        ),
         selectedWorkspaceId: workspaceId,
+        selectedProjectId: nextSelectedProjectId,
         selectedThreadId:
-          shouldPreserveSelectedThread
+          shouldKeepSelectedThread
             ? previous.selectedThreadId
-            : selectedThreadInWorkspace?.id ?? fallbackThread?.id ?? previous.selectedThreadId,
-      };
+            : fallbackThread?.id ?? '',
+      });
     });
   }, []);
 
-  const createThreadInWorkspace = React.useCallback((workspaceId: string) => {
+  const selectProject = React.useCallback((projectId: string) => {
     setState((previous) => {
-      const workspace = previous.workspaces.find((item) => item.id === workspaceId);
-      if (!workspace) {
+      const project = previous.projects.find((item) => item.id === projectId);
+      if (!project) {
         return previous;
       }
 
-      const thread = createNewChatThread(workspace.name);
+      const visibleProjectIds = getProjectIdsForWorkspace(
+        previous.projects,
+        previous.workspaces,
+        previous.selectedWorkspaceId,
+      );
+      if (!visibleProjectIds.includes(projectId)) {
+        return previous;
+      }
 
-      return {
+      return sanitizeState({
         ...previous,
-        threads: [thread, ...previous.threads],
-        selectedWorkspaceId: workspaceId,
-        selectedThreadId: thread.id,
-      };
+        projects: previous.projects.map((item) =>
+          item.id === projectId
+            ? {
+                ...item,
+                lastOpenedAt: Date.now(),
+              }
+            : item,
+        ),
+        selectedProjectId: project.id,
+      });
     });
   }, []);
 
-  const bindThreadToWorkspace = React.useCallback(
-    (threadId: string, workspaceId: string, firstMessage: string) => {
-      const trimmedMessage = normalizeMessageText(firstMessage);
-      if (!threadId || !workspaceId || !trimmedMessage) {
+  const createThread = React.useCallback(
+    (options?: {
+      workspaceId?: string;
+      projectId?: string;
+    }) => {
+      setState((previous) => {
+        const workspaceId = options?.workspaceId ?? previous.selectedWorkspaceId;
+        if (
+          workspaceId &&
+          !previous.workspaces.some((workspace) => workspace.id === workspaceId)
+        ) {
+          return previous;
+        }
+
+        const visibleProjectIds = getProjectIdsForWorkspace(
+          previous.projects,
+          previous.workspaces,
+          workspaceId,
+        );
+        const projectId =
+          options?.projectId ??
+          (visibleProjectIds.includes(previous.selectedProjectId)
+            ? previous.selectedProjectId
+            : visibleProjectIds[0]);
+        if (!projectId || !visibleProjectIds.includes(projectId)) {
+          return previous;
+        }
+        const project = previous.projects.find((item) => item.id === projectId);
+        if (!project) {
+          return previous;
+        }
+
+        const thread = createNewChatThread(project.name, project.id, workspaceId);
+
+        return sanitizeState({
+          ...previous,
+          threads: [thread, ...previous.threads],
+          selectedThreadId: thread.id,
+          selectedWorkspaceId: workspaceId,
+          selectedProjectId: project.id,
+        });
+      });
+    },
+    [],
+  );
+
+  const setThreadProject = React.useCallback((threadId: string, projectId: string) => {
+    setState((previous) => {
+      const thread = previous.threads.find((item) => item.id === threadId);
+      const project = previous.projects.find((item) => item.id === projectId);
+      if (!thread || !project) {
+        return previous;
+      }
+
+      const visibleProjectIds = getProjectIdsForWorkspace(
+        previous.projects,
+        previous.workspaces,
+        thread.workspaceId,
+      );
+      if (!visibleProjectIds.includes(projectId) || thread.projectId === projectId) {
+        return previous;
+      }
+
+      return sanitizeState({
+        ...previous,
+        threads: previous.threads.map((item) =>
+          item.id === threadId
+            ? {
+                ...item,
+                projectId,
+              }
+            : item,
+        ),
+        selectedProjectId: previous.selectedThreadId === threadId ? projectId : previous.selectedProjectId,
+      });
+    });
+  }, []);
+
+  const setThreadStatus = React.useCallback((threadId: string, status: ThreadBoardStatus) => {
+    setState((previous) => {
+      const thread = previous.threads.find((item) => item.id === threadId);
+      if (!thread || thread.status === status) {
+        return previous;
+      }
+
+      return sanitizeState({
+        ...previous,
+        threads: previous.threads.map((item) =>
+          item.id === threadId
+            ? {
+                ...item,
+                status,
+              }
+            : item,
+        ),
+      });
+    });
+  }, []);
+
+  const moveThreadInBoard = React.useCallback(
+    (
+      threadId: string,
+      targetStatus: ThreadBoardStatus,
+      targetThreadId?: string,
+      placement: InsertPlacement = 'before',
+    ) => {
+      if (!threadId || !targetStatus) {
         return;
       }
 
       setState((previous) => {
-        const thread = previous.threads.find((item) => item.id === threadId);
-        if (!thread) {
+        const sourceThread = previous.threads.find((thread) => thread.id === threadId);
+        if (!sourceThread) {
           return previous;
         }
 
-        const workspaceExists = previous.workspaces.some(
-          (workspace) => workspace.id === workspaceId,
-        );
-        if (!workspaceExists) {
+        let nextThreads =
+          sourceThread.status === targetStatus
+            ? previous.threads
+            : previous.threads.map((thread) =>
+                thread.id === threadId
+                  ? {
+                      ...thread,
+                      status: targetStatus,
+                    }
+                  : thread,
+              );
+
+        if (targetThreadId && targetThreadId !== threadId) {
+          const targetThread = nextThreads.find((thread) => thread.id === targetThreadId);
+          if (
+            targetThread &&
+            targetThread.projectId === sourceThread.projectId &&
+            targetThread.workspaceId === sourceThread.workspaceId &&
+            targetThread.status === targetStatus
+          ) {
+            nextThreads = reorderItemsById(nextThreads, threadId, targetThreadId, placement);
+          }
+        }
+
+        if (nextThreads === previous.threads) {
           return previous;
         }
 
-        const shouldRename =
-          thread.titleSource !== 'manual' &&
-          (isUnassignedThread(thread) || isDefaultThreadTitle(thread.title));
-
-        const nextThread: ThreadRecord = {
-          ...thread,
-          workspaceId,
-          title: shouldRename ? toThreadTitleFromPrompt(trimmedMessage) : thread.title,
-          titleSource: shouldRename ? 'auto' : thread.titleSource,
-          preview: toThreadPreviewFromPrompt(trimmedMessage),
-          updatedAtMs: Date.now(),
-        };
-
-        return {
+        return sanitizeState({
           ...previous,
-          threads: [nextThread, ...previous.threads.filter((item) => item.id !== threadId)],
-          selectedWorkspaceId: workspaceId,
-          selectedThreadId: threadId,
-        };
+          threads: nextThreads,
+        });
       });
     },
     [],
@@ -467,6 +947,7 @@ export const useShellState = (): {
       options?: {
         allowAutoTitle?: boolean;
         touchUpdatedAt?: boolean;
+        markStarted?: boolean;
       },
     ) => {
       const trimmedMessage = normalizeMessageText(message);
@@ -476,6 +957,7 @@ export const useShellState = (): {
 
       const allowAutoTitle = options?.allowAutoTitle ?? true;
       const touchUpdatedAt = options?.touchUpdatedAt ?? true;
+      const markStarted = options?.markStarted ?? true;
 
       setState((previous) => {
         const thread = previous.threads.find((item) => item.id === threadId);
@@ -490,6 +972,7 @@ export const useShellState = (): {
 
         const nextThread: ThreadRecord = {
           ...thread,
+          isDraft: markStarted ? false : thread.isDraft,
           title: shouldRename ? toThreadTitleFromPrompt(trimmedMessage) : thread.title,
           titleSource: shouldRename ? 'auto' : thread.titleSource,
           preview: toThreadPreviewFromPrompt(trimmedMessage),
@@ -497,6 +980,7 @@ export const useShellState = (): {
         };
 
         if (
+          nextThread.isDraft === thread.isDraft &&
           nextThread.title === thread.title &&
           nextThread.titleSource === thread.titleSource &&
           nextThread.preview === thread.preview &&
@@ -505,10 +989,10 @@ export const useShellState = (): {
           return previous;
         }
 
-        return {
+        return sanitizeState({
           ...previous,
-          threads: [nextThread, ...previous.threads.filter((item) => item.id !== threadId)],
-        };
+          threads: previous.threads.map((item) => (item.id === threadId ? nextThread : item)),
+        });
       });
     },
     [],
@@ -530,10 +1014,10 @@ export const useShellState = (): {
         updatedAtMs,
       };
 
-      return {
+      return sanitizeState({
         ...previous,
-        threads: [nextThread, ...previous.threads.filter((item) => item.id !== threadId)],
-      };
+        threads: previous.threads.map((item) => (item.id === threadId ? nextThread : item)),
+      });
     });
   }, []);
 
@@ -566,10 +1050,10 @@ export const useShellState = (): {
         return previous;
       }
 
-      return {
+      return sanitizeState({
         ...previous,
         threads,
-      };
+      });
     });
   }, []);
 
@@ -602,10 +1086,10 @@ export const useShellState = (): {
         return previous;
       }
 
-      return {
+      return sanitizeState({
         ...previous,
         threads,
-      };
+      });
     });
   }, []);
 
@@ -615,40 +1099,138 @@ export const useShellState = (): {
     }
 
     setState((previous) => {
-      const hasThread = previous.threads.some((thread) => thread.id === threadId);
-      if (!hasThread) {
+      if (!previous.threads.some((thread) => thread.id === threadId)) {
         return previous;
       }
 
-      const threads = previous.threads.filter((thread) => thread.id !== threadId);
-      const hasCurrentSelection = threads.some(
-        (thread) => thread.id === previous.selectedThreadId,
-      );
-      const selectedWorkspaceExists = previous.workspaces.some(
-        (workspace) => workspace.id === previous.selectedWorkspaceId,
-      );
-
-      const fallbackThread =
-        threads.find((thread) => thread.workspaceId === previous.selectedWorkspaceId) ??
-        threads[0];
-
-      const nextSelectedThreadId = hasCurrentSelection
-        ? previous.selectedThreadId
-        : fallbackThread?.id ?? '';
-
-      const nextSelectedWorkspaceId = fallbackThread?.workspaceId?.trim()
-        ? fallbackThread.workspaceId
-        : selectedWorkspaceExists
-          ? previous.selectedWorkspaceId
-          : previous.workspaces[0]?.id ?? '';
-
-      return {
+      return sanitizeState({
         ...previous,
-        threads,
-        selectedThreadId: nextSelectedThreadId,
-        selectedWorkspaceId: nextSelectedWorkspaceId,
-      };
+        threads: previous.threads.filter((thread) => thread.id !== threadId),
+        selectedThreadId: previous.selectedThreadId === threadId ? '' : previous.selectedThreadId,
+      });
     });
+  }, []);
+
+  const reorderProjects = React.useCallback(
+    (
+      sourceProjectId: string,
+      targetProjectId: string,
+      placement: InsertPlacement = 'before',
+    ) => {
+      setState((previous) => {
+        const nextProjects = reorderItemsById(
+          previous.projects,
+          sourceProjectId,
+          targetProjectId,
+          placement,
+        );
+
+        if (nextProjects === previous.projects) {
+          return previous;
+        }
+
+        return sanitizeState({
+          ...previous,
+          projects: nextProjects,
+        });
+      });
+    },
+    [],
+  );
+
+  const reorderThreads = React.useCallback(
+    (
+      sourceThreadId: string,
+      targetThreadId: string,
+      placement: InsertPlacement = 'before',
+    ) => {
+      setState((previous) => {
+        const sourceThread = previous.threads.find((thread) => thread.id === sourceThreadId);
+        const targetThread = previous.threads.find((thread) => thread.id === targetThreadId);
+        if (
+          !sourceThread ||
+          !targetThread ||
+          sourceThread.projectId !== targetThread.projectId ||
+          sourceThread.workspaceId !== targetThread.workspaceId
+        ) {
+          return previous;
+        }
+
+        const nextThreads = reorderItemsById(
+          previous.threads,
+          sourceThreadId,
+          targetThreadId,
+          placement,
+        );
+        if (nextThreads === previous.threads) {
+          return previous;
+        }
+
+        return sanitizeState({
+          ...previous,
+          threads: nextThreads,
+        });
+      });
+    },
+    [],
+  );
+
+  const createWorkspace = React.useCallback((input: {
+    name: string;
+    projectPaths: string[];
+  }): WorkspaceScopeRecord | null => {
+    const nextName = input.name.trim();
+    const normalizedPaths = Array.from(
+      new Set(
+        input.projectPaths
+          .map((projectPath) => normalizeFolderPath(projectPath))
+          .filter((projectPath) => projectPath.length > 0),
+      ),
+    );
+
+    if (!nextName || normalizedPaths.length === 0) {
+      return null;
+    }
+
+    let createdWorkspace: WorkspaceScopeRecord | null = null;
+
+    setState((previous) => {
+      let projects = previous.projects;
+      const projectIds: string[] = [];
+
+      for (const projectPath of normalizedPaths) {
+        const result = upsertProject(projects, projectPath);
+        if (!result) {
+          continue;
+        }
+
+        projects = result.projects;
+        projectIds.push(result.project.id);
+      }
+
+      if (projectIds.length === 0) {
+        return previous;
+      }
+
+      const timestamp = Date.now();
+      createdWorkspace = {
+        id: `workspace-${slugify(nextName)}-${timestamp.toString(36)}`,
+        name: nextName,
+        projectIds: Array.from(new Set(projectIds)),
+        lastOpenedAt: timestamp,
+      };
+
+      return sanitizeState({
+        ...previous,
+        projects,
+        workspaces: [...previous.workspaces, createdWorkspace],
+        selectedWorkspaceId: createdWorkspace.id,
+        selectedProjectId: createdWorkspace.projectIds[0] ?? '',
+        selectedThreadId: '',
+      });
+    });
+
+    return createdWorkspace;
   }, []);
 
   const renameWorkspace = React.useCallback((workspaceId: string, name: string) => {
@@ -658,12 +1240,11 @@ export const useShellState = (): {
     }
 
     setState((previous) => {
-      const hasWorkspace = previous.workspaces.some((workspace) => workspace.id === workspaceId);
-      if (!hasWorkspace) {
+      if (!previous.workspaces.some((workspace) => workspace.id === workspaceId)) {
         return previous;
       }
 
-      return {
+      return sanitizeState({
         ...previous,
         workspaces: previous.workspaces.map((workspace) =>
           workspace.id === workspaceId
@@ -673,100 +1254,95 @@ export const useShellState = (): {
               }
             : workspace,
         ),
-      };
+      });
     });
   }, []);
 
   const removeWorkspace = React.useCallback((workspaceId: string) => {
     setState((previous) => {
-      const hasWorkspace = previous.workspaces.some((workspace) => workspace.id === workspaceId);
-      if (!hasWorkspace) {
+      if (!previous.workspaces.some((workspace) => workspace.id === workspaceId)) {
         return previous;
       }
 
-      const workspaces = previous.workspaces.filter((workspace) => workspace.id !== workspaceId);
-      const threads = previous.threads.filter((thread) => thread.workspaceId !== workspaceId);
-
-      let nextSelectedWorkspaceId =
-        previous.selectedWorkspaceId === workspaceId ? workspaces[0]?.id ?? '' : previous.selectedWorkspaceId;
-      const hasSelectedWorkspace = workspaces.some(
-        (workspace) => workspace.id === nextSelectedWorkspaceId,
-      );
-      if (!hasSelectedWorkspace) {
-        nextSelectedWorkspaceId = workspaces[0]?.id ?? '';
-      }
-
-      let nextSelectedThreadId = threads.some((thread) => thread.id === previous.selectedThreadId)
-        ? previous.selectedThreadId
-        : '';
-
-      if (!nextSelectedThreadId) {
-        const preferredThread =
-          threads.find((thread) => thread.workspaceId === nextSelectedWorkspaceId) ?? threads[0];
-
-        nextSelectedThreadId = preferredThread?.id ?? '';
-        nextSelectedWorkspaceId = preferredThread?.workspaceId ?? nextSelectedWorkspaceId;
-      }
-
-      return {
+      return sanitizeState({
         ...previous,
-        workspaces,
-        threads,
-        selectedWorkspaceId: nextSelectedWorkspaceId,
-        selectedThreadId: nextSelectedThreadId,
-      };
+        workspaces: previous.workspaces.filter((workspace) => workspace.id !== workspaceId),
+        threads: previous.threads.filter((thread) => thread.workspaceId !== workspaceId),
+        selectedWorkspaceId: previous.selectedWorkspaceId === workspaceId ? '' : previous.selectedWorkspaceId,
+      });
     });
   }, []);
 
-  const openWorkspaceFromPath = React.useCallback((folderPath: string) => {
-    const workspaceName = getFolderName(folderPath);
+  const openWorkspaceFromPath = React.useCallback((folderPath: string): WorkspaceRecord | null => {
+    let openedProject: WorkspaceRecord | null = null;
 
     setState((previous) => {
-      const existing = previous.workspaces.find(
-        (workspace) => workspace.path === folderPath,
-      );
-      const timestamp = Date.now();
-
-      if (existing) {
-        const refreshedWorkspace: WorkspaceRecord = {
-          ...existing,
-          lastOpenedAt: timestamp,
-        };
-
-        const workspaces = getMostRecentWorkspaceOrder([
-          refreshedWorkspace,
-          ...previous.workspaces.filter((workspace) => workspace.id !== existing.id),
-        ]);
-
-        const selectedThread = previous.threads.find(
-          (thread) => thread.workspaceId === existing.id,
-        );
-
-        return {
-          ...previous,
-          workspaces,
-          threads: previous.threads,
-          selectedWorkspaceId: existing.id,
-          selectedThreadId: selectedThread?.id ?? '',
-        };
+      const result = upsertProject(previous.projects, folderPath);
+      if (!result) {
+        return previous;
       }
 
-      const workspaceId = `workspace-${slugify(workspaceName)}-${timestamp.toString(36)}`;
-      const workspace: WorkspaceRecord = {
-        id: workspaceId,
-        name: workspaceName,
-        path: folderPath,
-        lastOpenedAt: timestamp,
-      };
+      openedProject = result.project;
+      const shouldKeepWorkspaceSelection =
+        previous.selectedWorkspaceId &&
+        previous.workspaces.some(
+          (workspace) =>
+            workspace.id === previous.selectedWorkspaceId &&
+            workspace.projectIds.includes(result.project.id),
+        );
 
-      return {
-        workspaces: getMostRecentWorkspaceOrder([workspace, ...previous.workspaces]),
-        threads: previous.threads,
-        selectedWorkspaceId: workspaceId,
-        selectedThreadId: '',
-      };
+      return sanitizeState({
+        ...previous,
+        projects: result.projects,
+        selectedWorkspaceId: shouldKeepWorkspaceSelection ? previous.selectedWorkspaceId : '',
+        selectedProjectId: result.project.id,
+      });
     });
+
+    return openedProject;
   }, []);
+
+  const addProjectToWorkspace = React.useCallback(
+    (workspaceId: string, folderPath: string): WorkspaceRecord | null => {
+      let addedProject: WorkspaceRecord | null = null;
+
+      setState((previous) => {
+        const workspace = previous.workspaces.find((item) => item.id === workspaceId);
+        if (!workspace) {
+          return previous;
+        }
+
+        const result = upsertProject(previous.projects, folderPath);
+        if (!result) {
+          return previous;
+        }
+
+        addedProject = result.project;
+
+        return sanitizeState({
+          ...previous,
+          projects: result.projects,
+          workspaces: previous.workspaces.map((item) =>
+            item.id === workspaceId
+              ? {
+                  ...item,
+                  projectIds: Array.from(new Set([...item.projectIds, result.project.id])),
+                  lastOpenedAt: Date.now(),
+                }
+              : item,
+          ),
+          selectedWorkspaceId: workspaceId,
+          selectedProjectId:
+            previous.selectedWorkspaceId === workspaceId
+              ? result.project.id
+              : previous.selectedProjectId,
+        });
+      });
+
+      return addedProject;
+    },
+    [],
+  );
 
   const selectedThread = React.useMemo(
     () => state.threads.find((thread) => thread.id === state.selectedThreadId),
@@ -774,50 +1350,60 @@ export const useShellState = (): {
   );
 
   const selectedWorkspace = React.useMemo(
-    () =>
-      state.workspaces.find(
-        (workspace) => workspace.id === state.selectedWorkspaceId,
-      ),
+    () => state.workspaces.find((workspace) => workspace.id === state.selectedWorkspaceId),
     [state.selectedWorkspaceId, state.workspaces],
   );
 
-  const threadGroups = React.useMemo<ThreadGroupView[]>(() => {
-    return state.workspaces
-      .map((workspace) => ({
-        id: `group-${workspace.id}`,
-        label: workspace.name,
-        workspaceId: workspace.id,
-        path: workspace.path,
-        threads: state.threads
-          .filter((thread) => thread.workspaceId === workspace.id)
-          .sort(compareThreadsByRecentActivity),
-      }));
-  }, [state.threads, state.workspaces]);
+  const selectedProject = React.useMemo(
+    () => state.projects.find((project) => project.id === state.selectedProjectId),
+    [state.projects, state.selectedProjectId],
+  );
 
-  const recentWorkspaces = React.useMemo(
-    () => getMostRecentWorkspaceOrder(state.workspaces),
-    [state.workspaces],
+  const threadGroups = React.useMemo<ThreadGroupView[]>(() => {
+    return state.projects.map((project) => ({
+      id: `group-${project.id}`,
+      label: project.name,
+      projectId: project.id,
+      path: project.path,
+      threads: state.threads.filter((thread) => thread.projectId === project.id),
+    }));
+  }, [state.projects, state.threads]);
+
+  const recentProjects = React.useMemo(
+    () => getMostRecentProjects(state.projects),
+    [state.projects],
   );
 
   return {
+    projects: state.projects,
+    recentProjects,
     workspaces: state.workspaces,
-    recentWorkspaces,
     threadGroups,
     selectedThread,
     selectedWorkspace,
+    selectedProject,
     selectedThreadId: state.selectedThreadId,
     selectedWorkspaceId: state.selectedWorkspaceId,
+    selectedProjectId: state.selectedProjectId,
     selectThread,
+    clearThreadSelection,
     selectWorkspace,
-    createThreadInWorkspace,
-    bindThreadToWorkspace,
+    selectProject,
+    createThread,
+    setThreadProject,
+    setThreadStatus,
+    moveThreadInBoard,
     updateThreadFromMessage,
     updateThreadUpdatedAt,
     applyAutoThreadTitle,
     renameThread,
     removeThread,
+    reorderProjects,
+    reorderThreads,
+    createWorkspace,
     renameWorkspace,
     removeWorkspace,
     openWorkspaceFromPath,
+    addProjectToWorkspace,
   };
 };

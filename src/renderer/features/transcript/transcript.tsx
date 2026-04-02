@@ -4211,7 +4211,7 @@ export const Transcript = ({
 
   const hasSelectedThread = threadId.trim().length > 0;
 
-  if (isNewThread || !hasSelectedThread) {
+  if (isNewThread || !hasSelectedThread || timeline.length === 0) {
     return (
       <NewThreadLanding
         workspaceName={selectedProjectName}
@@ -4228,10 +4228,7 @@ export const Transcript = ({
     <div className="relative min-h-0 flex-1">
       <div ref={scrollContainerRef} className="min-h-0 h-full overflow-y-auto scrollbar-none">
         <div className="space-y-6 pb-6 pt-3">
-          {timeline.length === 0 ? (
-            <EmptyState />
-          ) : (
-            transcriptBlocks.map((block) => {
+          {transcriptBlocks.map((block) => {
               if (block.kind === 'timeline-item') {
                 const item = block.item;
 
@@ -4375,8 +4372,7 @@ export const Transcript = ({
                   ) : null}
                 </div>
               );
-            })
-          )}
+            })}
 
           {pendingPermission ? (
             <div className="rounded-[26px] bg-stone-100/80 p-3.5">
@@ -4449,10 +4445,6 @@ export const Transcript = ({
   );
 };
 
-const EmptyState = (): JSX.Element => {
-  return <></>;
-};
-
 const ThinkingIndicator = (): JSX.Element => {
   return (
     <div className="pb-1 pt-0.5 text-[15px] leading-7">
@@ -4500,7 +4492,7 @@ const NewThreadLanding = ({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-y-auto scrollbar-none px-2 pb-4 pt-2">
       <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
-        <div className="flex w-full max-w-[520px] flex-col items-center">
+        <div className="flex w-full flex-col items-center">
           <DropdownMenu open={isProjectMenuOpen} onOpenChange={setIsProjectMenuOpen}>
             <div className="flex flex-wrap items-center justify-center gap-y-1 text-[34px] font-semibold leading-[1.08] tracking-[-0.02em]">
               <span className="text-stone-900">Build</span>
@@ -4555,7 +4547,7 @@ const NewThreadLanding = ({
                 }}
               >
                 <FolderPlus className="mr-2 h-4 w-4 text-stone-600" />
-                <span className="text-[13px] font-normal text-stone-900">Add new project</span>
+                <span className="text-[13px] font-normal text-stone-900">Add project</span>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

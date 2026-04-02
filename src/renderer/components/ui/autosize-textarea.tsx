@@ -10,6 +10,7 @@ export interface AutosizeTextareaProps
 const AutosizeTextarea = React.forwardRef<HTMLTextAreaElement, AutosizeTextareaProps>(
   ({ className, minRows = 1, maxRows = 6, onChange, ...props }, forwardedRef) => {
     const innerRef = React.useRef<HTMLTextAreaElement | null>(null);
+    const resizeFrameRef = React.useRef<number | null>(null);
 
     const setRefs = React.useCallback(
       (node: HTMLTextAreaElement | null) => {
@@ -47,9 +48,56 @@ const AutosizeTextarea = React.forwardRef<HTMLTextAreaElement, AutosizeTextareaP
       textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
     }, [maxRows, minRows]);
 
+    const scheduleResize = React.useCallback(() => {
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+      }
+
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        resize();
+      });
+    }, [resize]);
+
     React.useLayoutEffect(() => {
       resize();
     }, [resize, props.value]);
+
+    React.useEffect(() => {
+      scheduleResize();
+
+      const textarea = innerRef.current;
+      if (!textarea) {
+        return undefined;
+      }
+
+      const observedElement = textarea.parentElement ?? textarea;
+
+      if (typeof ResizeObserver === 'undefined') {
+        window.addEventListener('resize', scheduleResize);
+
+        return () => {
+          window.removeEventListener('resize', scheduleResize);
+          if (resizeFrameRef.current !== null) {
+            window.cancelAnimationFrame(resizeFrameRef.current);
+            resizeFrameRef.current = null;
+          }
+        };
+      }
+
+      const resizeObserver = new ResizeObserver(() => {
+        scheduleResize();
+      });
+      resizeObserver.observe(observedElement);
+
+      return () => {
+        resizeObserver.disconnect();
+        if (resizeFrameRef.current !== null) {
+          window.cancelAnimationFrame(resizeFrameRef.current);
+          resizeFrameRef.current = null;
+        }
+      };
+    }, [scheduleResize]);
 
     return (
       <textarea

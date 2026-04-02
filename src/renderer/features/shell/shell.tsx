@@ -12,6 +12,7 @@ import {
   PanelLeftOpen,
   Plus,
   RefreshCw,
+  X,
 } from 'lucide-react';
 import { Sidebar } from '@renderer/features/sidebar/sidebar';
 import { Composer, type AgentPresetSelection } from '@renderer/features/composer/composer';
@@ -19,6 +20,8 @@ import { Transcript } from '@renderer/features/transcript/transcript';
 import { ToolbarActions } from '@renderer/features/toolbar/toolbar-actions';
 import { RunConfigurationDialog } from '@renderer/features/toolbar/run-configuration-dialog';
 import { RenameThreadDialog } from '@renderer/features/shell/rename-thread-dialog';
+import { WorkspaceCreationView } from '@renderer/features/shell/workspace-creation-view';
+import { WorkspaceSessionsBoard } from '@renderer/features/shell/workspace-sessions-board';
 import {
   CommandPalette,
   type CommandPaletteItem,
@@ -55,8 +58,8 @@ import {
 import { changeEditorFontSizePreference } from '@renderer/store/ui-preferences';
 import { useSidebarWidth } from '@renderer/store/use-sidebar-width';
 import { useRunConfigurations } from '@renderer/store/use-run-configurations';
-import { useShellState } from '@renderer/store/use-shell-state';
-import { useAcp, type TimelineItem } from '@renderer/store/use-acp';
+import { useShellState, type ThreadBoardStatus } from '@renderer/store/use-shell-state';
+import { useAcp, type ThreadAgentSelection, type TimelineItem } from '@renderer/store/use-acp';
 import { useWorkspaceReview } from '@renderer/store/use-workspace-review';
 import type {
   AcpCustomAgentConfig,
@@ -70,6 +73,22 @@ import zeroLogo from '@renderer/assets/zero-logo.png';
 
 const getFolderName = (folderPath: string): string =>
   folderPath.split(/[\\/]/).filter(Boolean).pop() ?? folderPath;
+const normalizeFolderPath = (value: string): string => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  if (trimmed === '/' || trimmed === '\\') {
+    return trimmed;
+  }
+
+  if (/^[a-zA-Z]:[\\/]?$/.test(trimmed)) {
+    return trimmed.slice(0, 2) + trimmed.slice(2).replace(/[\\/]/g, '\\');
+  }
+
+  return trimmed.replace(/[\\/]+$/, '');
+};
 const normalizeMessageText = (value: string): string =>
   value.replace(/\s+/g, ' ').trim();
 const getAttachmentLabel = (attachment: AcpPromptAttachment): string =>
@@ -613,16 +632,30 @@ interface RegistryLaunchTemplate {
   autoConfigurable: boolean;
 }
 
+interface ThreadAgentBadge {
+  label: string;
+  iconUrl: string | null;
+}
+
 const TOAST_LIFETIME_MS = 7_000;
 const ACP_REGISTRY_URL =
   'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json';
 const WELCOME_CUSTOM_AGENT_ID = '__custom__';
 const VOICE_PROMPT_PREVIEW_TEXT = '[Voice prompt]';
+const AGENT_CHANGED_MESSAGE_PREFIX = 'agent changed to ';
+const KNOWN_CUSTOM_AGENT_LABEL_BY_COMMAND: Record<string, string> = {
+  opencode: 'OpenCode',
+};
 const REVIEW_PANEL_WIDTH_KEY = 'zeroade.review-panel.width.v1';
 const REVIEW_PANEL_WIDTH_DEFAULT = 560;
 const REVIEW_PANEL_WIDTH_MIN = 320;
 const REVIEW_PANEL_WIDTH_MAX = 980;
 const REVIEW_PANEL_CHAT_MIN_WIDTH = 420;
+const WORKSPACE_BOARD_THREAD_PANEL_WIDTH_KEY = 'zeroade.workspace-board-thread-panel.width.v1';
+const WORKSPACE_BOARD_THREAD_PANEL_WIDTH_DEFAULT = 560;
+const WORKSPACE_BOARD_THREAD_PANEL_WIDTH_MIN = 360;
+const WORKSPACE_BOARD_THREAD_PANEL_WIDTH_MAX = 980;
+const WORKSPACE_BOARD_MAIN_MIN_WIDTH = 640;
 const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'gi');
 const LOOSE_ANSI_PATTERN = /\[(?:\d{1,3}(?:;\d{1,3})*)m/gi;
 
@@ -731,11 +764,69 @@ const toBinaryKeyCandidates = (platform: NodeJS.Platform): string[] => {
   return [];
 };
 
+const shouldPreferRegistryBinaryTemplate = (agentId: string): boolean =>
+  agentId === 'codex-acp';
+
 const toExecutableCommand = (value: string): string =>
   value.trim().split(/[\\/]/).filter(Boolean).at(-1)?.replace(/\.exe$/i, '').toLowerCase() ?? '';
 
 const toNormalizedArgsList = (args: string[]): string[] =>
   args.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+
+const toKnownCustomAgentLabel = (command: string | undefined): string | null => {
+  if (!command) {
+    return null;
+  }
+
+  const token = toExecutableCommand(command);
+  if (!token) {
+    return null;
+  }
+
+  return KNOWN_CUSTOM_AGENT_LABEL_BY_COMMAND[token] ?? null;
+};
+
+const toDefaultCustomAgentLabel = (config: AcpCustomAgentConfig): string => {
+  const knownLabel = toKnownCustomAgentLabel(config.command);
+  if (knownLabel) {
+    return knownLabel;
+  }
+
+  const executableCommand = toExecutableCommand(config.command);
+  const commandBaseName = executableCommand.split(/[\\/]/).filter(Boolean).at(-1);
+  return commandBaseName ?? 'Added agent';
+};
+
+const parseAgentChangedLabel = (value: string): string | null => {
+  const normalized = normalizeMessageText(value).replace(/[.]+$/, '');
+  if (!normalized.toLowerCase().startsWith(AGENT_CHANGED_MESSAGE_PREFIX)) {
+    return null;
+  }
+
+  const label = normalized.slice(AGENT_CHANGED_MESSAGE_PREFIX.length).trim();
+  return label.length > 0 ? label : null;
+};
+
+const getThreadAgentBadgeFromTimeline = (timeline: TimelineItem[]): ThreadAgentBadge | null => {
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const item = timeline[index];
+    if (item.kind !== 'assistant-message') {
+      continue;
+    }
+
+    const label = parseAgentChangedLabel(item.text);
+    if (item.noticeKind !== 'agent-change' && !label) {
+      continue;
+    }
+
+    return {
+      label: label ?? 'Agent',
+      iconUrl: item.iconUrl ?? null,
+    };
+  }
+
+  return null;
+};
 
 const isArgsPrefixCompatible = (left: string[], right: string[]): boolean => {
   if (left.length === 0 || right.length === 0) {
@@ -751,26 +842,6 @@ const toRegistryLaunchTemplate = (
   agent: RegistryAgentCatalogEntry,
   platform: NodeJS.Platform,
 ): RegistryLaunchTemplate => {
-  const npxDistribution = agent.distribution?.npx;
-  if (npxDistribution?.package) {
-    return {
-      command: 'npx',
-      args: ['-y', npxDistribution.package, ...(npxDistribution.args ?? [])],
-      env: npxDistribution.env,
-      autoConfigurable: true,
-    };
-  }
-
-  const uvxDistribution = agent.distribution?.uvx;
-  if (uvxDistribution?.package) {
-    return {
-      command: 'uvx',
-      args: [uvxDistribution.package, ...(uvxDistribution.args ?? [])],
-      env: uvxDistribution.env,
-      autoConfigurable: true,
-    };
-  }
-
   const binaryDistribution = agent.distribution?.binary ?? {};
   const binaryCandidates = toBinaryKeyCandidates(platform)
     .map((key) => binaryDistribution[key])
@@ -792,6 +863,34 @@ const toRegistryLaunchTemplate = (
         (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
       )
     : [];
+
+  if (shouldPreferRegistryBinaryTemplate(agent.id) && binaryCommand) {
+    return {
+      command: binaryCommand,
+      args: binaryArgs,
+      autoConfigurable: true,
+    };
+  }
+
+  const npxDistribution = agent.distribution?.npx;
+  if (npxDistribution?.package) {
+    return {
+      command: 'npx',
+      args: ['-y', npxDistribution.package, ...(npxDistribution.args ?? [])],
+      env: npxDistribution.env,
+      autoConfigurable: true,
+    };
+  }
+
+  const uvxDistribution = agent.distribution?.uvx;
+  if (uvxDistribution?.package) {
+    return {
+      command: 'uvx',
+      args: [uvxDistribution.package, ...(uvxDistribution.args ?? [])],
+      env: uvxDistribution.env,
+      autoConfigurable: true,
+    };
+  }
 
   if (binaryCommand) {
     return {
@@ -859,6 +958,35 @@ const readStoredReviewPanelWidth = (): number => {
   }
 
   return Math.min(Math.max(parsed, REVIEW_PANEL_WIDTH_MIN), REVIEW_PANEL_WIDTH_MAX);
+};
+
+const clampWorkspaceBoardThreadPanelWidth = (value: number, availableWidth: number): number => {
+  const dynamicMax = Math.max(
+    WORKSPACE_BOARD_THREAD_PANEL_WIDTH_MIN,
+    Math.min(
+      WORKSPACE_BOARD_THREAD_PANEL_WIDTH_MAX,
+      availableWidth - WORKSPACE_BOARD_MAIN_MIN_WIDTH,
+    ),
+  );
+
+  return Math.min(Math.max(value, WORKSPACE_BOARD_THREAD_PANEL_WIDTH_MIN), dynamicMax);
+};
+
+const readStoredWorkspaceBoardThreadPanelWidth = (): number => {
+  const raw = window.localStorage.getItem(WORKSPACE_BOARD_THREAD_PANEL_WIDTH_KEY);
+  if (!raw) {
+    return WORKSPACE_BOARD_THREAD_PANEL_WIDTH_DEFAULT;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) {
+    return WORKSPACE_BOARD_THREAD_PANEL_WIDTH_DEFAULT;
+  }
+
+  return Math.min(
+    Math.max(parsed, WORKSPACE_BOARD_THREAD_PANEL_WIDTH_MIN),
+    WORKSPACE_BOARD_THREAD_PANEL_WIDTH_MAX,
+  );
 };
 
 const toCleanErrorText = (value: string): string =>
@@ -1003,41 +1131,54 @@ export const Shell = (): JSX.Element => {
   } = useSidebarWidth();
 
   const {
+    projects,
+    recentProjects,
     workspaces,
-    recentWorkspaces,
     threadGroups,
     selectedThread,
     selectedWorkspace,
+    selectedProject,
     selectedThreadId,
     selectedWorkspaceId,
+    selectedProjectId,
     selectThread,
+    clearThreadSelection,
     selectWorkspace,
-    createThreadInWorkspace,
-    bindThreadToWorkspace,
+    selectProject,
+    createThread,
+    setThreadProject,
+    moveThreadInBoard,
     updateThreadFromMessage,
     applyAutoThreadTitle,
     renameThread,
     removeThread,
-    renameWorkspace,
-    removeWorkspace,
+    reorderProjects,
+    reorderThreads,
+    createWorkspace,
     openWorkspaceFromPath,
+    addProjectToWorkspace,
   } = useShellState();
 
   const {
     connectionState,
     connectionMessage,
+    agentName,
     promptCapabilities,
     agentPreset,
+    defaultAgentPreset,
     codexAgentConfig,
     claudeAgentConfig,
     customAgentConfig,
+    defaultCustomAgentConfig,
     activeSessionThreadId,
     activeTimeline,
     threadPromptingById,
+    threadAgentSelectionById,
     threadSessionTitleById,
     activeSessionControls,
     pendingPermission,
     setAgentPreset,
+    setThreadAgentSelection,
     saveAgentConfig,
     ensureSessionForThread,
     sendPrompt,
@@ -1047,7 +1188,7 @@ export const Shell = (): JSX.Element => {
     setSessionConfigOption,
     cancelPrompt,
     resolvePermission,
-  } = useAcp();
+  } = useAcp(selectedThreadId);
 
   const [statusText, setStatusText] = React.useState('Shell ready');
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = React.useState(false);
@@ -1065,6 +1206,13 @@ export const Shell = (): JSX.Element => {
   );
   const [isBrowserPushPanelOpen, setIsBrowserPushPanelOpen] = React.useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+  const [isCreatingWorkspace, setIsCreatingWorkspace] = React.useState(false);
+  const [isWorkspaceBoardOpen, setIsWorkspaceBoardOpen] = React.useState(false);
+  const [isWorkspaceBoardThreadPanelOpen, setIsWorkspaceBoardThreadPanelOpen] =
+    React.useState(false);
+  const [workspaceDraftName, setWorkspaceDraftName] = React.useState('');
+  const [workspaceDraftPaths, setWorkspaceDraftPaths] = React.useState<string[]>([]);
+  const [isPickingWorkspaceProject, setIsPickingWorkspaceProject] = React.useState(false);
   const [threadRenameTarget, setThreadRenameTarget] =
     React.useState<RenameThreadTarget | null>(null);
   const [completedThreadIds, setCompletedThreadIds] = React.useState<Set<string>>(
@@ -1102,6 +1250,10 @@ export const Shell = (): JSX.Element => {
     readStoredReviewPanelWidth(),
   );
   const [isReviewPanelResizing, setIsReviewPanelResizing] = React.useState(false);
+  const [workspaceBoardThreadPanelWidth, setWorkspaceBoardThreadPanelWidth] =
+    React.useState<number>(() => readStoredWorkspaceBoardThreadPanelWidth());
+  const [isWorkspaceBoardThreadPanelResizing, setIsWorkspaceBoardThreadPanelResizing] =
+    React.useState(false);
   const [welcomeProjectPath, setWelcomeProjectPath] = React.useState('');
   const [welcomeSelectedAgentId, setWelcomeSelectedAgentId] = React.useState<string | null>(null);
   const [isWelcomeStarting, setIsWelcomeStarting] = React.useState(false);
@@ -1152,6 +1304,8 @@ export const Shell = (): JSX.Element => {
   const composerPrefillIdRef = React.useRef(0);
   const reviewPanelResizeActiveRef = React.useRef(false);
   const reviewPanelContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const workspaceBoardThreadPanelResizeActiveRef = React.useRef(false);
+  const workspaceBoardPanelContainerRef = React.useRef<HTMLDivElement | null>(null);
   const pendingWelcomeStartPathRef = React.useRef<string | null>(null);
   const pendingThreadNavigationIndexRef = React.useRef<number | null>(null);
   const threadNavigationHistoryRef = React.useRef(threadNavigationHistory);
@@ -1162,18 +1316,71 @@ export const Shell = (): JSX.Element => {
   const navigationZoneClass =
     platform === 'darwin' ? 'w-[150px] pl-[82px] pr-2' : 'w-12 px-2';
 
-  const selectedThreadWorkspace = React.useMemo(() => {
+  const selectedThreadProject = React.useMemo(() => {
     if (!selectedThread) {
-      return selectedWorkspace;
+      return selectedProject;
     }
 
     return (
-      workspaces.find((workspace) => workspace.id === selectedThread.workspaceId) ??
-      selectedWorkspace
+      projects.find((project) => project.id === selectedThread.projectId) ??
+      selectedProject
     );
-  }, [selectedThread, selectedWorkspace, workspaces]);
+  }, [projects, selectedProject, selectedThread]);
 
-  const sessionWorkspacePath = selectedThreadWorkspace?.path ?? workspaces[0]?.path ?? '';
+  const visibleProjects = React.useMemo(
+    () => {
+      if (!selectedWorkspace) {
+        return projects;
+      }
+
+      const projectById = new Map(projects.map((project) => [project.id, project]));
+      return selectedWorkspace.projectIds.flatMap((projectId) => {
+        const project = projectById.get(projectId);
+        return project ? [project] : [];
+      });
+    },
+    [projects, selectedWorkspace],
+  );
+  const visibleThreadGroupByProjectId = React.useMemo(
+    () => new Map(threadGroups.map((group) => [group.projectId, group])),
+    [threadGroups],
+  );
+  const visibleThreadGroups = React.useMemo(
+    () =>
+      visibleProjects.map((project) => {
+        const group = visibleThreadGroupByProjectId.get(project.id);
+
+        return {
+          id: group?.id ?? `group-${project.id}`,
+          label: project.name,
+          projectId: project.id,
+          path: project.path,
+          threads: (group?.threads ?? []).filter(
+            (thread) => thread.workspaceId === selectedWorkspaceId,
+          ),
+        };
+      }),
+    [selectedWorkspaceId, visibleProjects, visibleThreadGroupByProjectId],
+  );
+
+  React.useEffect(() => {
+    if (isWorkspaceBoardOpen) {
+      return;
+    }
+
+    setIsWorkspaceBoardThreadPanelOpen(false);
+  }, [isWorkspaceBoardOpen]);
+
+  React.useEffect(() => {
+    if (selectedThreadId) {
+      return;
+    }
+
+    setIsWorkspaceBoardThreadPanelOpen(false);
+  }, [selectedThreadId]);
+
+  const sessionWorkspacePath =
+    selectedThreadProject?.path ?? selectedProject?.path ?? visibleProjects[0]?.path ?? '';
   const workspacePath = sessionWorkspacePath || '/';
   const {
     configurations: runConfigurations,
@@ -1198,7 +1405,6 @@ export const Shell = (): JSX.Element => {
     openFileTree,
     refreshFileTree,
     closeFileTree,
-    closeReviewPanel,
     toggleReviewPanelVisibility,
     openFile,
     openDiff,
@@ -1726,6 +1932,79 @@ export const Shell = (): JSX.Element => {
     };
   }, [isReviewPanelOpen]);
 
+  const stopWorkspaceBoardThreadPanelResizing = React.useCallback(() => {
+    if (!workspaceBoardThreadPanelResizeActiveRef.current) {
+      return;
+    }
+
+    workspaceBoardThreadPanelResizeActiveRef.current = false;
+    setIsWorkspaceBoardThreadPanelResizing(false);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, []);
+
+  React.useEffect(() => {
+    const handlePointerMove = (event: PointerEvent): void => {
+      if (!workspaceBoardThreadPanelResizeActiveRef.current) {
+        return;
+      }
+
+      const bounds = workspaceBoardPanelContainerRef.current?.getBoundingClientRect();
+      if (!bounds) {
+        return;
+      }
+
+      const nextWidth = clampWorkspaceBoardThreadPanelWidth(bounds.right - event.clientX, bounds.width);
+      setWorkspaceBoardThreadPanelWidth(nextWidth);
+      window.localStorage.setItem(WORKSPACE_BOARD_THREAD_PANEL_WIDTH_KEY, String(nextWidth));
+    };
+
+    const stopResizing = (): void => {
+      stopWorkspaceBoardThreadPanelResizing();
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResizing);
+    window.addEventListener('pointercancel', stopResizing);
+    window.addEventListener('blur', stopResizing);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResizing);
+      window.removeEventListener('pointercancel', stopResizing);
+      window.removeEventListener('blur', stopResizing);
+      stopWorkspaceBoardThreadPanelResizing();
+    };
+  }, [stopWorkspaceBoardThreadPanelResizing]);
+
+  React.useEffect(() => {
+    if (!isWorkspaceBoardOpen || !isWorkspaceBoardThreadPanelOpen || !selectedThreadId) {
+      return;
+    }
+
+    const clampToAvailableSpace = (): void => {
+      const bounds = workspaceBoardPanelContainerRef.current?.getBoundingClientRect();
+      if (!bounds) {
+        return;
+      }
+
+      setWorkspaceBoardThreadPanelWidth((previous) => {
+        const next = clampWorkspaceBoardThreadPanelWidth(previous, bounds.width);
+        if (next !== previous) {
+          window.localStorage.setItem(WORKSPACE_BOARD_THREAD_PANEL_WIDTH_KEY, String(next));
+        }
+        return next;
+      });
+    };
+
+    clampToAvailableSpace();
+    window.addEventListener('resize', clampToAvailableSpace);
+
+    return () => {
+      window.removeEventListener('resize', clampToAvailableSpace);
+    };
+  }, [isWorkspaceBoardOpen, isWorkspaceBoardThreadPanelOpen, selectedThreadId]);
+
   React.useEffect(() => {
     if (connectionState !== 'error') {
       if (connectionState === 'ready') {
@@ -1819,83 +2098,163 @@ export const Shell = (): JSX.Element => {
     [],
   );
 
+  const startWorkspaceBoardThreadPanelResizing = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      workspaceBoardThreadPanelResizeActiveRef.current = true;
+      setIsWorkspaceBoardThreadPanelResizing(true);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    },
+    [],
+  );
+
   const handleOpenCommandPalette = React.useCallback(() => {
     setIsFileSearchOpen(false);
     setIsCommandPaletteOpen(true);
   }, []);
 
-  const handleOpenFolder = React.useCallback(async () => {
+  const pickProjectPath = React.useCallback(async (): Promise<string | null> => {
     const result = await window.desktop.openFolder();
+    if (result.canceled || !result.path) {
+      return null;
+    }
 
-    if (result.canceled) {
+    return result.path;
+  }, []);
+
+  const handleOpenFolder = React.useCallback(async () => {
+    const projectPath = await pickProjectPath();
+    if (!projectPath) {
       setStatusText('Open canceled');
       return;
     }
 
-    if (result.path) {
-      openWorkspaceFromPath(result.path);
-      const folderName = getFolderName(result.path);
-      setStatusText(`Loaded ${folderName}`);
+    setIsCreatingWorkspace(false);
+    openWorkspaceFromPath(projectPath);
+    setStatusText(`Opened ${getFolderName(projectPath)}`);
+  }, [openWorkspaceFromPath, pickProjectPath]);
+
+  const handleAddProjectToScope = React.useCallback(async () => {
+    const projectPath = await pickProjectPath();
+    if (!projectPath) {
       return;
     }
 
-    setStatusText('No folder selected');
-  }, [openWorkspaceFromPath]);
+    if (selectedWorkspaceId) {
+      const project = addProjectToWorkspace(selectedWorkspaceId, projectPath);
+      if (!project) {
+        setStatusText('Could not add project');
+        return;
+      }
+
+      setStatusText(`Added ${project.name} to ${selectedWorkspace?.name ?? 'workspace'}`);
+      return;
+    }
+
+    openWorkspaceFromPath(projectPath);
+    setStatusText(`Opened ${getFolderName(projectPath)}`);
+  }, [
+    addProjectToWorkspace,
+    openWorkspaceFromPath,
+    pickProjectPath,
+    selectedWorkspace,
+    selectedWorkspaceId,
+  ]);
+
+  const closeWorkspaceCreation = React.useCallback(() => {
+    setIsCreatingWorkspace(false);
+    setWorkspaceDraftName('');
+    setWorkspaceDraftPaths([]);
+    setIsPickingWorkspaceProject(false);
+  }, []);
+
+  const handleOpenWorkspaceBoard = React.useCallback(() => {
+    setIsSettingsOpen(false);
+    closeWorkspaceCreation();
+    setIsWorkspaceBoardOpen(true);
+    setIsWorkspaceBoardThreadPanelOpen(false);
+  }, [closeWorkspaceCreation]);
+
+  const handleAddProjectToWorkspaceDraft = React.useCallback(async () => {
+    setIsPickingWorkspaceProject(true);
+
+    try {
+      const nextPath = await pickProjectPath();
+      const normalizedPath = nextPath ? normalizeFolderPath(nextPath) : '';
+      if (!normalizedPath) {
+        return;
+      }
+
+      setWorkspaceDraftPaths((previous) =>
+        previous.includes(normalizedPath) ? previous : [...previous, normalizedPath],
+      );
+      setWorkspaceDraftName((previous) => previous || getFolderName(normalizedPath));
+    } finally {
+      setIsPickingWorkspaceProject(false);
+    }
+  }, [pickProjectPath]);
 
   const handleCreateThreadInGroup = React.useCallback(
-    (workspaceId: string) => {
-      const workspace = workspaces.find((item) => item.id === workspaceId);
-      createThreadInWorkspace(workspaceId);
+    (projectId: string) => {
+      const project = projects.find((item) => item.id === projectId);
+      setIsCreatingWorkspace(false);
+      setIsWorkspaceBoardOpen(false);
+      createThread({
+        workspaceId: selectedWorkspaceId,
+        projectId,
+      });
       setIsSettingsOpen(false);
-      setStatusText(`New chat in ${workspace?.name ?? 'project'}`);
+      setStatusText(`New chat in ${project?.name ?? 'project'}`);
     },
-    [createThreadInWorkspace, workspaces],
+    [createThread, projects, selectedWorkspaceId],
   );
 
-  const handleRenameGroup = React.useCallback(
-    (workspaceId: string) => {
-      const workspace = workspaces.find((item) => item.id === workspaceId);
-      if (!workspace) {
-        return;
-      }
-
-      const nextName = window.prompt('Rename project', workspace.name);
-      if (nextName === null) {
-        return;
-      }
-
-      const trimmedName = nextName.trim();
-      if (!trimmedName || trimmedName === workspace.name) {
-        return;
-      }
-
-      renameWorkspace(workspaceId, trimmedName);
-      setStatusText(`Renamed project to ${trimmedName}`);
+  const handleCreateThreadInWorkspaceBoard = React.useCallback(
+    (projectId: string) => {
+      const project = projects.find((item) => item.id === projectId);
+      setIsCreatingWorkspace(false);
+      setIsWorkspaceBoardOpen(true);
+      setIsWorkspaceBoardThreadPanelOpen(true);
+      setIsSettingsOpen(false);
+      createThread({
+        workspaceId: selectedWorkspaceId,
+        projectId,
+      });
+      setStatusText(`New chat in ${project?.name ?? 'project'}`);
     },
-    [renameWorkspace, workspaces],
+    [createThread, projects, selectedWorkspaceId],
   );
 
-  const handleRemoveGroup = React.useCallback(
-    (workspaceId: string) => {
-      const workspace = workspaces.find((item) => item.id === workspaceId);
-      if (!workspace) {
-        return;
+  const handleCreateWorkspace = React.useCallback(() => {
+    const initialProjectPath = selectedThreadProject?.path ?? selectedProject?.path ?? '';
+
+    setIsSettingsOpen(false);
+    setIsWorkspaceBoardOpen(false);
+    setIsWorkspaceBoardThreadPanelOpen(false);
+    setIsCreatingWorkspace(true);
+    setWorkspaceDraftName('');
+    setWorkspaceDraftPaths(initialProjectPath ? [initialProjectPath] : []);
+    setIsPickingWorkspaceProject(false);
+  }, [selectedProject?.path, selectedThreadProject?.path]);
+
+  const handleSubmitWorkspace = React.useCallback(
+    (input: {
+      name: string;
+      projectPaths: string[];
+    }): boolean => {
+      const createdWorkspace = createWorkspace(input);
+      if (!createdWorkspace) {
+        setStatusText('Name the workspace and choose at least one project');
+        return false;
       }
 
-      const isConfirmed = window.confirm(
-        `Remove "${workspace.name}" and all chats in this project?`,
-      );
-      if (!isConfirmed) {
-        return;
-      }
-
-      removeWorkspace(workspaceId);
-      closeFileTree();
-      closeReviewPanel();
-      setIsWebBrowserOpen(false);
-      setStatusText(`Removed project ${workspace.name}`);
+      closeWorkspaceCreation();
+      setStatusText(`Created workspace ${createdWorkspace.name}`);
+      return true;
     },
-    [closeFileTree, closeReviewPanel, removeWorkspace, workspaces],
+    [closeWorkspaceCreation, createWorkspace],
   );
 
   const threadTitleById = React.useMemo(() => {
@@ -1915,7 +2274,7 @@ export const Shell = (): JSX.Element => {
   }, [selectedThread, threadGroups]);
 
   const threadById = React.useMemo(() => {
-    const threads = new Map<string, { id: string; workspaceId: string; title: string }>();
+    const threads = new Map<string, (typeof threadGroups)[number]['threads'][number]>();
 
     for (const group of threadGroups) {
       for (const thread of group.threads) {
@@ -1930,21 +2289,52 @@ export const Shell = (): JSX.Element => {
     return threads;
   }, [selectedThread, threadGroups]);
 
-  const handleSelectThread = React.useCallback(
-    (threadId: string) => {
-      setIsSettingsOpen(false);
-      setCompletedThreadIds((previous) => {
-        if (!previous.has(threadId)) {
-          return previous;
-        }
+  const clearCompletedThreadState = React.useCallback((threadId: string) => {
+    setCompletedThreadIds((previous) => {
+      if (!previous.has(threadId)) {
+        return previous;
+      }
 
-        const next = new Set(previous);
-        next.delete(threadId);
-        return next;
-      });
+      const next = new Set(previous);
+      next.delete(threadId);
+      return next;
+    });
+  }, []);
+
+  const handleSelectThreadInWorkspaceBoard = React.useCallback(
+    (threadId: string) => {
+      if (threadId === selectedThreadId && isWorkspaceBoardThreadPanelOpen) {
+        setIsWorkspaceBoardThreadPanelOpen(false);
+        clearThreadSelection();
+        return;
+      }
+
+      setIsCreatingWorkspace(false);
+      setIsWorkspaceBoardOpen(true);
+      setIsWorkspaceBoardThreadPanelOpen(true);
+      setIsSettingsOpen(false);
+      clearCompletedThreadState(threadId);
       selectThread(threadId);
     },
-    [selectThread],
+    [
+      clearCompletedThreadState,
+      clearThreadSelection,
+      isWorkspaceBoardThreadPanelOpen,
+      selectThread,
+      selectedThreadId,
+    ],
+  );
+
+  const handleSelectThread = React.useCallback(
+    (threadId: string) => {
+      setIsCreatingWorkspace(false);
+      setIsWorkspaceBoardOpen(false);
+      setIsWorkspaceBoardThreadPanelOpen(false);
+      setIsSettingsOpen(false);
+      clearCompletedThreadState(threadId);
+      selectThread(threadId);
+    },
+    [clearCompletedThreadState, selectThread],
   );
 
   const canNavigateThreadBack = threadNavigationHistory.index > 0;
@@ -1970,10 +2360,14 @@ export const Shell = (): JSX.Element => {
               index: nextIndex,
             },
       );
-      handleSelectThread(nextThreadId);
+      if (isWorkspaceBoardOpen) {
+        handleSelectThreadInWorkspaceBoard(nextThreadId);
+      } else {
+        handleSelectThread(nextThreadId);
+      }
       setStatusText(`Thread ${threadById.get(nextThreadId)?.title ?? 'selected'}`);
     },
-    [handleSelectThread, threadById],
+    [handleSelectThread, handleSelectThreadInWorkspaceBoard, isWorkspaceBoardOpen, threadById],
   );
 
   React.useEffect(() => {
@@ -2184,15 +2578,32 @@ export const Shell = (): JSX.Element => {
   );
 
   const handleCreateThread = React.useCallback(() => {
-    const workspaceId =
-      selectedWorkspaceId || selectedWorkspace?.id || threadGroups[0]?.workspaceId || workspaces[0]?.id;
-    if (!workspaceId) {
+    const projectId =
+      selectedProjectId || visibleProjects[0]?.id || selectedThreadProject?.id || '';
+    if (!projectId) {
       setStatusText('Open a project first');
       return;
     }
 
-    handleCreateThreadInGroup(workspaceId);
-  }, [handleCreateThreadInGroup, selectedWorkspace, selectedWorkspaceId, threadGroups, workspaces]);
+    handleCreateThreadInGroup(projectId);
+  }, [handleCreateThreadInGroup, selectedProjectId, selectedThreadProject, visibleProjects]);
+
+  const handleMoveThreadInWorkspaceBoard = React.useCallback(
+    (input: {
+      threadId: string;
+      targetStatus: ThreadBoardStatus;
+      targetThreadId?: string;
+      placement?: 'before' | 'after';
+    }) => {
+      const { threadId, targetStatus, targetThreadId, placement = 'before' } = input;
+      if (!threadId || !targetStatus) {
+        return;
+      }
+
+      moveThreadInBoard(threadId, targetStatus, targetThreadId, placement);
+    },
+    [moveThreadInBoard],
+  );
 
   const handleToggleFileTree = React.useCallback(() => {
     if (isFileTreeOpen) {
@@ -2277,20 +2688,14 @@ export const Shell = (): JSX.Element => {
         return false;
       }
 
-      const threadWorkspaceId = thread.workspaceId ?? '';
-      const targetWorkspaceId =
-        threadWorkspaceId.trim().length > 0
-          ? threadWorkspaceId
-          : selectedWorkspaceId || workspaces[0]?.id || '';
-      if (!targetWorkspaceId) {
+      const targetProjectId = thread.projectId || selectedProjectId || visibleProjects[0]?.id || '';
+      if (!targetProjectId) {
         setStatusText('Open a project first');
         return false;
       }
 
-      const targetWorkspace = workspaces.find(
-        (workspace) => workspace.id === targetWorkspaceId,
-      );
-      if (!targetWorkspace) {
+      const targetProject = projects.find((project) => project.id === targetProjectId);
+      if (!targetProject) {
         setStatusText('Select a valid project first');
         return false;
       }
@@ -2318,14 +2723,9 @@ export const Shell = (): JSX.Element => {
         normalizedAudio !== null,
       );
 
-      const isDraftThread = threadWorkspaceId.trim().length === 0;
       try {
-        await ensureSessionForThreadRef.current(threadId, targetWorkspace.path);
-        if (isDraftThread) {
-          bindThreadToWorkspace(threadId, targetWorkspaceId, previewText);
-        } else {
-          updateThreadFromMessage(threadId, previewText);
-        }
+        await ensureSessionForThreadRef.current(threadId, targetProject.path);
+        updateThreadFromMessage(threadId, previewText);
         await sendPrompt(trimmedText, attachments, normalizedAudio);
         setIsAgentAuthRequired(false);
         setAgentAuthMessage(null);
@@ -2356,13 +2756,13 @@ export const Shell = (): JSX.Element => {
       return true;
     },
     [
-      bindThreadToWorkspace,
       promptCapabilities.audio,
-      selectedWorkspaceId,
+      projects,
+      selectedProjectId,
       sendPrompt,
       threadById,
       updateThreadFromMessage,
-      workspaces,
+      visibleProjects,
       pushErrorToast,
       isAgentAuthLaunching,
       startAgentAuthentication,
@@ -2370,9 +2770,7 @@ export const Shell = (): JSX.Element => {
   );
 
   const threadTitle = selectedThread?.title ?? 'No thread selected';
-  const isNewThread = Boolean(
-    selectedThread && selectedThread.workspaceId.trim().length === 0,
-  );
+  const isNewThread = Boolean(selectedThread?.isDraft);
   const fallbackTimeline = timelineSnapshotByThreadId[selectedThreadId] ?? [];
   const activeSessionBelongsToSelectedThread =
     selectedThreadId.trim().length > 0 && activeSessionThreadId === selectedThreadId;
@@ -2409,10 +2807,28 @@ export const Shell = (): JSX.Element => {
     () => queuedPromptsByThread[selectedThreadId] ?? [],
     [queuedPromptsByThread, selectedThreadId],
   );
-  const landingSelectedProjectId = selectedWorkspaceId || workspaces[0]?.id || '';
-  const workspaceName = selectedThreadWorkspace?.name ?? 'workspace';
-  const headerTitle = threadTitle;
-  const headerSubtitle = workspaceName;
+  const landingSelectedProjectId =
+    selectedThread?.projectId || selectedProjectId || visibleProjects[0]?.id || '';
+  const workspaceName = selectedThreadProject?.name ?? selectedProject?.name ?? 'project';
+  const headerTitle = isCreatingWorkspace
+    ? 'New workspace'
+    : isWorkspaceBoardOpen
+      ? 'Workspace board'
+      : threadTitle;
+  const headerSubtitle = isCreatingWorkspace
+    ? ''
+    : isWorkspaceBoardOpen
+      ? selectedWorkspace?.name ?? 'Select a workspace'
+      : workspaceName;
+  const isWorkspaceBoardThreadPanelVisible =
+    isWorkspaceBoardOpen && isWorkspaceBoardThreadPanelOpen && Boolean(selectedThreadId);
+  const workspaceBoardThreadPanelSubtitle =
+    selectedThreadProject?.name ?? selectedProject?.name ?? '';
+
+  const handleCloseWorkspaceBoardThreadPanel = React.useCallback(() => {
+    setIsWorkspaceBoardThreadPanelOpen(false);
+    clearThreadSelection();
+  }, [clearThreadSelection]);
 
   const handleSelectAgentPreset = React.useCallback(
     (selection: AgentPresetSelection) => {
@@ -2466,6 +2882,16 @@ export const Shell = (): JSX.Element => {
       setAgentSelectionEpoch((previous) => previous + 1);
       if (selection.preset === 'custom' && selection.customConfig) {
         saveAgentConfig('custom', selection.customConfig);
+      }
+
+      if (selectedThreadId) {
+        const nextThreadSelection: ThreadAgentSelection = {
+          preset: selection.preset,
+          ...(selection.preset === 'custom' && selection.customConfig
+            ? { customConfig: selection.customConfig }
+            : {}),
+        };
+        setThreadAgentSelection(selectedThreadId, nextThreadSelection);
         return;
       }
 
@@ -2479,8 +2905,21 @@ export const Shell = (): JSX.Element => {
       saveAgentConfig,
       selectedThreadId,
       setAgentPreset,
+      setThreadAgentSelection,
       updateThreadFromMessage,
     ],
+  );
+
+  const handleSelectDefaultAgentPreset = React.useCallback(
+    (selection: AgentPresetSelection) => {
+      if (selection.preset === 'custom' && selection.customConfig) {
+        saveAgentConfig('custom', selection.customConfig);
+      }
+
+      setAgentPreset(selection.preset);
+      setStatusText(`Default agent set to ${selection.label}`);
+    },
+    [saveAgentConfig, setAgentPreset],
   );
 
   React.useEffect(() => {
@@ -2585,9 +3024,9 @@ export const Shell = (): JSX.Element => {
       }
 
       if (!selectedThreadId) {
-        const workspaceId =
-          selectedWorkspaceId || selectedWorkspace?.id || threadGroups[0]?.workspaceId || workspaces[0]?.id;
-        if (!workspaceId) {
+        const projectId =
+          selectedProjectId || visibleProjects[0]?.id || selectedThreadProject?.id || '';
+        if (!projectId) {
           setStatusText('Open a project first');
           return;
         }
@@ -2597,7 +3036,10 @@ export const Shell = (): JSX.Element => {
           attachments,
           audio: normalizedAudio,
         };
-        createThreadInWorkspace(workspaceId);
+        createThread({
+          workspaceId: selectedWorkspaceId,
+          projectId,
+        });
         setStatusText('Creating a new chat');
         return;
       }
@@ -2625,14 +3067,14 @@ export const Shell = (): JSX.Element => {
       await sendPromptToThread(selectedThreadId, trimmedText, attachments, normalizedAudio);
     },
     [
-      createThreadInWorkspace,
+      createThread,
       effectiveIsPrompting,
-      selectedWorkspace,
       selectedWorkspaceId,
+      selectedProjectId,
       selectedThreadId,
+      selectedThreadProject,
       sendPromptToThread,
-      threadGroups,
-      workspaces,
+      visibleProjects,
     ],
   );
 
@@ -2819,16 +3261,46 @@ export const Shell = (): JSX.Element => {
   }, [handleAdjustEditorFontSize]);
 
   const commandPaletteItems = React.useMemo<CommandPaletteItem[]>(() => {
-    const workspaceItems: CommandPaletteItem[] = recentWorkspaces.map((workspace) => ({
-      id: `workspace-${workspace.id}`,
-      section: 'Workspace',
-      title: `Switch to ${workspace.name}`,
-      subtitle: workspace.path,
-      keywords: 'workspace recent switch',
+    const workspaceItems: CommandPaletteItem[] = [
+      {
+        id: 'workspace-none',
+        section: 'Workspace',
+        title: 'No workspace',
+        subtitle: 'Create chats outside any workspace',
+        keywords: 'workspace none unassigned',
+        icon: 'folder',
+        onSelect: () => {
+          setIsCreatingWorkspace(false);
+          selectWorkspace('');
+          setStatusText('No workspace');
+        },
+      },
+      ...workspaces.map((workspace) => ({
+        id: `workspace-${workspace.id}`,
+        section: 'Workspace',
+        title: `Switch to ${workspace.name}`,
+        subtitle: `${workspace.projectIds.length} project${workspace.projectIds.length === 1 ? '' : 's'}`,
+        keywords: `workspace ${workspace.name}`,
+        icon: 'folder' as const,
+        onSelect: () => {
+          setIsCreatingWorkspace(false);
+          selectWorkspace(workspace.id);
+          setStatusText(`Workspace ${workspace.name}`);
+        },
+      })),
+    ];
+
+    const projectItems: CommandPaletteItem[] = recentProjects.map((project) => ({
+      id: `project-${project.id}`,
+      section: 'Projects',
+      title: `Switch to ${project.name}`,
+      subtitle: project.path,
+      keywords: `project ${project.name} ${project.path}`,
       icon: 'folder',
       onSelect: () => {
-        selectWorkspace(workspace.id);
-        setStatusText(`Workspace ${workspace.name}`);
+        setIsCreatingWorkspace(false);
+        selectProject(project.id);
+        setStatusText(`Project ${project.name}`);
       },
     }));
 
@@ -2861,11 +3333,22 @@ export const Shell = (): JSX.Element => {
 
     return [
       {
+        id: 'action-create-workspace',
+        section: 'Actions',
+        title: 'Create workspace',
+        subtitle: 'Group multiple projects together',
+        keywords: 'create workspace',
+        icon: 'folder',
+        onSelect: () => {
+          handleCreateWorkspace();
+        },
+      },
+      {
         id: 'action-open-folder',
         section: 'Actions',
-        title: 'Open folder',
-        subtitle: 'Add workspace to recent list',
-        keywords: 'open folder workspace',
+        title: 'Open project',
+        subtitle: 'Add a project to the library',
+        keywords: 'open project folder',
         icon: 'folder',
         onSelect: () => {
           void handleOpenFolder();
@@ -2884,19 +3367,23 @@ export const Shell = (): JSX.Element => {
         },
       },
       ...workspaceItems,
+      ...projectItems,
       ...threadItems,
       ...fileItems,
     ];
   }, [
     files,
+    handleCreateWorkspace,
     handleOpenFolder,
     openFile,
     openFileTree,
-    recentWorkspaces,
+    recentProjects,
     setIsCommitPanelOpen,
     handleSelectThread,
+    selectProject,
     selectWorkspace,
     threadGroups,
+    workspaces,
   ]);
 
   React.useEffect(() => {
@@ -3202,21 +3689,136 @@ export const Shell = (): JSX.Element => {
   }, [openRenameThreadDialog, selectedThreadId]);
 
   const handleOpenWorkspaceInFinder = React.useCallback(async () => {
-    if (!selectedThreadWorkspace?.path) {
+    if (!selectedThreadProject?.path) {
       return;
     }
 
     try {
       await window.desktop.workspaceRevealFile({
-        absolutePath: selectedThreadWorkspace.path,
+        absolutePath: selectedThreadProject.path,
       });
-      setStatusText(`Opened ${selectedThreadWorkspace.name} in Finder`);
+      setStatusText(`Opened ${selectedThreadProject.name} in Finder`);
     } catch {
-      setStatusText('Could not open workspace in Finder');
+      setStatusText('Could not open project in Finder');
     }
-  }, [selectedThreadWorkspace]);
+  }, [selectedThreadProject]);
 
-  const hasWorkspaces = workspaces.length > 0;
+  const threadWorkspaceContent = (
+    <>
+      <Transcript
+        threadId={selectedThreadId}
+        workspaceName={workspaceName}
+        workspacePath={workspacePath}
+        projects={visibleProjects.map((project) => ({
+          id: project.id,
+          name: project.name,
+          path: project.path,
+        }))}
+        selectedProjectId={landingSelectedProjectId}
+        timeline={effectiveTimeline}
+        isNewThread={isNewThread}
+        isThinking={effectiveIsPrompting}
+        pendingPermission={effectivePendingPermission}
+        onSelectProject={(projectId) => {
+          if (selectedThread?.isDraft) {
+            setThreadProject(selectedThread.id, projectId);
+            return;
+          }
+
+          selectProject(projectId);
+        }}
+        onAddProject={() => {
+          void handleAddProjectToScope();
+        }}
+        onResolvePermission={(requestId, optionId) => {
+          void resolvePermission(requestId, {
+            outcome: 'selected',
+            optionId,
+          });
+        }}
+        onOpenFile={(path) => {
+          void openFile(path);
+        }}
+        onOpenLink={(href) => {
+          void handleOpenTranscriptLink(href);
+        }}
+        onSelectSuggestion={handleSelectLandingSuggestion}
+      />
+      {connectingStatusMessage ? (
+        <div className="mb-3 no-drag flex items-center gap-2 rounded-xl border border-sky-300/80 bg-sky-50/80 px-3 py-2 text-sky-900">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <p className="text-[12px]">{connectingStatusMessage}</p>
+        </div>
+      ) : null}
+      {isAgentAuthRequired || isAgentAuthLaunching ? (
+        <div className="mb-3 no-drag rounded-xl border border-amber-300/70 bg-amber-50/80 px-3 py-2">
+          <p className="text-[12px] text-amber-900">
+            {agentAuthMessage ?? 'Authentication is required before sending prompts.'}
+          </p>
+          <div className="mt-2 flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 border-amber-400/80 bg-amber-100/70 px-2.5 text-[11px] text-amber-900 hover:bg-amber-100"
+              onClick={() => {
+                void startAgentAuthentication();
+              }}
+              disabled={isAgentAuthLaunching}
+            >
+              {isAgentAuthLaunching ? 'Opening login…' : 'Authenticate agent'}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-[11px] text-amber-900 hover:bg-amber-100/70"
+              onClick={() => {
+                setIsAgentAuthRequired(false);
+                setAgentAuthMessage(null);
+              }}
+              disabled={isAgentAuthLaunching}
+            >
+              Dismiss
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      <Composer
+        workspacePath={workspacePath}
+        disabled={isComposerDisabled}
+        disabledMessage={composerDisabledMessage}
+        isPrompting={effectiveIsPrompting}
+        queuedPrompts={queuedPrompts.map((item) => ({
+          id: item.id,
+          text: item.text,
+        }))}
+        onSteerQueuedPrompt={steerQueuedPrompt}
+        onRemoveQueuedPrompt={removeQueuedPrompt}
+        onReorderQueuedPrompt={reorderQueuedPrompt}
+        agentPreset={agentPreset}
+        codexAgentConfig={codexAgentConfig}
+        claudeAgentConfig={claudeAgentConfig}
+        customAgentConfig={customAgentConfig}
+        onSelectAgentPreset={handleSelectAgentPreset}
+        onSaveAgentConfig={saveAgentConfig}
+        onSubmit={handleComposerSubmit}
+        promptCapabilities={promptCapabilities}
+        sessionControls={effectiveSessionControls}
+        onSetSessionMode={setSessionMode}
+        onSetSessionModel={setSessionModel}
+        onSetSessionConfigOption={setSessionConfigOption}
+        onShowErrorToast={pushErrorToast}
+        onCancel={cancelPrompt}
+        onOpenCommitDialog={() => {
+          handleOpenCommitPanel();
+        }}
+        prefillRequest={composerPrefillRequest}
+      />
+    </>
+  );
+
+  const hasProjects = projects.length > 0;
   const hasWelcomeProjectSelection = welcomeProjectPath.trim().length > 0;
   const hasWelcomeAgentSelection = welcomeSelectedAgentId !== null;
   const canStartWelcome = hasWelcomeAgentSelection && hasWelcomeProjectSelection;
@@ -3229,6 +3831,95 @@ export const Shell = (): JSX.Element => {
     () => welcomeRegistryAgents.find((agent) => agent.id === 'claude-acp') ?? null,
     [welcomeRegistryAgents],
   );
+  const toAgentBadgeFromSelection = React.useCallback(
+    (selection: ThreadAgentSelection | null | undefined): ThreadAgentBadge | null => {
+      const preset = selection?.preset ?? 'mock';
+      if (preset === 'codex') {
+        return {
+          label: 'Codex',
+          iconUrl: codexRegistryAgent?.iconUrl ?? null,
+        };
+      }
+
+      if (preset === 'claude') {
+        return {
+          label: 'Claude Code',
+          iconUrl: claudeRegistryAgent?.iconUrl ?? null,
+        };
+      }
+
+      if (preset === 'custom') {
+        const resolvedCustomConfig = selection?.customConfig ?? customAgentConfig;
+        const matchingRegistryAgent =
+          welcomeRegistryAgents.find((agent) =>
+            matchesRegistryTemplate(agent, resolvedCustomConfig, platform as NodeJS.Platform),
+          ) ?? null;
+
+        return {
+          label:
+            matchingRegistryAgent?.name ??
+            (resolvedCustomConfig ? toDefaultCustomAgentLabel(resolvedCustomConfig) : 'Custom ACP'),
+          iconUrl: matchingRegistryAgent?.iconUrl ?? null,
+        };
+      }
+
+      return {
+        label: agentName || 'Agent',
+        iconUrl: null,
+      };
+    },
+    [
+      agentName,
+      claudeRegistryAgent?.iconUrl,
+      codexRegistryAgent?.iconUrl,
+      customAgentConfig,
+      platform,
+      welcomeRegistryAgents,
+    ],
+  );
+  const currentAgentBadge = React.useMemo<ThreadAgentBadge | null>(
+    () =>
+      toAgentBadgeFromSelection(
+        agentPreset === 'custom'
+          ? {
+              preset: 'custom',
+              ...(customAgentConfig ? { customConfig: customAgentConfig } : {}),
+            }
+          : {
+              preset: agentPreset,
+            },
+      ),
+    [agentPreset, customAgentConfig, toAgentBadgeFromSelection],
+  );
+  const threadAgentBadgeById = React.useMemo(() => {
+    const badges: Record<string, ThreadAgentBadge> = {};
+
+    for (const threadId of threadById.keys()) {
+      const timeline =
+        threadId === selectedThreadId
+          ? effectiveTimeline
+          : (timelineSnapshotByThreadId[threadId] ?? []);
+      const resolvedBadge =
+        getThreadAgentBadgeFromTimeline(timeline) ??
+        toAgentBadgeFromSelection(threadAgentSelectionById[threadId]) ??
+        currentAgentBadge;
+      if (!resolvedBadge) {
+        continue;
+      }
+
+      badges[threadId] = resolvedBadge;
+    }
+
+    return badges;
+  }, [
+    currentAgentBadge,
+    effectiveTimeline,
+    selectedThreadId,
+    threadAgentSelectionById,
+    threadById,
+    timelineSnapshotByThreadId,
+    toAgentBadgeFromSelection,
+  ]);
   const welcomeAgentCards = React.useMemo<
     Array<{
       id: string;
@@ -3286,19 +3977,14 @@ export const Shell = (): JSX.Element => {
       : 'Select an agent';
 
   const handleWelcomePickProject = React.useCallback(async () => {
-    const result = await window.desktop.openFolder();
-
-    if (result.canceled) {
+    const projectPath = await pickProjectPath();
+    if (!projectPath) {
       return;
     }
 
-    if (!result.path) {
-      return;
-    }
-
-    setWelcomeProjectPath(result.path);
-    setStatusText(`Selected ${getFolderName(result.path)}`);
-  }, []);
+    setWelcomeProjectPath(projectPath);
+    setStatusText(`Selected ${getFolderName(projectPath)}`);
+  }, [pickProjectPath]);
 
   const handleWelcomeSelectAgent = React.useCallback(
     (preset: 'codex' | 'claude') => {
@@ -3423,21 +4109,24 @@ export const Shell = (): JSX.Element => {
       return;
     }
 
-    const workspace = workspaces.find((item) => item.path === pendingPath);
-    if (!workspace) {
+    const project = projects.find((item) => item.path === pendingPath);
+    if (!project) {
       return;
     }
 
-    createThreadInWorkspace(workspace.id);
+    createThread({
+      workspaceId: '',
+      projectId: project.id,
+    });
     pendingWelcomeStartPathRef.current = null;
     setIsWelcomeStarting(false);
     setWelcomeProjectPath('');
-    setStatusText(`New chat in ${workspace.name}`);
-  }, [createThreadInWorkspace, workspaces]);
+    setStatusText(`New chat in ${project.name}`);
+  }, [createThread, projects]);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-transparent text-stone-700 antialiased">
-      {hasWorkspaces ? (
+      {hasProjects ? (
         <>
           <header className="z-30 h-11 shrink-0">
             <div className="drag-region flex h-full min-w-0">
@@ -3529,7 +4218,7 @@ export const Shell = (): JSX.Element => {
                 {!isSettingsOpen ? (
                   <div className="min-w-0 flex flex-1 items-center gap-2">
                     <p className="truncate text-[13px] font-semibold text-stone-900">{headerTitle}</p>
-                    {selectedThreadWorkspace?.path ? (
+                    {!isCreatingWorkspace && !isWorkspaceBoardOpen && selectedThreadProject?.path ? (
                       <TooltipProvider delayDuration={180}>
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -3546,39 +4235,43 @@ export const Shell = (): JSX.Element => {
                               {headerSubtitle}
                             </button>
                           </TooltipTrigger>
-                          <TooltipContent>{selectedThreadWorkspace.path}</TooltipContent>
+                          <TooltipContent>{selectedThreadProject.path}</TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
                     ) : (
-                      <p
-                        className="truncate text-[13px] text-stone-600 max-[860px]:hidden"
-                        title={`${headerSubtitle} · ${statusText}`}
-                      >
-                        {headerSubtitle}
-                      </p>
-                    )}
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <button
-                          type="button"
-                          aria-label="Thread options"
-                          className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-xl text-stone-500 transition-colors hover:bg-stone-200/45 hover:text-stone-700 max-[980px]:hidden"
+                      headerSubtitle ? (
+                        <p
+                          className="truncate text-[13px] text-stone-600 max-[860px]:hidden"
+                          title={`${headerSubtitle} · ${statusText}`}
                         >
-                          <Ellipsis className="h-3.5 w-3.5" />
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" className="w-56">
-                        <DropdownMenuItem onSelect={handleRenameThreadFromMenu}>
-                          Rename
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                          {headerSubtitle}
+                        </p>
+                      ) : null
+                    )}
+                    {!isCreatingWorkspace && !isWorkspaceBoardOpen ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            type="button"
+                            aria-label="Thread options"
+                            className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-xl text-stone-500 transition-colors hover:bg-stone-200/45 hover:text-stone-700 max-[980px]:hidden"
+                          >
+                            <Ellipsis className="h-3.5 w-3.5" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" className="w-56">
+                          <DropdownMenuItem onSelect={handleRenameThreadFromMenu}>
+                            Rename
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : null}
                   </div>
                 ) : (
                   <div className="min-w-0 flex-1" />
                 )}
 
-                {!isSettingsOpen ? (
+                {!isSettingsOpen && !isWorkspaceBoardOpen ? (
                   <ToolbarActions
                     onOpenFileTree={handleToggleFileTree}
                     isFileTreeOpen={isFileTreeOpen}
@@ -3618,13 +4311,14 @@ export const Shell = (): JSX.Element => {
                 showResizeHandle={!isCollapsed}
                 onStartResizing={startResizing}
                 workspacePath={workspacePath}
-                selectedWorkspaceId={selectedWorkspaceId}
-                recentWorkspaces={recentWorkspaces}
-                agentPreset={agentPreset}
-                customAgentConfig={customAgentConfig}
-                onSelectWorkspace={selectWorkspace}
+                selectedWorkspaceId={selectedProjectId}
+                recentWorkspaces={recentProjects}
+                agentPreset={defaultAgentPreset}
+                customAgentConfig={defaultCustomAgentConfig}
+                onSelectWorkspace={selectProject}
                 onOpenWorkspaceFromPath={openWorkspaceFromPath}
-                onSelectAgentPreset={handleSelectAgentPreset}
+                onSelectAgentPreset={handleSelectDefaultAgentPreset}
+                onSaveAgentConfig={saveAgentConfig}
               />
             </main>
           ) : (
@@ -3640,27 +4334,45 @@ export const Shell = (): JSX.Element => {
                   width={sidebarWidth}
                   isResizing={isResizing}
                   selectedThreadId={selectedThreadId}
+                  selectedWorkspaceId={selectedWorkspaceId}
+                  selectedProjectId={selectedProjectId}
                   isSettingsOpen={isSettingsOpen}
-                  groups={threadGroups}
+                  workspaces={workspaces}
+                  groups={visibleThreadGroups}
                   threadIndicatorById={threadIndicatorById}
                   onSelectThread={(threadId) => {
                     handleSelectThread(threadId);
+                  }}
+                  onSelectWorkspace={(workspaceId) => {
+                    setIsCreatingWorkspace(false);
+                    selectWorkspace(workspaceId);
+                  }}
+                  onSelectProject={(projectId) => {
+                    setIsCreatingWorkspace(false);
+                    selectProject(projectId);
                   }}
                   onCreateThread={handleCreateThread}
                   onOpenFolder={() => {
                     void handleOpenFolder();
                   }}
+                  onAddProjectToScope={() => {
+                    void handleAddProjectToScope();
+                  }}
                   onOpenCommandPalette={handleOpenCommandPalette}
+                  onCreateWorkspace={handleCreateWorkspace}
+                  onOpenWorkspaceBoard={handleOpenWorkspaceBoard}
                   onCreateThreadInGroup={handleCreateThreadInGroup}
-                  onRenameGroup={handleRenameGroup}
-                  onRemoveGroup={handleRemoveGroup}
                   onRenameThread={(threadId) => {
                     openRenameThreadDialog(threadId);
                   }}
                   onRemoveThread={(threadId, currentTitle) => {
                     handleRemoveThread(threadId, currentTitle);
                   }}
+                  onReorderProject={reorderProjects}
+                  onReorderThread={reorderThreads}
                   onOpenSettings={() => {
+                    setIsCreatingWorkspace(false);
+                    setIsWorkspaceBoardOpen(false);
                     setIsSettingsOpen(true);
                   }}
                   unreadPushCount={unreadBrowserPushCount}
@@ -3668,6 +4380,7 @@ export const Shell = (): JSX.Element => {
                   onTogglePushPanel={() => {
                     setIsBrowserPushPanelOpen((previous) => !previous);
                   }}
+                  isWorkspaceBoardOpen={isWorkspaceBoardOpen}
                 />
               </div>
 
@@ -3754,115 +4467,121 @@ export const Shell = (): JSX.Element => {
                       ) : null}
 
                       <div className="min-w-0 flex flex-1 flex-col">
-                        <div className="mx-auto flex h-full w-full max-w-[830px] flex-col px-6 pb-1.5 pt-2">
-                          <Transcript
-                            threadId={selectedThreadId}
-                            workspaceName={workspaceName}
-                            workspacePath={workspacePath}
-                            projects={workspaces.map((workspace) => ({
-                              id: workspace.id,
-                              name: workspace.name,
-                              path: workspace.path,
-                            }))}
-                            selectedProjectId={landingSelectedProjectId}
-                            timeline={effectiveTimeline}
-                            isNewThread={isNewThread}
-                            isThinking={effectiveIsPrompting}
-                            pendingPermission={effectivePendingPermission}
-                            onSelectProject={(workspaceId) => {
-                              selectWorkspace(workspaceId);
-                            }}
-                            onAddProject={() => {
-                              void handleOpenFolder();
-                            }}
-                            onResolvePermission={(requestId, optionId) => {
-                              void resolvePermission(requestId, {
-                                outcome: 'selected',
-                                optionId,
-                              });
-                            }}
-                            onOpenFile={(path) => {
-                              void openFile(path);
-                            }}
-                            onOpenLink={(href) => {
-                              void handleOpenTranscriptLink(href);
-                            }}
-                            onSelectSuggestion={handleSelectLandingSuggestion}
-                          />
-                          {connectingStatusMessage ? (
-                            <div className="mb-3 no-drag flex items-center gap-2 rounded-xl border border-sky-300/80 bg-sky-50/80 px-3 py-2 text-sky-900">
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                              <p className="text-[12px]">{connectingStatusMessage}</p>
-                            </div>
-                          ) : null}
-                          {isAgentAuthRequired || isAgentAuthLaunching ? (
-                            <div className="mb-3 no-drag rounded-xl border border-amber-300/70 bg-amber-50/80 px-3 py-2">
-                              <p className="text-[12px] text-amber-900">
-                                {agentAuthMessage ??
-                                  'Authentication is required before sending prompts.'}
-                              </p>
-                              <div className="mt-2 flex items-center gap-2">
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline"
-                                  className="h-7 border-amber-400/80 bg-amber-100/70 px-2.5 text-[11px] text-amber-900 hover:bg-amber-100"
-                                  onClick={() => {
-                                    void startAgentAuthentication();
-                                  }}
-                                  disabled={isAgentAuthLaunching}
-                                >
-                                  {isAgentAuthLaunching
-                                    ? 'Opening login…'
-                                    : 'Authenticate agent'}
-                                </Button>
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="ghost"
-                                  className="h-7 px-2 text-[11px] text-amber-900 hover:bg-amber-100/70"
-                                  onClick={() => {
-                                    setIsAgentAuthRequired(false);
-                                    setAgentAuthMessage(null);
-                                  }}
-                                  disabled={isAgentAuthLaunching}
-                                >
-                                  Dismiss
-                                </Button>
+                        <div
+                          className={cn(
+                            'flex h-full w-full flex-col pb-1.5 pt-2',
+                            isWorkspaceBoardOpen
+                              ? 'max-w-none px-0'
+                              : 'mx-auto max-w-[830px] px-6',
+                          )}
+                        >
+                          {isCreatingWorkspace ? (
+                            <WorkspaceCreationView
+                              projects={projects}
+                              name={workspaceDraftName}
+                              selectedPaths={workspaceDraftPaths}
+                              isPickingProject={isPickingWorkspaceProject}
+                              onNameChange={setWorkspaceDraftName}
+                              onToggleProjectPath={(projectPath) => {
+                                setWorkspaceDraftPaths((previous) =>
+                                  previous.includes(projectPath)
+                                    ? previous.filter((path) => path !== projectPath)
+                                    : [...previous, projectPath],
+                                );
+                              }}
+                              onAddProject={() => {
+                                void handleAddProjectToWorkspaceDraft();
+                              }}
+                              onSubmit={() => {
+                                handleSubmitWorkspace({
+                                  name: workspaceDraftName,
+                                  projectPaths: workspaceDraftPaths,
+                                });
+                              }}
+                            />
+                          ) : isWorkspaceBoardOpen ? (
+                            <div
+                              ref={workspaceBoardPanelContainerRef}
+                              className="min-h-0 flex flex-1"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <WorkspaceSessionsBoard
+                                  hasWorkspaceSelected={Boolean(selectedWorkspaceId)}
+                                  groups={visibleThreadGroups}
+                                  selectedThreadId={selectedThreadId}
+                                  threadAgentBadgeById={threadAgentBadgeById}
+                                  threadIndicatorById={threadIndicatorById}
+                                  onSelectThread={handleSelectThreadInWorkspaceBoard}
+                                  onCreateThread={handleCreateThreadInWorkspaceBoard}
+                                  onMoveThread={handleMoveThreadInWorkspaceBoard}
+                                  onCreateWorkspace={handleCreateWorkspace}
+                                />
                               </div>
+
+                              <aside
+                                style={{
+                                  width: isWorkspaceBoardThreadPanelVisible
+                                    ? workspaceBoardThreadPanelWidth
+                                    : 0,
+                                }}
+                                className={cn(
+                                  'relative h-full shrink-0 overflow-hidden border-l border-l-[var(--zeroade-shell-divider)] bg-[#fdfdfff2] backdrop-blur-xl transition-[width] duration-200 ease-out',
+                                  isWorkspaceBoardThreadPanelResizing && 'transition-none',
+                                  !isWorkspaceBoardThreadPanelVisible && 'border-l-0',
+                                )}
+                              >
+                                <button
+                                  type="button"
+                                  aria-label="Resize thread panel"
+                                  className={cn(
+                                    'no-drag group absolute inset-y-0 left-0 z-10 w-4 cursor-col-resize',
+                                    !isWorkspaceBoardThreadPanelVisible &&
+                                      'pointer-events-none opacity-0',
+                                  )}
+                                  onPointerDown={startWorkspaceBoardThreadPanelResizing}
+                                >
+                                  <span className="absolute inset-y-0 left-0 w-px bg-transparent transition-colors group-hover:bg-stone-300/70" />
+                                </button>
+
+                                <div
+                                  className={cn(
+                                    'flex h-full w-full min-w-0 flex-col transition-opacity duration-150',
+                                    isWorkspaceBoardThreadPanelVisible
+                                      ? 'opacity-100'
+                                      : 'pointer-events-none opacity-0',
+                                  )}
+                                >
+                                  <div className="flex items-center justify-between gap-3 border-b border-b-[var(--zeroade-shell-divider)] px-4 py-3">
+                                    <div className="min-w-0">
+                                      <p className="truncate text-[13px] font-semibold text-stone-900">
+                                        {threadTitle}
+                                      </p>
+                                      {workspaceBoardThreadPanelSubtitle ? (
+                                        <p className="truncate text-[11px] text-stone-500">
+                                          {workspaceBoardThreadPanelSubtitle}
+                                        </p>
+                                      ) : null}
+                                    </div>
+
+                                    <button
+                                      type="button"
+                                      aria-label="Close thread panel"
+                                      className="no-drag inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px] text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-700"
+                                      onClick={handleCloseWorkspaceBoardThreadPanel}
+                                    >
+                                      <X className="h-4 w-4" />
+                                    </button>
+                                  </div>
+
+                                  <div className="min-h-0 flex flex-1 flex-col px-4 pb-3 pt-2">
+                                    {threadWorkspaceContent}
+                                  </div>
+                                </div>
+                              </aside>
                             </div>
-                          ) : null}
-                          <Composer
-                            workspacePath={workspacePath}
-                            disabled={isComposerDisabled}
-                            disabledMessage={composerDisabledMessage}
-                            isPrompting={effectiveIsPrompting}
-                            queuedPrompts={queuedPrompts.map((item) => ({
-                              id: item.id,
-                              text: item.text,
-                            }))}
-                            onSteerQueuedPrompt={steerQueuedPrompt}
-                            onRemoveQueuedPrompt={removeQueuedPrompt}
-                            onReorderQueuedPrompt={reorderQueuedPrompt}
-                            agentPreset={agentPreset}
-                            codexAgentConfig={codexAgentConfig}
-                            claudeAgentConfig={claudeAgentConfig}
-                            customAgentConfig={customAgentConfig}
-                            onSelectAgentPreset={handleSelectAgentPreset}
-                            onSaveAgentConfig={saveAgentConfig}
-                            onSubmit={handleComposerSubmit}
-                            promptCapabilities={promptCapabilities}
-                            sessionControls={effectiveSessionControls}
-                            onSetSessionMode={setSessionMode}
-                            onSetSessionModel={setSessionModel}
-                            onSetSessionConfigOption={setSessionConfigOption}
-                            onShowErrorToast={pushErrorToast}
-                            onCancel={cancelPrompt}
-                            onOpenCommitDialog={() => {
-                              handleOpenCommitPanel();
-                            }}
-                            prefillRequest={composerPrefillRequest}
-                          />
+                          ) : (
+                            threadWorkspaceContent
+                          )}
                         </div>
                       </div>
                     </div>

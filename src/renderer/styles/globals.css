@@ -452,11 +452,6 @@ body.zeroade-suppress-find-widget-hover .context-view .workbench-hover-pointer {
     color 160ms ease;
 }
 
-.zeroade-sidebar-hover-shadow:hover,
-.zeroade-sidebar-hover-shadow:focus-visible {
-  box-shadow: var(--zeroade-sidebar-hover-shadow);
-}
-
 .zeroade-sidebar-hover-surface:hover,
 .zeroade-sidebar-hover-surface:focus-visible,
 .zeroade-sidebar-hover-surface[data-state='open'] {

@@ -4,6 +4,7 @@ import type {
   AcpAuthenticateRequest,
   AcpCancelRequest,
   AcpInitializeRequest,
+  AcpPrepareAgentRequest,
   AcpPromptRequest,
   AcpRespondPermissionRequest,
   AcpSetSessionConfigOptionRequest,
@@ -17,6 +18,10 @@ import type { AcpService } from '../services/acp/acp-service';
 export const registerAcpIpc = (acpService: AcpService): void => {
   ipcMain.handle(IPC_CHANNELS.acpInitialize, (_event, request: AcpInitializeRequest) =>
     acpService.initialize(request),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.acpPrepareAgent, (_event, request: AcpPrepareAgentRequest) =>
+    acpService.prepareAgent(request),
   );
 
   ipcMain.handle(IPC_CHANNELS.acpSessionNew, (_event, request: AcpSessionNewRequest) =>

@@ -36,6 +36,16 @@ export interface AcpInitializeRequest {
   agent?: AcpAgentConfig;
 }
 
+export interface AcpPrepareAgentRequest {
+  cwd: string;
+  config: AcpCustomAgentConfig;
+}
+
+export interface AcpPrepareAgentResult {
+  prepared: boolean;
+  resolvedCommand: string;
+}
+
 export interface AcpInitializeResult {
   connected: boolean;
   protocolVersion: number;

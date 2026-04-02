@@ -649,6 +649,9 @@ const toBinaryKeyCandidates = (platform: NodeJS.Platform): string[] => {
   return [];
 };
 
+const shouldPreferRegistryBinaryTemplate = (agentId: string): boolean =>
+  agentId === 'codex-acp';
+
 const toExecutableCommand = (rawCommand: string): string => {
   const trimmed = rawCommand.trim();
   if (!trimmed) {
@@ -802,6 +805,38 @@ const toRegistryLaunchTemplate = (
   agent: RegistryAgent,
   platform: NodeJS.Platform,
 ): RegistryLaunchTemplate => {
+  const binaryDistribution = agent.distribution?.binary ?? {};
+  const binaryCandidates = toBinaryKeyCandidates(platform)
+    .map((key) => binaryDistribution[key])
+    .filter((target): target is RegistryBinaryDistributionTarget => Boolean(target));
+  const binaryFallback = Object.values(binaryDistribution).filter(
+    (target): target is RegistryBinaryDistributionTarget =>
+      typeof target?.cmd === 'string' && target.cmd.trim().length > 0,
+  );
+  const binaryTarget = [...binaryCandidates, ...binaryFallback].find(
+    (target) => typeof target.cmd === 'string' && target.cmd.trim().length > 0,
+  );
+
+  const binaryCommand =
+    binaryTarget && typeof binaryTarget.cmd === 'string'
+      ? binaryTarget.cmd.trim()
+      : '';
+  const binaryArgs = Array.isArray(binaryTarget?.args)
+    ? binaryTarget.args.filter(
+        (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
+      )
+    : [];
+
+  if (shouldPreferRegistryBinaryTemplate(agent.id) && binaryCommand) {
+    return {
+      command: binaryCommand,
+      args: binaryArgs,
+      source: 'binary',
+      autoConfigurable: isLikelyRunnableCommand(binaryCommand),
+      preview: toCommandPreview(binaryCommand, binaryArgs),
+    };
+  }
+
   const npxDistribution = agent.distribution?.npx;
   if (npxDistribution?.package) {
     const args = ['-y', npxDistribution.package, ...(npxDistribution.args ?? [])];
@@ -827,28 +862,6 @@ const toRegistryLaunchTemplate = (
       preview: toCommandPreview('uvx', args),
     };
   }
-
-  const binaryDistribution = agent.distribution?.binary ?? {};
-  const binaryCandidates = toBinaryKeyCandidates(platform)
-    .map((key) => binaryDistribution[key])
-    .filter((target): target is RegistryBinaryDistributionTarget => Boolean(target));
-  const binaryFallback = Object.values(binaryDistribution).filter(
-    (target): target is RegistryBinaryDistributionTarget =>
-      typeof target?.cmd === 'string' && target.cmd.trim().length > 0,
-  );
-  const binaryTarget = [...binaryCandidates, ...binaryFallback].find(
-    (target) => typeof target.cmd === 'string' && target.cmd.trim().length > 0,
-  );
-
-  const binaryCommand =
-    binaryTarget && typeof binaryTarget.cmd === 'string'
-      ? binaryTarget.cmd.trim()
-      : '';
-  const binaryArgs = Array.isArray(binaryTarget?.args)
-    ? binaryTarget.args.filter(
-        (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
-      )
-    : [];
 
   if (binaryCommand) {
     return {

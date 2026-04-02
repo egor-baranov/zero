@@ -35,6 +35,8 @@ import type {
   AcpConnectionState,
   AcpInitializeRequest,
   AcpInitializeResult,
+  AcpPrepareAgentRequest,
+  AcpPrepareAgentResult,
   AcpPromptRequest,
   AcpPromptResult,
   AcpRendererEvent,
@@ -559,6 +561,17 @@ export class AcpService {
         promptCapabilities: DEFAULT_PROMPT_CAPABILITIES,
       };
     }
+  }
+
+  public async prepareAgent(
+    request: AcpPrepareAgentRequest,
+  ): Promise<AcpPrepareAgentResult> {
+    const launchConfig = await this.toLaunchConfig(request.config, request.cwd);
+
+    return {
+      prepared: launchConfig.command.trim().length > 0,
+      resolvedCommand: launchConfig.command,
+    };
   }
 
   public async newSession(
@@ -1630,6 +1643,51 @@ export class AcpService {
     return installPromise;
   }
 
+  private async resolveRegistryManagedAgentLaunchConfig(
+    agentId: string,
+    cwd: string,
+    config?: {
+      args?: string[];
+      cwd?: string;
+      env?: Record<string, string>;
+    },
+  ): Promise<AgentProcessLaunchConfig | null> {
+    let templates: RegistryBinaryTemplate[] = [];
+    try {
+      templates = await this.loadRegistryBinaryTemplates();
+    } catch (error) {
+      console.warn(
+        `[acp:${agentId}] failed to load ACP registry metadata: ${toErrorMessage(error)}`,
+      );
+      return null;
+    }
+
+    const selectedTemplate = templates.find((template) => template.agentId === agentId) ?? null;
+    if (!selectedTemplate) {
+      return null;
+    }
+
+    const launchArgs =
+      Array.isArray(config?.args) && config.args.length > 0 ? config.args : selectedTemplate.args;
+
+    try {
+      return await this.toLaunchConfig(
+        {
+          command: selectedTemplate.command,
+          args: launchArgs,
+          cwd: config?.cwd,
+          env: config?.env,
+        },
+        cwd,
+      );
+    } catch (error) {
+      console.warn(
+        `[acp:${agentId}] failed to resolve registry-managed launch config: ${toErrorMessage(error)}`,
+      );
+      return null;
+    }
+  }
+
   private toArchiveFileSuffix(url: string): string {
     try {
       const pathname = new URL(url).pathname.toLowerCase();
@@ -2028,6 +2086,33 @@ export class AcpService {
     }
 
     return null;
+  }
+
+  private shouldPreferRegistryManagedCodexCommand(
+    rawCommand: string,
+    resolvedCommand: string,
+  ): boolean {
+    const normalizedRaw = rawCommand.trim();
+    const normalizedResolved = resolvedCommand.trim();
+    const rawToken = path.basename(normalizedRaw).replace(/\.exe$/i, '').toLowerCase();
+    const resolvedToken = path.basename(normalizedResolved).replace(/\.exe$/i, '').toLowerCase();
+
+    if (rawToken !== 'codex-acp' && resolvedToken !== 'codex-acp') {
+      return false;
+    }
+
+    if (!normalizedRaw) {
+      return true;
+    }
+
+    if (!path.isAbsolute(normalizedRaw)) {
+      return true;
+    }
+
+    return (
+      normalizedResolved.includes(`${path.sep}node_modules${path.sep}.bin${path.sep}`) ||
+      normalizedResolved.includes(`${path.sep}@zed-industries${path.sep}codex-acp`)
+    );
   }
 
   private withAdapterThreadLimits(
@@ -2611,10 +2696,27 @@ export class AcpService {
 
     if (agent.kind === 'codex') {
       if (agent.config) {
+        let launchConfig = await this.toLaunchConfig(agent.config, cwd);
+        if (this.shouldPreferRegistryManagedCodexCommand(agent.config.command, launchConfig.command)) {
+          const registryManagedLaunchConfig =
+            await this.resolveRegistryManagedAgentLaunchConfig('codex-acp', cwd, agent.config);
+          if (registryManagedLaunchConfig) {
+            launchConfig = registryManagedLaunchConfig;
+          }
+        }
+
+        const preparedLaunchConfig = this.withCodexChatGptDefaults(
+          this.withAdapterThreadLimits(launchConfig),
+        );
+        await this.ensureCodexHomeExists(preparedLaunchConfig.env);
+        return preparedLaunchConfig;
+      }
+
+      const registryManagedLaunchConfig =
+        await this.resolveRegistryManagedAgentLaunchConfig('codex-acp', cwd);
+      if (registryManagedLaunchConfig) {
         const launchConfig = this.withCodexChatGptDefaults(
-          this.withAdapterThreadLimits(
-            await this.toLaunchConfig(agent.config, cwd),
-          ),
+          this.withAdapterThreadLimits(registryManagedLaunchConfig),
         );
         await this.ensureCodexHomeExists(launchConfig.env);
         return launchConfig;
