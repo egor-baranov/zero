@@ -414,6 +414,7 @@ export const WebBrowserPanel = ({
   const [dragOverTabId, setDragOverTabId] = React.useState<string | null>(null);
   const [panelWidth, setPanelWidth] = React.useState(WEB_PANEL_WIDTH_DEFAULT);
   const [isResizing, setIsResizing] = React.useState(false);
+  const [hasOpenedBrowser, setHasOpenedBrowser] = React.useState(open);
   const resizingRef = React.useRef(false);
   const resizePointerIdRef = React.useRef<number | null>(null);
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -431,6 +432,7 @@ export const WebBrowserPanel = ({
   const currentUrl = activeTab?.url ?? DEFAULT_HOME_URL;
   const activeTabIdRef = React.useRef(activeTabId);
   const currentUrlRef = React.useRef(currentUrl);
+  const shouldRenderWebview = open || hasOpenedBrowser;
 
   React.useEffect(() => {
     activeTabIdRef.current = activeTabId;
@@ -439,6 +441,14 @@ export const WebBrowserPanel = ({
   React.useEffect(() => {
     currentUrlRef.current = currentUrl;
   }, [currentUrl]);
+
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    setHasOpenedBrowser(true);
+  }, [open]);
 
   const isAbortedNavigationError = React.useCallback((error: unknown): boolean => {
     if (!error || typeof error !== 'object') {
@@ -696,7 +706,7 @@ export const WebBrowserPanel = ({
       rawView.removeEventListener('new-window', handleNewWindow as EventListener);
       rawView.removeEventListener('will-navigate', handleWillNavigate as EventListener);
     };
-  }, [appendPushItem, openUrlInNewTab]);
+  }, [appendPushItem, openUrlInNewTab, shouldRenderWebview]);
 
   React.useEffect(() => {
     if (!open) {
@@ -708,11 +718,15 @@ export const WebBrowserPanel = ({
       return;
     }
 
+    if (!webviewReadyRef.current) {
+      intendedNavigationUrlRef.current = currentUrl;
+      setIsLoading(true);
+      return;
+    }
+
     const intendedUrl = intendedNavigationUrlRef.current?.trim() ?? '';
-    if (webviewReadyRef.current) {
-      if (!intendedUrl || !isSameNavigableUrl(intendedUrl, currentUrl)) {
-        return;
-      }
+    if (!intendedUrl || !isSameNavigableUrl(intendedUrl, currentUrl)) {
+      return;
     }
 
     let disposed = false;
@@ -743,7 +757,7 @@ export const WebBrowserPanel = ({
     return () => {
       disposed = true;
     };
-  }, [currentUrl, isAbortedNavigationError, open]);
+  }, [currentUrl, isAbortedNavigationError, open, shouldRenderWebview]);
 
   React.useEffect(() => {
     const stopResizing = (): void => {
@@ -1343,12 +1357,14 @@ export const WebBrowserPanel = ({
         ) : null}
 
         <div className="relative min-h-0 flex-1 bg-white">
-          <webview
-            ref={webviewRef}
-            src="about:blank"
-            className="block h-full w-full"
-            style={{ display: 'inline-flex' }}
-          />
+          {shouldRenderWebview ? (
+            <webview
+              ref={webviewRef}
+              src={currentUrl}
+              className="block h-full w-full"
+              style={{ display: 'inline-flex' }}
+            />
+          ) : null}
         </div>
       </div>
     </aside>

@@ -764,8 +764,11 @@ const toBinaryKeyCandidates = (platform: NodeJS.Platform): string[] => {
   return [];
 };
 
+const isBuiltInClaudeRegistryAgentId = (agentId: string): boolean =>
+  agentId === 'claude-acp' || agentId === 'claude-agent-acp';
+
 const shouldPreferRegistryBinaryTemplate = (agentId: string): boolean =>
-  agentId === 'codex-acp';
+  agentId === 'codex-acp' || isBuiltInClaudeRegistryAgentId(agentId);
 
 const toExecutableCommand = (value: string): string =>
   value.trim().split(/[\\/]/).filter(Boolean).at(-1)?.replace(/\.exe$/i, '').toLowerCase() ?? '';
@@ -1176,6 +1179,7 @@ export const Shell = (): JSX.Element => {
     threadAgentSelectionById,
     threadSessionTitleById,
     activeSessionControls,
+    activeAvailableCommands,
     pendingPermission,
     setAgentPreset,
     setThreadAgentSelection,
@@ -3805,6 +3809,7 @@ export const Shell = (): JSX.Element => {
         onSubmit={handleComposerSubmit}
         promptCapabilities={promptCapabilities}
         sessionControls={effectiveSessionControls}
+        availableCommands={activeAvailableCommands}
         onSetSessionMode={setSessionMode}
         onSetSessionModel={setSessionModel}
         onSetSessionConfigOption={setSessionConfigOption}
@@ -3828,7 +3833,7 @@ export const Shell = (): JSX.Element => {
     [welcomeRegistryAgents],
   );
   const claudeRegistryAgent = React.useMemo(
-    () => welcomeRegistryAgents.find((agent) => agent.id === 'claude-acp') ?? null,
+    () => welcomeRegistryAgents.find((agent) => isBuiltInClaudeRegistryAgentId(agent.id)) ?? null,
     [welcomeRegistryAgents],
   );
   const toAgentBadgeFromSelection = React.useCallback(
@@ -3939,7 +3944,7 @@ export const Shell = (): JSX.Element => {
       welcomeRegistryAgents.map((agent) => {
         const launchTemplate = toRegistryLaunchTemplate(agent, platform as NodeJS.Platform);
         const isBuiltInCodex = agent.id === 'codex-acp';
-        const isBuiltInClaude = agent.id === 'claude-acp';
+        const isBuiltInClaude = isBuiltInClaudeRegistryAgentId(agent.id);
         const preset = isBuiltInCodex ? 'codex' : isBuiltInClaude ? 'claude' : 'custom';
         const launchPreview = launchTemplate.command
           ? `${launchTemplate.command}${
@@ -3999,15 +4004,15 @@ export const Shell = (): JSX.Element => {
         return;
       }
 
-      handleSelectAgentPreset({
-        preset: 'claude',
-        label: 'Claude Code',
-        iconUrl: claudeRegistryAgent?.iconUrl ?? null,
-      });
-      setWelcomeSelectedAgentId('claude-acp');
+        handleSelectAgentPreset({
+          preset: 'claude',
+          label: 'Claude Code',
+          iconUrl: claudeRegistryAgent?.iconUrl ?? null,
+        });
+      setWelcomeSelectedAgentId(claudeRegistryAgent?.id ?? 'claude-acp');
       setIsWelcomeAgentMenuExpanded(false);
     },
-    [claudeRegistryAgent?.iconUrl, codexRegistryAgent?.iconUrl, handleSelectAgentPreset],
+    [claudeRegistryAgent?.iconUrl, claudeRegistryAgent?.id, codexRegistryAgent?.iconUrl, handleSelectAgentPreset],
   );
 
   const handleWelcomeSelectRegistryAgent = React.useCallback(

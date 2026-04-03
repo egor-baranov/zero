@@ -1,4 +1,5 @@
 import type {
+  AvailableCommand,
   McpServer,
   PermissionOption,
   RequestPermissionRequest,
@@ -133,6 +134,8 @@ export interface AcpSessionLoadResult {
 export interface AcpPromptCapabilities {
   audio: boolean;
 }
+
+export type AcpAvailableCommand = Pick<AvailableCommand, 'name' | 'description' | 'input'>;
 
 export interface AcpPromptAudioContent {
   data: string;

@@ -106,6 +106,26 @@ interface RegistryBinaryTemplateCache {
   templates: RegistryBinaryTemplate[];
 }
 
+interface RegistryLauncherDistribution {
+  packageName: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
+interface RegistryAgentLaunchTemplate {
+  agentId: string;
+  agentName: string;
+  version: string;
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
+interface RegistryAgentLaunchTemplateCache {
+  fetchedAtMs: number;
+  templates: RegistryAgentLaunchTemplate[];
+}
+
 const AUTH_FAILURE_RETRY_BACKOFF_MS = 30_000;
 const ACP_REGISTRY_URL =
   'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json';
@@ -485,6 +505,7 @@ export class AcpService {
   >();
   private readonly launchRetryBackoffBySignature = new Map<string, LaunchRetryBackoff>();
   private registryBinaryTemplateCache: RegistryBinaryTemplateCache | null = null;
+  private registryAgentLaunchTemplateCache: RegistryAgentLaunchTemplateCache | null = null;
   private readonly registryBinaryInstallPromises = new Map<string, Promise<string>>();
   private permissionCounter = 0;
 
@@ -567,6 +588,7 @@ export class AcpService {
     request: AcpPrepareAgentRequest,
   ): Promise<AcpPrepareAgentResult> {
     const launchConfig = await this.toLaunchConfig(request.config, request.cwd);
+    await this.prepareRegistryManagedPackageLauncher(launchConfig);
 
     return {
       prepared: launchConfig.command.trim().length > 0,
@@ -1568,6 +1590,196 @@ export class AcpService {
     return templates;
   }
 
+  private toRegistryLauncherDistribution(
+    value: unknown,
+  ): RegistryLauncherDistribution | null {
+    if (!isRecord(value)) {
+      return null;
+    }
+
+    const packageName =
+      typeof value.package === 'string' ? value.package.trim() : '';
+    if (!packageName) {
+      return null;
+    }
+
+    return {
+      packageName,
+      args: Array.isArray(value.args)
+        ? value.args
+            .filter((item): item is string => typeof item === 'string')
+            .map((item) => item.trim())
+            .filter((item) => item.length > 0)
+        : [],
+      env: isRecord(value.env)
+        ? Object.fromEntries(
+            Object.entries(value.env)
+              .filter(([, entryValue]): entryValue is string => typeof entryValue === 'string')
+              .map(([key, entryValue]) => [key, entryValue]),
+          )
+        : undefined,
+    };
+  }
+
+  private shouldPreferRegistryBinaryTemplate(agentId: string): boolean {
+    return agentId === 'codex-acp' || agentId === 'claude-acp' || agentId === 'claude-agent-acp';
+  }
+
+  private async loadRegistryAgentLaunchTemplates(): Promise<RegistryAgentLaunchTemplate[]> {
+    if (
+      this.registryAgentLaunchTemplateCache &&
+      Date.now() - this.registryAgentLaunchTemplateCache.fetchedAtMs < ACP_REGISTRY_CACHE_TTL_MS
+    ) {
+      return this.registryAgentLaunchTemplateCache.templates;
+    }
+
+    const payload = await this.fetchJsonFromUrl(ACP_REGISTRY_URL);
+    if (!isRecord(payload) || !Array.isArray(payload.agents)) {
+      this.registryAgentLaunchTemplateCache = {
+        fetchedAtMs: Date.now(),
+        templates: [],
+      };
+      return [];
+    }
+
+    const platformKeyCandidates = this.toRegistryPlatformKeyCandidates();
+    const templates: RegistryAgentLaunchTemplate[] = [];
+
+    for (const entry of payload.agents) {
+      if (!isRecord(entry)) {
+        continue;
+      }
+
+      const agentId = typeof entry.id === 'string' ? entry.id.trim() : '';
+      const agentName = typeof entry.name === 'string' ? entry.name.trim() : agentId;
+      if (!agentId) {
+        continue;
+      }
+
+      const version = typeof entry.version === 'string' ? entry.version.trim() : '';
+      const distribution = isRecord(entry.distribution) ? entry.distribution : undefined;
+      if (!distribution) {
+        continue;
+      }
+
+      const preferBinaryTemplate = this.shouldPreferRegistryBinaryTemplate(agentId);
+      const binaryDistribution = isRecord(distribution.binary) ? distribution.binary : null;
+      let binaryTarget: RegistryBinaryDistributionTarget | null = null;
+
+      if (binaryDistribution) {
+        for (const key of platformKeyCandidates) {
+          const rawTarget = binaryDistribution[key];
+          if (!isRecord(rawTarget)) {
+            continue;
+          }
+
+          const command = typeof rawTarget.cmd === 'string' ? rawTarget.cmd.trim() : '';
+          if (!command) {
+            continue;
+          }
+
+          binaryTarget = {
+            archive:
+              typeof rawTarget.archive === 'string'
+                ? rawTarget.archive.trim()
+                : undefined,
+            cmd: command,
+            args: Array.isArray(rawTarget.args)
+              ? rawTarget.args
+                  .filter((item): item is string => typeof item === 'string')
+                  .map((item) => item.trim())
+                  .filter((item) => item.length > 0)
+              : undefined,
+          };
+          break;
+        }
+
+        if (!binaryTarget) {
+          for (const rawTarget of Object.values(binaryDistribution)) {
+            if (!isRecord(rawTarget)) {
+              continue;
+            }
+
+            const command = typeof rawTarget.cmd === 'string' ? rawTarget.cmd.trim() : '';
+            if (!command) {
+              continue;
+            }
+
+            binaryTarget = {
+              archive:
+                typeof rawTarget.archive === 'string'
+                  ? rawTarget.archive.trim()
+                  : undefined,
+              cmd: command,
+              args: Array.isArray(rawTarget.args)
+                ? rawTarget.args
+                    .filter((item): item is string => typeof item === 'string')
+                    .map((item) => item.trim())
+                    .filter((item) => item.length > 0)
+                : undefined,
+            };
+            break;
+          }
+        }
+      }
+
+      const npxDistribution = this.toRegistryLauncherDistribution(distribution.npx);
+      const uvxDistribution = this.toRegistryLauncherDistribution(distribution.uvx);
+
+      if (preferBinaryTemplate && binaryTarget?.cmd) {
+        templates.push({
+          agentId,
+          agentName: agentName || agentId,
+          version,
+          command: binaryTarget.cmd,
+          args: binaryTarget.args ?? [],
+        });
+        continue;
+      }
+
+      if (npxDistribution) {
+        templates.push({
+          agentId,
+          agentName: agentName || agentId,
+          version,
+          command: 'npx',
+          args: ['-y', npxDistribution.packageName, ...npxDistribution.args],
+          env: npxDistribution.env,
+        });
+        continue;
+      }
+
+      if (uvxDistribution) {
+        templates.push({
+          agentId,
+          agentName: agentName || agentId,
+          version,
+          command: 'uvx',
+          args: [uvxDistribution.packageName, ...uvxDistribution.args],
+          env: uvxDistribution.env,
+        });
+        continue;
+      }
+
+      if (binaryTarget?.cmd) {
+        templates.push({
+          agentId,
+          agentName: agentName || agentId,
+          version,
+          command: binaryTarget.cmd,
+          args: binaryTarget.args ?? [],
+        });
+      }
+    }
+
+    this.registryAgentLaunchTemplateCache = {
+      fetchedAtMs: Date.now(),
+      templates,
+    };
+
+    return templates;
+  }
+
   private async resolveRegistryBinaryRelativeCommand(
     command: string,
     args: string[],
@@ -1644,7 +1856,7 @@ export class AcpService {
   }
 
   private async resolveRegistryManagedAgentLaunchConfig(
-    agentId: string,
+    agentId: string | string[],
     cwd: string,
     config?: {
       args?: string[];
@@ -1652,17 +1864,21 @@ export class AcpService {
       env?: Record<string, string>;
     },
   ): Promise<AgentProcessLaunchConfig | null> {
-    let templates: RegistryBinaryTemplate[] = [];
+    let templates: RegistryAgentLaunchTemplate[] = [];
     try {
-      templates = await this.loadRegistryBinaryTemplates();
+      templates = await this.loadRegistryAgentLaunchTemplates();
     } catch (error) {
       console.warn(
-        `[acp:${agentId}] failed to load ACP registry metadata: ${toErrorMessage(error)}`,
+        `[acp:${Array.isArray(agentId) ? agentId.join(',') : agentId}] failed to load ACP registry metadata: ${toErrorMessage(error)}`,
       );
       return null;
     }
 
-    const selectedTemplate = templates.find((template) => template.agentId === agentId) ?? null;
+    const agentIds = Array.isArray(agentId) ? agentId : [agentId];
+    const selectedTemplate =
+      agentIds
+        .map((candidateId) => templates.find((template) => template.agentId === candidateId) ?? null)
+        .find((template): template is RegistryAgentLaunchTemplate => template !== null) ?? null;
     if (!selectedTemplate) {
       return null;
     }
@@ -1676,13 +1892,16 @@ export class AcpService {
           command: selectedTemplate.command,
           args: launchArgs,
           cwd: config?.cwd,
-          env: config?.env,
+          env: {
+            ...(selectedTemplate.env ?? {}),
+            ...(config?.env ?? {}),
+          },
         },
         cwd,
       );
     } catch (error) {
       console.warn(
-        `[acp:${agentId}] failed to resolve registry-managed launch config: ${toErrorMessage(error)}`,
+        `[acp:${agentIds.join(',')}] failed to resolve registry-managed launch config: ${toErrorMessage(error)}`,
       );
       return null;
     }
@@ -1983,6 +2202,74 @@ export class AcpService {
     return null;
   }
 
+  private resolveKnownNpxPackageSpec(args: string[]): string | null {
+    for (const rawEntry of args) {
+      const entry = rawEntry.trim();
+      if (!entry || entry === '-y' || entry === '--yes') {
+        continue;
+      }
+
+      if (entry.startsWith('-')) {
+        continue;
+      }
+
+      return entry;
+    }
+
+    return null;
+  }
+
+  private async prepareRegistryManagedPackageLauncher(
+    launchConfig: AgentProcessLaunchConfig,
+  ): Promise<void> {
+    const commandToken = path.basename(launchConfig.command).replace(/\.exe$/i, '').toLowerCase();
+    if (commandToken !== 'npx') {
+      return;
+    }
+
+    const packageSpec = this.resolveKnownNpxPackageSpec(launchConfig.args);
+    if (!packageSpec) {
+      return;
+    }
+
+    const npmCommand =
+      this.resolveCommandOnPath('npm') ??
+      this.resolveCommandOnLoginShell('npm');
+    if (!npmCommand) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        npmCommand,
+        ['exec', '--yes', `--package=${packageSpec}`, '--', 'node', '-e', ''],
+        {
+          cwd: launchConfig.cwd,
+          env: launchConfig.env,
+          windowsHide: true,
+          stdio: ['ignore', 'ignore', 'pipe'],
+        },
+      );
+
+      let stderr = '';
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk: string) => {
+        stderr += chunk;
+      });
+      child.on('error', (error) => {
+        reject(error);
+      });
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+
+        reject(new Error(stderr.trim() || `npm exec exited with status ${String(code)}`));
+      });
+    });
+  }
+
   private resolveKnownCommandFallback(
     command: string,
     args: string[],
@@ -2092,12 +2379,39 @@ export class AcpService {
     rawCommand: string,
     resolvedCommand: string,
   ): boolean {
+    return this.shouldPreferRegistryManagedAdapterCommand(rawCommand, resolvedCommand, {
+      commandTokens: ['codex-acp'],
+      packageSegments: ['@zed-industries/codex-acp'],
+    });
+  }
+
+  private shouldPreferRegistryManagedClaudeCommand(
+    rawCommand: string,
+    resolvedCommand: string,
+  ): boolean {
+    return this.shouldPreferRegistryManagedAdapterCommand(rawCommand, resolvedCommand, {
+      commandTokens: ['claude-acp', 'claude-agent-acp'],
+      packageSegments: ['@zed-industries/claude-agent-acp'],
+    });
+  }
+
+  private shouldPreferRegistryManagedAdapterCommand(
+    rawCommand: string,
+    resolvedCommand: string,
+    {
+      commandTokens,
+      packageSegments,
+    }: {
+      commandTokens: string[];
+      packageSegments: string[];
+    },
+  ): boolean {
     const normalizedRaw = rawCommand.trim();
     const normalizedResolved = resolvedCommand.trim();
     const rawToken = path.basename(normalizedRaw).replace(/\.exe$/i, '').toLowerCase();
     const resolvedToken = path.basename(normalizedResolved).replace(/\.exe$/i, '').toLowerCase();
 
-    if (rawToken !== 'codex-acp' && resolvedToken !== 'codex-acp') {
+    if (!commandTokens.includes(rawToken) && !commandTokens.includes(resolvedToken)) {
       return false;
     }
 
@@ -2111,7 +2425,11 @@ export class AcpService {
 
     return (
       normalizedResolved.includes(`${path.sep}node_modules${path.sep}.bin${path.sep}`) ||
-      normalizedResolved.includes(`${path.sep}@zed-industries${path.sep}codex-acp`)
+      packageSegments.some((segment) =>
+        normalizedResolved.includes(
+          `${path.sep}${segment.split('/').join(path.sep)}`,
+        ),
+      )
     );
   }
 
@@ -2748,10 +3066,28 @@ export class AcpService {
 
     if (agent.kind === 'claude') {
       if (agent.config) {
+        let launchConfig = await this.toLaunchConfig(agent.config, cwd);
+        if (this.shouldPreferRegistryManagedClaudeCommand(agent.config.command, launchConfig.command)) {
+          const registryManagedLaunchConfig = await this.resolveRegistryManagedAgentLaunchConfig(
+            ['claude-acp', 'claude-agent-acp'],
+            cwd,
+            agent.config,
+          );
+          if (registryManagedLaunchConfig) {
+            launchConfig = registryManagedLaunchConfig;
+          }
+        }
+
+        return this.withClaudeCodeDefaults(this.withAdapterThreadLimits(launchConfig));
+      }
+
+      const registryManagedLaunchConfig = await this.resolveRegistryManagedAgentLaunchConfig(
+        ['claude-acp', 'claude-agent-acp'],
+        cwd,
+      );
+      if (registryManagedLaunchConfig) {
         return this.withClaudeCodeDefaults(
-          this.withAdapterThreadLimits(
-            await this.toLaunchConfig(agent.config, cwd),
-          ),
+          this.withAdapterThreadLimits(registryManagedLaunchConfig),
         );
       }
 
@@ -2783,8 +3119,25 @@ export class AcpService {
     packageName: string;
     binaryName: string;
     cwd: string;
+    preferBundled?: boolean;
   }): AgentProcessLaunchConfig {
     const launchCwd = this.resolveLaunchCwd(cwd);
+    const bundledScriptPath = this.resolveBundledAdapterScriptPath(packageName, binaryName);
+    const bundledLaunchConfig: AgentProcessLaunchConfig | null = bundledScriptPath
+      ? {
+          command: process.execPath,
+          args: [bundledScriptPath],
+          cwd: launchCwd,
+          env: {
+            ...process.env,
+            ELECTRON_RUN_AS_NODE: '1',
+          },
+        }
+      : null;
+
+    if (preferBundled && bundledLaunchConfig) {
+      return bundledLaunchConfig;
+    }
 
     const onPathCommand = this.resolveCommandOnPath(binaryName);
     if (onPathCommand) {
@@ -2806,18 +3159,8 @@ export class AcpService {
       };
     }
 
-    const bundledScriptPath = this.resolveBundledAdapterScriptPath(packageName, binaryName);
-
-    if (bundledScriptPath) {
-      return {
-        command: process.execPath,
-        args: [bundledScriptPath],
-        cwd: launchCwd,
-        env: {
-          ...process.env,
-          ELECTRON_RUN_AS_NODE: '1',
-        },
-      };
+    if (bundledLaunchConfig) {
+      return bundledLaunchConfig;
     }
 
     return {

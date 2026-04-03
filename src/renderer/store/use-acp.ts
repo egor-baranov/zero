@@ -8,6 +8,7 @@ import type {
 import { readStoredMcpServers, toAcpMcpServers } from '@renderer/store/mcp-servers';
 import type {
   AcpAgentConfig,
+  AcpAvailableCommand,
   AcpConnectionState,
   AcpCustomAgentConfig,
   AcpAuthenticateResult,
@@ -49,6 +50,58 @@ const FILE_MUTATION_TOOL_KIND_TOKENS = [
   'patch',
   'replace',
 ] as const;
+
+const normalizeAvailableCommandName = (name: string): string =>
+  name.trim().replace(/^\/+/, '');
+
+const normalizeAvailableCommands = (
+  commands: AcpAvailableCommand[],
+): AcpAvailableCommand[] => {
+  const byName = new Map<string, AcpAvailableCommand>();
+
+  for (const command of commands) {
+    const normalizedName = normalizeAvailableCommandName(command.name);
+    const lookupKey = normalizedName.toLowerCase();
+    if (!normalizedName || byName.has(lookupKey)) {
+      continue;
+    }
+
+    byName.set(lookupKey, {
+      ...command,
+      name: normalizedName,
+      description: command.description?.trim() ?? '',
+      input:
+        command.input?.hint?.trim()
+          ? {
+              ...command.input,
+              hint: command.input.hint.trim(),
+            }
+          : null,
+    });
+  }
+
+  return Array.from(byName.values()).sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
+};
+
+const areAvailableCommandsEqual = (
+  left: AcpAvailableCommand[],
+  right: AcpAvailableCommand[],
+): boolean => {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((command, index) => {
+    const other = right[index];
+    return (
+      command.name === other.name &&
+      command.description === other.description &&
+      (command.input?.hint ?? '') === (other.input?.hint ?? '')
+    );
+  });
+};
 
 export type AcpAgentPreset = 'mock' | 'codex' | 'claude' | 'custom';
 
@@ -135,6 +188,7 @@ interface UseAcpResult {
   threadSessionTitleById: Record<string, string>;
   threadSessionUpdatedAtById: Record<string, number>;
   activeSessionControls: AcpSessionControls | null;
+  activeAvailableCommands: AcpAvailableCommand[];
   pendingPermission: AcpPermissionRequestEvent | null;
   setAgentPreset: (preset: AcpAgentPreset) => void;
   setThreadAgentSelection: (threadId: string, selection: ThreadAgentSelection) => void;
@@ -1252,6 +1306,9 @@ export const useAcp = (selectedThreadId: string): UseAcpResult => {
   const [sessionControlsBySessionId, setSessionControlsBySessionId] = React.useState<
     Record<string, AcpSessionControls>
   >({});
+  const [availableCommandsBySessionId, setAvailableCommandsBySessionId] = React.useState<
+    Record<string, AcpAvailableCommand[]>
+  >({});
   const [connectionState, setConnectionState] =
     React.useState<AcpConnectionState>('disconnected');
   const [connectionMessage, setConnectionMessage] = React.useState<string | null>(null);
@@ -1599,6 +1656,20 @@ export const useAcp = (selectedThreadId: string): UseAcpResult => {
             [event.sessionId]: updated,
           };
         });
+        if (event.update.sessionUpdate === 'available_commands_update') {
+          const nextCommands = normalizeAvailableCommands(event.update.availableCommands);
+          setAvailableCommandsBySessionId((previous) => {
+            const current = previous[event.sessionId] ?? [];
+            if (areAvailableCommandsEqual(current, nextCommands)) {
+              return previous;
+            }
+
+            return {
+              ...previous,
+              [event.sessionId]: nextCommands,
+            };
+          });
+        }
 
         if (
           nextToolCallItemForSnapshots &&
@@ -2037,6 +2108,15 @@ export const useAcp = (selectedThreadId: string): UseAcpResult => {
           delete next[existingSessionId];
           return next;
         });
+        setAvailableCommandsBySessionId((previous) => {
+          if (!(existingSessionId in previous)) {
+            return previous;
+          }
+
+          const next = { ...previous };
+          delete next[existingSessionId];
+          return next;
+        });
       }
 
       let created: AcpSessionNewResult;
@@ -2464,6 +2544,15 @@ export const useAcp = (selectedThreadId: string): UseAcpResult => {
         delete next[sessionId];
         return next;
       });
+      setAvailableCommandsBySessionId((previous) => {
+        if (!(sessionId in previous)) {
+          return previous;
+        }
+
+        const next = { ...previous };
+        delete next[sessionId];
+        return next;
+      });
     },
     [setActiveSessionIdSafely],
   );
@@ -2581,6 +2670,13 @@ export const useAcp = (selectedThreadId: string): UseAcpResult => {
 
     return sessionControlsBySessionId[activeSessionId] ?? null;
   }, [activeSessionId, sessionControlsBySessionId]);
+  const activeAvailableCommands = React.useMemo(() => {
+    if (!activeSessionId) {
+      return [];
+    }
+
+    return availableCommandsBySessionId[activeSessionId] ?? [];
+  }, [activeSessionId, availableCommandsBySessionId]);
 
   return {
     connectionState,
@@ -2602,6 +2698,7 @@ export const useAcp = (selectedThreadId: string): UseAcpResult => {
     threadSessionTitleById,
     threadSessionUpdatedAtById,
     activeSessionControls,
+    activeAvailableCommands,
     pendingPermission,
     setAgentPreset,
     setThreadAgentSelection,

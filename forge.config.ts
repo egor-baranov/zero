@@ -13,19 +13,87 @@ const appleSigningIdentity = process.env.APPLE_SIGNING_IDENTITY?.trim();
 const appleId = process.env.APPLE_ID?.trim();
 const appleAppSpecificPassword = process.env.APPLE_APP_SPECIFIC_PASSWORD?.trim();
 const appleTeamId = process.env.APPLE_TEAM_ID?.trim();
+const buildPlatform = process.env.npm_config_platform?.trim() || process.platform;
+const buildArch = process.env.npm_config_arch?.trim() || process.arch;
+
+const resolveCodexPlatformPackagePath = (): string | null => {
+  if (buildPlatform === 'darwin') {
+    if (buildArch === 'arm64') {
+      return '/node_modules/@zed-industries/codex-acp-darwin-arm64';
+    }
+    if (buildArch === 'x64') {
+      return '/node_modules/@zed-industries/codex-acp-darwin-x64';
+    }
+    return null;
+  }
+
+  if (buildPlatform === 'linux') {
+    if (buildArch === 'arm64') {
+      return '/node_modules/@zed-industries/codex-acp-linux-arm64';
+    }
+    if (buildArch === 'x64') {
+      return '/node_modules/@zed-industries/codex-acp-linux-x64';
+    }
+    return null;
+  }
+
+  if (buildPlatform === 'win32') {
+    if (buildArch === 'arm64') {
+      return '/node_modules/@zed-industries/codex-acp-win32-arm64';
+    }
+    if (buildArch === 'x64') {
+      return '/node_modules/@zed-industries/codex-acp-win32-x64';
+    }
+    return null;
+  }
+
+  return null;
+};
+
+const packagedRuntimePathPrefixes = [
+  '/.vite',
+  '/package.json',
+  '/node_modules/node-pty/package.json',
+  '/node_modules/node-pty/lib',
+  '/node_modules/node-pty/build/Release',
+  `/node_modules/node-pty/prebuilds/${buildPlatform}-${buildArch}`,
+  '/node_modules/@zed-industries/codex-acp',
+]
+  .concat(resolveCodexPlatformPackagePath() ?? [])
+  .filter((value, index, entries) => entries.indexOf(value) === index);
+
+const normalizePackagedPath = (file: string): string => {
+  if (!file) {
+    return '/';
+  }
+
+  const normalized = file.replaceAll('\\', '/');
+  if (normalized === '/') {
+    return normalized;
+  }
+
+  return normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
+};
+
+const isAllowedPackagedPath = (file: string): boolean => {
+  const normalizedFile = normalizePackagedPath(file);
+  return packagedRuntimePathPrefixes.some((prefix) => {
+    const normalizedPrefix = normalizePackagedPath(prefix);
+    return (
+      normalizedFile === normalizedPrefix ||
+      normalizedFile.startsWith(`${normalizedPrefix}/`) ||
+      normalizedPrefix.startsWith(`${normalizedFile}/`)
+    );
+  });
+};
 
 const shouldIgnorePackagedFile = (file: string): boolean => {
   if (!file) {
     return false;
   }
 
-  // Include Vite bundles, package metadata, and production dependencies.
-  // ACP adapters (including scoped packages) and native modules must be present at runtime.
-  if (
-    file.startsWith('/.vite') ||
-    file === '/package.json' ||
-    file.startsWith('/node_modules')
-  ) {
+  // Keep only the built app bundle plus dynamic runtime modules that cannot be statically bundled.
+  if (isAllowedPackagedPath(file)) {
     return false;
   }
 

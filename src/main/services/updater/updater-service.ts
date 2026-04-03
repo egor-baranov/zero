@@ -38,10 +38,12 @@ const PACKAGE_REPOSITORY_URL = toRepositoryUrlFromPackageJson(
 const DEFAULT_UPDATE_REPOSITORY_URL =
   PACKAGE_REPOSITORY_URL || 'https://github.com/REPLACE_ME_OWNER/REPLACE_ME_REPO';
 
+const normalizeUrl = (value: string): string => value.trim().replace(/\/+$/g, '');
+
 const parseGitHubRepository = (
   repositoryUrl: string,
 ): { owner: string; repo: string } | null => {
-  const trimmed = repositoryUrl.trim();
+  const trimmed = normalizeUrl(repositoryUrl);
   if (!trimmed) {
     return null;
   }
@@ -60,6 +62,26 @@ const parseGitHubRepository = (
   }
 
   return { owner, repo };
+};
+
+const toDefaultUpdateFeedUrl = (repositoryUrl: string): string => {
+  const parsed = parseGitHubRepository(repositoryUrl);
+  if (!parsed) {
+    return '';
+  }
+
+  const normalizedOwner = parsed.owner.trim();
+  const normalizedRepo = parsed.repo.trim();
+  if (!normalizedOwner || !normalizedRepo) {
+    return '';
+  }
+
+  const lowerOwner = normalizedOwner.toLowerCase();
+  const lowerRepo = normalizedRepo.toLowerCase();
+  const isUserOrOrgPagesRepository = lowerRepo === `${lowerOwner}.github.io`;
+  const repositoryPath = isUserOrOrgPagesRepository ? '' : `/${normalizedRepo}`;
+
+  return `https://${normalizedOwner}.github.io${repositoryPath}/updates/${process.platform}/${process.arch}`;
 };
 
 const isPlaceholderRepository = (repositoryUrl: string): boolean =>
@@ -87,14 +109,19 @@ type UpdaterListener = (event: UpdaterRendererEvent) => void;
 export class UpdaterService {
   private readonly listeners = new Set<UpdaterListener>();
   private readonly repositoryUrl: string;
+  private readonly updateFeedUrl: string;
   private state: UpdaterState;
   private started = false;
   private isConfigured = false;
   private checkInterval: NodeJS.Timeout | null = null;
 
   constructor() {
-    this.repositoryUrl =
-      process.env.ZEROADE_UPDATE_REPOSITORY_URL?.trim() || DEFAULT_UPDATE_REPOSITORY_URL;
+    this.repositoryUrl = normalizeUrl(
+      process.env.ZEROADE_UPDATE_REPOSITORY_URL?.trim() || DEFAULT_UPDATE_REPOSITORY_URL,
+    );
+    this.updateFeedUrl = normalizeUrl(
+      process.env.ZEROADE_UPDATE_BASE_URL?.trim() || toDefaultUpdateFeedUrl(this.repositoryUrl),
+    );
 
     this.state = {
       status: 'idle',
@@ -104,7 +131,7 @@ export class UpdaterService {
       message: 'Updater idle',
       isPackaged: app.isPackaged,
       isConfigured: false,
-      repositoryUrl: this.repositoryUrl,
+      repositoryUrl: this.updateFeedUrl || this.repositoryUrl,
       lastCheckedAtMs: null,
     };
   }
@@ -141,11 +168,15 @@ export class UpdaterService {
     }
 
     const parsed = parseGitHubRepository(this.repositoryUrl);
-    if (!parsed || isPlaceholderRepository(this.repositoryUrl)) {
+    const canUseGitHubReleases =
+      Boolean(parsed) && !isPlaceholderRepository(this.repositoryUrl);
+    const canUseGenericFeed = this.updateFeedUrl.length > 0;
+
+    if (!canUseGenericFeed && !canUseGitHubReleases) {
       this.updateState({
         status: 'disabled',
         message:
-          'Auto-update is not configured. Set package.json repository.url or ZEROADE_UPDATE_REPOSITORY_URL to your public GitHub repo URL.',
+          'Auto-update is not configured. Set ZEROADE_UPDATE_BASE_URL or package.json repository.url to a public GitHub repository.',
       });
       return;
     }
@@ -155,19 +186,26 @@ export class UpdaterService {
     autoUpdater.allowDowngrade = false;
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
-    autoUpdater.setFeedURL({
-      provider: 'github',
-      owner: parsed.owner,
-      repo: parsed.repo,
-      private: false,
-    });
+    if (canUseGenericFeed) {
+      autoUpdater.setFeedURL({
+        provider: 'generic',
+        url: this.updateFeedUrl,
+      });
+    } else if (parsed) {
+      autoUpdater.setFeedURL({
+        provider: 'github',
+        owner: parsed.owner,
+        repo: parsed.repo,
+        private: false,
+      });
+    }
 
     this.attachAutoUpdaterListeners();
     this.updateState({
       status: 'idle',
       isConfigured: true,
       message: 'Auto-update ready',
-      repositoryUrl: this.repositoryUrl,
+      repositoryUrl: this.updateFeedUrl || this.repositoryUrl,
     });
 
     setTimeout(() => {
@@ -206,13 +244,13 @@ export class UpdaterService {
       this.updateState({
         status: 'disabled',
         message:
-          'Auto-update is not configured. Set package.json repository.url or ZEROADE_UPDATE_REPOSITORY_URL to your public GitHub repo URL.',
+          'Auto-update is not configured. Set ZEROADE_UPDATE_BASE_URL or package.json repository.url to a public GitHub repository.',
       });
 
       return {
         ok: false,
         message:
-          'Updater is not configured. Set package.json repository.url or ZEROADE_UPDATE_REPOSITORY_URL to your GitHub releases repository URL.',
+          'Updater is not configured. Set ZEROADE_UPDATE_BASE_URL or package.json repository.url to your public update feed.',
         state: this.state,
       };
     }
@@ -385,7 +423,7 @@ export class UpdaterService {
       isPackaged: app.isPackaged,
       isConfigured: this.isConfigured && app.isPackaged,
       currentVersion: app.getVersion(),
-      repositoryUrl: this.repositoryUrl,
+      repositoryUrl: this.updateFeedUrl || this.repositoryUrl,
     };
 
     const event: UpdaterRendererEvent = {

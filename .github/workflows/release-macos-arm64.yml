@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   build-macos-arm64:
@@ -90,14 +92,12 @@ jobs:
           APP_BIN="${APP_PATH}/Contents/MacOS/Zero"
           RESOURCES_DIR="${APP_PATH}/Contents/Resources"
           CODEX_BIN="${RESOURCES_DIR}/app.asar.unpacked/node_modules/@zed-industries/codex-acp-darwin-arm64/bin/codex-acp"
-          CLAUDE_ENTRY="${RESOURCES_DIR}/app.asar.unpacked/node_modules/@zed-industries/claude-agent-acp/dist/index.js"
           NODE_PTY_BIN="${RESOURCES_DIR}/app.asar.unpacked/node_modules/node-pty/build/Release/pty.node"
 
           REQUIRED_PATHS=(
             "${APP_BIN}"
             "${RESOURCES_DIR}/app.asar"
             "${CODEX_BIN}"
-            "${CLAUDE_ENTRY}"
             "${NODE_PTY_BIN}"
           )
 
@@ -116,10 +116,13 @@ jobs:
             echo "Codex ACP binary is not executable: ${CODEX_BIN}" >&2
             exit 1
           fi
+          if [[ -e "${RESOURCES_DIR}/app.asar.unpacked/node_modules/@zed-industries/claude-agent-acp" ]]; then
+            echo "Bundled Claude ACP payload should not be present in packaged app." >&2
+            exit 1
+          fi
 
           "${CODEX_BIN}" --help >/dev/null
           ELECTRON_RUN_AS_NODE=1 "${APP_BIN}" -e "console.log('smoke-node-ok')" | grep -q "smoke-node-ok"
-          ELECTRON_RUN_AS_NODE=1 "${APP_BIN}" "${CLAUDE_ENTRY}" --help >/dev/null
 
           if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
             codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
@@ -171,25 +174,40 @@ jobs:
 
           RELEASE_DIR="out/release-assets"
           mkdir -p "${RELEASE_DIR}"
-          STABLE_ZIP="${RELEASE_DIR}/Zero-darwin-arm64.zip"
           STABLE_DMG="${RELEASE_DIR}/Zero-darwin-arm64.dmg"
-          cp "${ZIP_PATH}" "${STABLE_ZIP}"
           cp "${DMG_PATH}" "${STABLE_DMG}"
 
+          UPDATE_SITE_DIR="out/update-site"
+          UPDATE_FEED_DIR="${UPDATE_SITE_DIR}/updates/darwin/arm64"
+          mkdir -p "${UPDATE_FEED_DIR}"
+          STABLE_ZIP="${UPDATE_FEED_DIR}/Zero-darwin-arm64.zip"
+          cp "${ZIP_PATH}" "${STABLE_ZIP}"
+
           VERSION="$(node -p "require('./package.json').version")"
-          node scripts/generate-latest-mac-yml.mjs "${STABLE_ZIP}" "${VERSION}" latest-mac.yml
+          node scripts/generate-latest-mac-yml.mjs "${STABLE_ZIP}" "${VERSION}" "${UPDATE_FEED_DIR}/latest-mac.yml"
 
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "zip_file=${STABLE_ZIP}" >> "${GITHUB_OUTPUT}"
           echo "dmg_file=${STABLE_DMG}" >> "${GITHUB_OUTPUT}"
-          echo "update_file=${RELEASE_DIR}/latest-mac.yml" >> "${GITHUB_OUTPUT}"
+          echo "update_site_dir=${UPDATE_SITE_DIR}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: zero-macos-arm64
-          path: out/release-assets
+          path: |
+            out/release-assets
+            out/update-site
           if-no-files-found: error
+
+      - name: Configure GitHub Pages
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/configure-pages@v5
+
+      - name: Upload update feed artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ steps.prepare.outputs.update_site_dir }}
 
       - name: Publish GitHub release assets
         if: startsWith(github.ref, 'refs/tags/v')
@@ -204,5 +222,18 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: |
             ${{ steps.prepare.outputs.dmg_file }}
-            ${{ steps.prepare.outputs.zip_file }}
-            ${{ steps.prepare.outputs.update_file }}
+
+  deploy-update-feed:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-macos-arm64
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy update feed
+        id: deployment
+        uses: actions/deploy-pages@v4

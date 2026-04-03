@@ -55,6 +55,7 @@ import {
 } from '@renderer/lib/attachment-mentions';
 import { toFileIconComponent } from '@renderer/lib/code-language-icons';
 import type {
+  AcpAvailableCommand,
   AcpCustomAgentConfig,
   AcpPromptAudioContent,
   AcpPromptAttachment,
@@ -95,6 +96,7 @@ interface ComposerProps {
   ) => Promise<void>;
   promptCapabilities: AcpPromptCapabilities;
   sessionControls: AcpSessionControls | null;
+  availableCommands: AcpAvailableCommand[];
   onSetSessionMode: (modeId: string) => Promise<void>;
   onSetSessionModel: (modelId: string) => Promise<void>;
   onSetSessionConfigOption: (
@@ -117,6 +119,18 @@ interface ComposerAttachmentSearchItem {
   displayPath: string;
   fileName: string;
   directoryPath: string;
+}
+
+interface SlashCommandQueryMatch {
+  start: number;
+  end: number;
+  query: string;
+}
+
+interface ComposerSlashCommandSearchItem {
+  command: AcpAvailableCommand;
+  token: string;
+  inputHint: string;
 }
 
 interface ComposerControlOption {
@@ -649,8 +663,11 @@ const toBinaryKeyCandidates = (platform: NodeJS.Platform): string[] => {
   return [];
 };
 
+const isBuiltInClaudeRegistryAgentId = (agentId: string): boolean =>
+  agentId === 'claude-acp' || agentId === 'claude-agent-acp';
+
 const shouldPreferRegistryBinaryTemplate = (agentId: string): boolean =>
-  agentId === 'codex-acp';
+  agentId === 'codex-acp' || isBuiltInClaudeRegistryAgentId(agentId);
 
 const toExecutableCommand = (rawCommand: string): string => {
   const trimmed = rawCommand.trim();
@@ -939,6 +956,168 @@ const formatFileCount = (count: number): string => `${count.toLocaleString()} fi
 const toComposerAttachmentLabel = (attachment: ComposerAttachment | AttachmentMentionMatch['attachment']): string =>
   attachment.displayPath ?? attachment.relativePath ?? getFileName(attachment.absolutePath);
 
+const normalizeSlashCommandName = (name: string): string =>
+  name.trim().replace(/^\/+/, '');
+
+const toSlashCommandToken = (command: AcpAvailableCommand): string =>
+  `/${normalizeSlashCommandName(command.name)}`;
+
+const getActiveSlashCommandQuery = (
+  value: string,
+  selectionStart: number,
+  selectionEnd = selectionStart,
+): SlashCommandQueryMatch | null => {
+  if (selectionStart !== selectionEnd || selectionStart < 0 || selectionStart > value.length) {
+    return null;
+  }
+
+  let tokenStart = selectionStart;
+  while (tokenStart > 0) {
+    const previousCharacter = value.charAt(tokenStart - 1);
+    if (/\s/.test(previousCharacter)) {
+      break;
+    }
+    tokenStart -= 1;
+  }
+
+  if (value.charAt(tokenStart) !== '/') {
+    return null;
+  }
+
+  if (tokenStart > 0 && !/\s/.test(value.charAt(tokenStart - 1))) {
+    return null;
+  }
+
+  const token = value.slice(tokenStart, selectionStart);
+  if (token.length === 0 || token.slice(1).includes('/')) {
+    return null;
+  }
+
+  return {
+    start: tokenStart,
+    end: selectionStart,
+    query: token.slice(1),
+  };
+};
+
+const scoreSlashCommandSearchItem = (
+  item: ComposerSlashCommandSearchItem,
+  query: string,
+): number => {
+  const loweredQuery = query.trim().toLowerCase();
+  const loweredName = normalizeSlashCommandName(item.command.name).toLowerCase();
+  const loweredDescription = item.command.description.trim().toLowerCase();
+  const loweredHint = item.inputHint.toLowerCase();
+
+  if (!loweredQuery) {
+    return 100 - Math.min(80, loweredName.length);
+  }
+
+  let score = 0;
+
+  if (loweredName === loweredQuery) {
+    score += 140;
+  }
+
+  if (loweredName.startsWith(loweredQuery)) {
+    score += 100;
+  }
+
+  const nameIndex = loweredName.indexOf(loweredQuery);
+  if (nameIndex >= 0) {
+    score += 70 - Math.min(40, nameIndex * 4);
+  }
+
+  if (loweredHint.startsWith(loweredQuery)) {
+    score += 24;
+  } else if (loweredHint.includes(loweredQuery)) {
+    score += 12;
+  }
+
+  if (loweredDescription.includes(loweredQuery)) {
+    score += 8;
+  }
+
+  return score;
+};
+
+const searchSlashCommands = (
+  commands: AcpAvailableCommand[],
+  query: string,
+  limit: number,
+): ComposerSlashCommandSearchItem[] =>
+  commands
+    .map((command) => {
+      const normalizedName = normalizeSlashCommandName(command.name);
+      if (!normalizedName) {
+        return null;
+      }
+
+      return {
+        command: {
+          ...command,
+          name: normalizedName,
+        },
+        token: toSlashCommandToken({
+          ...command,
+          name: normalizedName,
+        }),
+        inputHint: command.input?.hint?.trim() ?? '',
+      };
+    })
+    .filter((item): item is ComposerSlashCommandSearchItem => item !== null)
+    .map((item) => ({
+      item,
+      score: scoreSlashCommandSearchItem(item, query),
+    }))
+    .filter(({ score }) => score > 0 || query.trim().length === 0)
+    .sort((left, right) => right.score - left.score || left.item.token.localeCompare(right.item.token))
+    .slice(0, limit)
+    .map(({ item }) => item);
+
+const insertSlashCommand = ({
+  text,
+  selectionStart,
+  selectionEnd,
+  command,
+  replaceStart = selectionStart,
+  replaceEnd = selectionEnd,
+}: {
+  text: string;
+  selectionStart: number;
+  selectionEnd: number;
+  command: AcpAvailableCommand;
+  replaceStart?: number;
+  replaceEnd?: number;
+}): {
+  text: string;
+  selectionStart: number;
+  selectionEnd: number;
+} => {
+  const normalizedName = normalizeSlashCommandName(command.name);
+  if (!normalizedName) {
+    return {
+      text,
+      selectionStart,
+      selectionEnd,
+    };
+  }
+
+  const prefix = text.slice(0, replaceStart);
+  const suffix = text.slice(replaceEnd);
+  const token = toSlashCommandToken(command);
+  const insertedText =
+    suffix.length === 0 || !/\s/.test(suffix.charAt(0)) ? `${token} ` : token;
+  const nextText = `${prefix}${insertedText}${suffix}`;
+  const nextCursor = prefix.length + insertedText.length;
+
+  return {
+    text: nextText,
+    selectionStart: nextCursor,
+    selectionEnd: nextCursor,
+  };
+};
+
 const removeMessageRange = (
   text: string,
   start: number,
@@ -1130,6 +1309,7 @@ export const Composer = ({
   onSubmit,
   promptCapabilities,
   sessionControls,
+  availableCommands,
   onSetSessionMode,
   onSetSessionModel,
   onSetSessionConfigOption,
@@ -1196,7 +1376,10 @@ export const Composer = ({
     end: 0,
   });
   const [activeAttachmentResultIndex, setActiveAttachmentResultIndex] = React.useState(0);
+  const [activeSlashCommandResultIndex, setActiveSlashCommandResultIndex] = React.useState(0);
   const [dismissedAttachmentQueryKey, setDismissedAttachmentQueryKey] =
+    React.useState<string | null>(null);
+  const [dismissedSlashCommandQueryKey, setDismissedSlashCommandQueryKey] =
     React.useState<string | null>(null);
   const [recordingDurationMs, setRecordingDurationMs] = React.useState(0);
   const [voiceVisualizerBars, setVoiceVisualizerBars] = React.useState<number[]>(
@@ -1208,6 +1391,8 @@ export const Composer = ({
   const messageMirrorRef = React.useRef<HTMLDivElement | null>(null);
   const attachmentSearchListRef = React.useRef<HTMLDivElement | null>(null);
   const activeAttachmentItemRef = React.useRef<HTMLButtonElement | null>(null);
+  const slashCommandSearchListRef = React.useRef<HTMLDivElement | null>(null);
+  const activeSlashCommandItemRef = React.useRef<HTMLButtonElement | null>(null);
   const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
   const mediaStreamRef = React.useRef<MediaStream | null>(null);
   const recordedVoiceChunksRef = React.useRef<Blob[]>([]);
@@ -1298,13 +1483,24 @@ export const Composer = ({
     () => getActiveAttachmentQuery(message, messageSelection.start, messageSelection.end),
     [message, messageSelection.end, messageSelection.start],
   );
+  const activeSlashCommandQuery = React.useMemo(
+    () => getActiveSlashCommandQuery(message, messageSelection.start, messageSelection.end),
+    [message, messageSelection.end, messageSelection.start],
+  );
   const activeAttachmentQueryKey = activeAttachmentQuery
     ? `${activeAttachmentQuery.start}:${activeAttachmentQuery.end}:${activeAttachmentQuery.query}`
+    : null;
+  const activeSlashCommandQueryKey = activeSlashCommandQuery
+    ? `${activeSlashCommandQuery.start}:${activeSlashCommandQuery.end}:${activeSlashCommandQuery.query}`
     : null;
   const isAttachmentMenuVisible = Boolean(
     activeAttachmentQuery &&
       hasWorkspace &&
       activeAttachmentQueryKey !== dismissedAttachmentQueryKey,
+  );
+  const isSlashCommandMenuVisible = Boolean(
+    activeSlashCommandQuery &&
+      activeSlashCommandQueryKey !== dismissedSlashCommandQueryKey,
   );
   const attachmentSearchResults = React.useMemo<ComposerAttachmentSearchItem[]>(() => {
     if (!activeAttachmentQuery || workspaceFiles.length === 0) {
@@ -1319,10 +1515,24 @@ export const Composer = ({
       directoryPath: entry.directoryPath,
     }));
   }, [activeAttachmentQuery, currentPlatform, workspaceFiles, workspacePath]);
+  const slashCommandSearchResults = React.useMemo<ComposerSlashCommandSearchItem[]>(() => {
+    if (!activeSlashCommandQuery) {
+      return [];
+    }
+
+    return searchSlashCommands(availableCommands, activeSlashCommandQuery.query, 7);
+  }, [activeSlashCommandQuery, availableCommands]);
   const activeAttachmentSearchResult =
     attachmentSearchResults[activeAttachmentResultIndex] ?? attachmentSearchResults[0] ?? null;
+  const activeSlashCommandSearchResult =
+    slashCommandSearchResults[activeSlashCommandResultIndex] ??
+    slashCommandSearchResults[0] ??
+    null;
   const setActiveAttachmentItemRef = React.useCallback((node: HTMLButtonElement | null) => {
     activeAttachmentItemRef.current = node;
+  }, []);
+  const setActiveSlashCommandItemRef = React.useCallback((node: HTMLButtonElement | null) => {
+    activeSlashCommandItemRef.current = node;
   }, []);
   const applyMessageEdit = React.useCallback(
     (nextValue: {
@@ -1373,6 +1583,14 @@ export const Composer = ({
   }, [activeAttachmentQueryKey, dismissedAttachmentQueryKey]);
 
   React.useEffect(() => {
+    if (activeSlashCommandQueryKey === dismissedSlashCommandQueryKey) {
+      return;
+    }
+
+    setDismissedSlashCommandQueryKey(null);
+  }, [activeSlashCommandQueryKey, dismissedSlashCommandQueryKey]);
+
+  React.useEffect(() => {
     setActiveAttachmentResultIndex((previous) => {
       if (attachmentSearchResults.length === 0) {
         return 0;
@@ -1383,8 +1601,22 @@ export const Composer = ({
   }, [attachmentSearchResults]);
 
   React.useEffect(() => {
+    setActiveSlashCommandResultIndex((previous) => {
+      if (slashCommandSearchResults.length === 0) {
+        return 0;
+      }
+
+      return Math.min(previous, slashCommandSearchResults.length - 1);
+    });
+  }, [slashCommandSearchResults]);
+
+  React.useEffect(() => {
     setActiveAttachmentResultIndex(0);
   }, [activeAttachmentQueryKey]);
+
+  React.useEffect(() => {
+    setActiveSlashCommandResultIndex(0);
+  }, [activeSlashCommandQueryKey]);
 
   React.useEffect(() => {
     if (!isAttachmentMenuVisible) {
@@ -1410,6 +1642,31 @@ export const Composer = ({
       list.scrollTop += itemRect.bottom - listRect.bottom + scrollPadding;
     }
   }, [activeAttachmentResultIndex, activeAttachmentSearchResult, isAttachmentMenuVisible]);
+
+  React.useEffect(() => {
+    if (!isSlashCommandMenuVisible) {
+      return;
+    }
+
+    const list = slashCommandSearchListRef.current;
+    const item = activeSlashCommandItemRef.current;
+    if (!list || !item) {
+      return;
+    }
+
+    const listRect = list.getBoundingClientRect();
+    const itemRect = item.getBoundingClientRect();
+    const scrollPadding = 8;
+
+    if (itemRect.top < listRect.top) {
+      list.scrollTop -= listRect.top - itemRect.top + scrollPadding;
+      return;
+    }
+
+    if (itemRect.bottom > listRect.bottom) {
+      list.scrollTop += itemRect.bottom - listRect.bottom + scrollPadding;
+    }
+  }, [activeSlashCommandResultIndex, activeSlashCommandSearchResult, isSlashCommandMenuVisible]);
 
   React.useEffect(() => {
     if (attachments.length === 0) {
@@ -1494,7 +1751,7 @@ export const Composer = ({
     [registryAgents],
   );
   const claudeRegistryAgent = React.useMemo(
-    () => registryAgents.find((agent) => agent.id === 'claude-acp') ?? null,
+    () => registryAgents.find((agent) => isBuiltInClaudeRegistryAgentId(agent.id)) ?? null,
     [registryAgents],
   );
   const customRegistryAgent = React.useMemo(
@@ -2265,14 +2522,21 @@ export const Composer = ({
           : editingCustomAgentId === 'new'
             ? null
             : customEntry?.config ?? customAgentConfig;
-
-    const fallbackCommand =
-      editingAgentPreset === 'codex'
-        ? 'codex-acp'
+    const claudeFallbackTemplate = claudeRegistryAgent
+      ? toRegistryLaunchTemplate(claudeRegistryAgent, currentPlatform)
+      : null;
+    const initialConfig =
+      presetConfig ??
+      (editingAgentPreset === 'codex'
+        ? { command: 'codex-acp', args: [] }
         : editingAgentPreset === 'claude'
-          ? 'claude-agent-acp'
-          : '';
-    const initialConfig = presetConfig ?? { command: fallbackCommand, args: [] };
+          ? {
+              command: claudeFallbackTemplate?.command || 'npx',
+              args:
+                claudeFallbackTemplate?.args ?? ['-y', '@agentclientprotocol/claude-agent-acp'],
+              env: claudeFallbackTemplate?.env,
+            }
+          : { command: '', args: [] });
 
     setCustomCommand(initialConfig.command ?? '');
     setCustomArgs((initialConfig.args ?? []).join(' '));
@@ -2286,8 +2550,10 @@ export const Composer = ({
     );
   }, [
     claudeAgentConfig,
+    claudeRegistryAgent,
     codexAgentConfig,
     customAgentConfig,
+    currentPlatform,
     editingCustomAgentId,
     editingAgentPreset,
     isAgentDialogOpen,
@@ -2475,6 +2741,33 @@ export const Composer = ({
       );
     },
     [applyComposerAttachments],
+  );
+
+  const handleSelectSlashCommandSearchResult = React.useCallback(
+    (item: ComposerSlashCommandSearchItem): void => {
+      const textarea = messageInputRef.current;
+      const selectionStart = textarea?.selectionStart ?? messageSelection.start ?? message.length;
+      const selectionEnd = textarea?.selectionEnd ?? messageSelection.end ?? message.length;
+      const nextValue = insertSlashCommand({
+        text: message,
+        selectionStart,
+        selectionEnd,
+        command: item.command,
+        replaceStart: activeSlashCommandQuery ? activeSlashCommandQuery.start : selectionStart,
+        replaceEnd: activeSlashCommandQuery ? activeSlashCommandQuery.end : selectionEnd,
+      });
+
+      applyMessageEdit(nextValue);
+      setDismissedSlashCommandQueryKey(null);
+    },
+    [
+      activeSlashCommandQuery,
+      applyMessageEdit,
+      message,
+      message.length,
+      messageSelection.end,
+      messageSelection.start,
+    ],
   );
 
   const handleAddAttachmentPaths = React.useCallback(
@@ -3173,6 +3466,22 @@ export const Composer = ({
     [attachmentSearchResults.length],
   );
 
+  const moveActiveSlashCommandResult = React.useCallback(
+    (direction: -1 | 1): void => {
+      if (slashCommandSearchResults.length === 0) {
+        return;
+      }
+
+      setActiveSlashCommandResultIndex((previous) => {
+        const nextIndex =
+          (previous + direction + slashCommandSearchResults.length) %
+          slashCommandSearchResults.length;
+        return nextIndex;
+      });
+    },
+    [slashCommandSearchResults.length],
+  );
+
   const dismissAttachmentMenu = React.useCallback((): void => {
     if (!activeAttachmentQueryKey) {
       return;
@@ -3180,6 +3489,14 @@ export const Composer = ({
 
     setDismissedAttachmentQueryKey(activeAttachmentQueryKey);
   }, [activeAttachmentQueryKey]);
+
+  const dismissSlashCommandMenu = React.useCallback((): void => {
+    if (!activeSlashCommandQueryKey) {
+      return;
+    }
+
+    setDismissedSlashCommandQueryKey(activeSlashCommandQueryKey);
+  }, [activeSlashCommandQueryKey]);
 
   const syncMessageMirrorScroll = React.useCallback((): void => {
     const textarea = messageInputRef.current;
@@ -3345,7 +3662,66 @@ export const Composer = ({
           </div>
         ) : null}
 
-        {isAttachmentMenuVisible ? (
+        {isSlashCommandMenuVisible ? (
+          <div className="p-2">
+            <div
+              ref={slashCommandSearchListRef}
+              className="max-h-[224px] space-y-0.5 overflow-y-auto"
+            >
+              {slashCommandSearchResults.map((item, index) => {
+                const isActive = index === activeSlashCommandResultIndex;
+
+                return (
+                  <button
+                    key={item.token}
+                    ref={isActive ? setActiveSlashCommandItemRef : null}
+                    type="button"
+                    className={cn(
+                      'no-drag flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left transition-colors focus-visible:outline-none',
+                      isActive ? 'bg-stone-100/90' : 'bg-transparent',
+                    )}
+                    onMouseEnter={() => setActiveSlashCommandResultIndex(index)}
+                    onClick={() => handleSelectSlashCommandSearchResult(item)}
+                  >
+                    <span
+                      className={cn(
+                        'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-stone-500',
+                        isActive && 'text-stone-700',
+                      )}
+                    >
+                      <Bot className="h-3.5 w-3.5" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate leading-5">
+                        <span className="text-[13px] font-medium text-stone-700">
+                          {item.token}
+                        </span>
+                        {item.inputHint ? (
+                          <span className="ml-1.5 text-[11px] text-stone-400">
+                            {item.inputHint}
+                          </span>
+                        ) : null}
+                      </span>
+                      {item.command.description ? (
+                        <span className="block truncate text-[11px] leading-4 text-stone-500">
+                          {item.command.description}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                );
+              })}
+
+              {slashCommandSearchResults.length === 0 ? (
+                <div className="rounded-xl border border-stone-200 bg-stone-50/80 px-2.5 py-2 text-[12px] text-stone-500">
+                  {availableCommands.length === 0
+                    ? 'Current agent has not advertised slash commands.'
+                    : 'No matching slash commands.'}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : isAttachmentMenuVisible ? (
           <div className="p-2">
             <div
               ref={attachmentSearchListRef}
@@ -3441,6 +3817,7 @@ export const Composer = ({
               onChange={(event) => {
                 setMessage(event.target.value);
                 setDismissedAttachmentQueryKey(null);
+                setDismissedSlashCommandQueryKey(null);
                 window.requestAnimationFrame(() => {
                   syncMessageSelection();
                 });
@@ -3511,6 +3888,34 @@ export const Composer = ({
                     applyMessageEdit(deletionEdit);
                     return;
                   }
+                }
+
+                if (isSlashCommandMenuVisible && event.key === 'ArrowDown') {
+                  event.preventDefault();
+                  moveActiveSlashCommandResult(1);
+                  return;
+                }
+
+                if (isSlashCommandMenuVisible && event.key === 'ArrowUp') {
+                  event.preventDefault();
+                  moveActiveSlashCommandResult(-1);
+                  return;
+                }
+
+                if (
+                  isSlashCommandMenuVisible &&
+                  (event.key === 'Enter' || event.key === 'Tab') &&
+                  activeSlashCommandSearchResult
+                ) {
+                  event.preventDefault();
+                  handleSelectSlashCommandSearchResult(activeSlashCommandSearchResult);
+                  return;
+                }
+
+                if (isSlashCommandMenuVisible && event.key === 'Escape') {
+                  event.preventDefault();
+                  dismissSlashCommandMenu();
+                  return;
                 }
 
                 if (isAttachmentMenuVisible && event.key === 'ArrowDown') {

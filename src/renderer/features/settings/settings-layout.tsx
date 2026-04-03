@@ -650,8 +650,11 @@ const toBinaryKeyCandidates = (platform: NodeJS.Platform): string[] => {
   return [];
 };
 
+const isBuiltInClaudeRegistryAgentId = (agentId: string): boolean =>
+  agentId === 'claude-acp' || agentId === 'claude-agent-acp';
+
 const shouldPreferRegistryBinaryTemplate = (agentId: string): boolean =>
-  agentId === 'codex-acp';
+  agentId === 'codex-acp' || isBuiltInClaudeRegistryAgentId(agentId);
 
 const isLikelyRunnableCommand = (value: string): boolean => {
   if (!value) {
@@ -3504,7 +3507,7 @@ const AgentsSettingsSection = ({
       setRegistryInstallNotice(null);
 
       try {
-        if (launchTemplate.source === 'binary') {
+        if (launchTemplate.source === 'binary' || launchTemplate.source === 'npx') {
           await window.desktop.acpPrepareAgent({
             cwd: workspacePath,
             config: parsedConfig,
@@ -3538,7 +3541,7 @@ const AgentsSettingsSection = ({
       const builtInPreset =
         agent.id === 'codex-acp'
           ? 'codex'
-          : agent.id === 'claude-acp' || agent.id === 'claude-agent-acp'
+          : isBuiltInClaudeRegistryAgentId(agent.id)
             ? 'claude'
             : null;
 
@@ -3557,7 +3560,7 @@ const AgentsSettingsSection = ({
       setRegistryInstallNotice({
         tone: 'success',
         text:
-          launchTemplate.source === 'binary'
+          launchTemplate.source === 'binary' || launchTemplate.source === 'npx'
             ? builtInPreset
               ? `${agent.name} installed, configured for the built-in preset, and added to your agent library.`
               : `${agent.name} installed and added to your agent library.`
